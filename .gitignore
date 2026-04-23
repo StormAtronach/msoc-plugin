@@ -1,0 +1,20 @@
+# Visual Studio / VS Code
+.vs/
+*.user
+*.suo
+
+# CMake build trees
+/build/
+/out/
+
+# Build artifacts
+*.dll
+*.pdb
+*.lib
+*.exp
+*.obj
+*.ilk
+
+# Release staging
+/test-mod/MSOC Plugin Test Version/
+/test-mod/MSOC Plugin Test Version.7z

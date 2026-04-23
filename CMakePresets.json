@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "win32-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "Win32", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
+    },
+    {
+      "name": "win32-debug",
+      "displayName": "Win32 Debug",
+      "description": "32-bit DLL for Morrowind, Debug config",
+      "inherits": "win32-base"
+    },
+    {
+      "name": "win32-release",
+      "displayName": "Win32 Release",
+      "description": "32-bit DLL for Morrowind, Release config",
+      "inherits": "win32-base"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "win32-debug",
+      "configurePreset": "win32-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "win32-release",
+      "configurePreset": "win32-release",
+      "configuration": "Release"
+    }
+  ]
+}
