@@ -1,0 +1,3 @@
+[submodule "deps/mwse-upstream"]
+	path = deps/mwse-upstream
+	url = https://github.com/MWSE/MWSE.git
