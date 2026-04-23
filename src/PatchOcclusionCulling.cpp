@@ -471,12 +471,17 @@ namespace msoc::patch::occlusion {
 		size_t hi;
 	};
 
-	static std::thread g_drainWorkers[kDrainWorkerCount];
+	// _Claude_ jthread + stop_token: each worker carries a stop_token
+	// passed by the jthread runtime. Teardown is automatic via the
+	// jthread destructor (request_stop + join). The g_drainStartCv is
+	// std::condition_variable_any because only that overload supports
+	// stop-token-aware wait; the done cv stays std::condition_variable
+	// (waited only by the main thread, which isn't a jthread).
+	static std::jthread g_drainWorkers[kDrainWorkerCount];
 	static DrainWorkerRange g_drainRanges[kDrainWorkerCount];
-	static std::atomic<bool> g_drainWorkerStop{ false };
 
 	static std::mutex g_drainMtx;
-	static std::condition_variable g_drainStartCv;
+	static std::condition_variable_any g_drainStartCv;
 	static std::condition_variable g_drainDoneCv;
 	static unsigned int g_drainStartTickets = 0;
 	static unsigned int g_drainDoneTickets = 0;
@@ -1769,22 +1774,25 @@ namespace msoc::patch::occlusion {
 
 	// _Claude_ Worker thread body. Sleeps on the start cv until the main
 	// thread publishes work, then runs classifyDrainRange over its assigned
-	// slice and signals completion. The stop flag is checked both before
-	// and after the wait so a teardown release of permits cleanly drains
-	// the worker out of the wait without it touching g_drainRanges. workerId
-	// is bounds-asserted to catch the (unlikely) case of a future refactor
-	// spawning extra threads with out-of-range IDs.
-	static void drainWorkerMain(unsigned int workerId) {
+	// slice and signals completion.
+	//
+	// Stop semantics via std::stop_token (jthread-owned). The cv_any wait
+	// returns either when the predicate becomes true OR when stop is
+	// requested (jthread destructor / explicit request_stop fires the
+	// stop callback, which internally notifies the cv). After the wait we
+	// branch on stop_requested so a teardown cleanly exits without
+	// touching g_drainRanges. workerId is bounds-asserted for refactor
+	// safety.
+	static void drainWorkerMain(std::stop_token stop, unsigned int workerId) {
 		assert(workerId < kDrainWorkerCount);
 
-		while (!g_drainWorkerStop.load(std::memory_order_acquire)) {
+		while (!stop.stop_requested()) {
 			{
 				std::unique_lock<std::mutex> lock(g_drainMtx);
-				g_drainStartCv.wait(lock, [] {
-					return g_drainStartTickets > 0
-						|| g_drainWorkerStop.load(std::memory_order_acquire);
+				g_drainStartCv.wait(lock, stop, [] {
+					return g_drainStartTickets > 0;
 					});
-				if (g_drainWorkerStop.load(std::memory_order_acquire)) break;
+				if (stop.stop_requested()) break;
 				--g_drainStartTickets;
 			}
 
@@ -2658,17 +2666,19 @@ namespace msoc::patch::occlusion {
 		// runtime MCM toggle of OcclusionParallelDrain works without restart;
 		// workers park on the start cv at ~0% CPU when idle.
 		//
-		// All-or-nothing spawn: if any thread ctor throws (bad_alloc, OS
+		// All-or-nothing spawn: if any jthread ctor throws (bad_alloc, OS
 		// thread-limit exhaustion), tear down whichever workers did start
-		// so the joinable() gate in drainPendingDisplays cleanly rejects
-		// the parallel path for the rest of the session. Over-notify on
-		// the start cv after setting g_drainWorkerStop is harmless — any
-		// already-running worker observes the stop flag and exits before
-		// touching g_drainRanges.
+		// by move-assigning empty jthreads — that triggers each running
+		// jthread's dtor (request_stop + join). Stop-token-aware wait in
+		// drainWorkerMain wakes the parked worker so the join completes
+		// promptly. The joinable() gate in drainPendingDisplays then
+		// cleanly rejects the parallel path for the rest of the session.
 		bool drainPoolStarted = true;
 		try {
 			for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-				g_drainWorkers[i] = std::thread(drainWorkerMain, i);
+				// jthread auto-passes its stop_token as the first
+				// argument when the callable accepts one.
+				g_drainWorkers[i] = std::jthread(drainWorkerMain, i);
 			}
 		}
 		catch (const std::exception& e) {
@@ -2676,12 +2686,10 @@ namespace msoc::patch::occlusion {
 				<< "; tearing down partial state, parallel drain disabled."
 				<< std::endl;
 			drainPoolStarted = false;
-			g_drainWorkerStop.store(true, std::memory_order_release);
-			g_drainStartCv.notify_all();
 			for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-				if (g_drainWorkers[i].joinable()) {
-					g_drainWorkers[i].join();
-				}
+				// Move-assigning an empty jthread destroys the previous
+				// (running) one, which calls request_stop + join.
+				g_drainWorkers[i] = std::jthread{};
 			}
 		}
 		if (drainPoolStarted) {

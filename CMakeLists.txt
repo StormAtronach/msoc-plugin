@@ -9,7 +9,7 @@ if(NOT CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
         "Configure with -A Win32. Morrowind is 32-bit; an x64 DLL won't load.")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Path to upstream MWSE source. Default points at the vendored submodule
@@ -124,6 +124,14 @@ target_compile_definitions(msoc PRIVATE
 # would crash on cross-module new/delete once we move the patch over).
 set_property(TARGET msoc PROPERTY
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+# Link-time optimization for Release. Maps to MSVC /GL (compile) + /LTCG
+# (link). Lets the back-end optimizer see across translation units —
+# inlines our drain loop into Intel MOC's TestRect, DCEs the unused
+# AVX2/AVX512 template instantiations, etc. Adds ~30-60s to the link
+# step; expected ~5-10% drop on drainUs and a smaller .dll.
+set_property(TARGET msoc PROPERTY
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
 # Drop the built DLL straight into the test mod's lib dir so include("msoc")
 # can find it without manual copying.

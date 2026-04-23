@@ -71,6 +71,13 @@ namespace NI {
         reinterpret_cast<Property*(__thiscall*)(Property*)>(0x405990)(this);
     }
 
+    // Dtor pair — visible to the linker as soon as Property::Property
+    // is referenced. Without LTO the linker silently dropped this; with
+    // LTO it has to resolve. Upstream address from NIProperty.cpp.
+    Property::~Property() {
+        reinterpret_cast<void(__thiscall*)(Property*)>(0x405B40)(this);
+    }
+
     PropertyType Property::getType() const {
         return static_cast<PropertyType>(vTable.asProperty->getType(this));
     }

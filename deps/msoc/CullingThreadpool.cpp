@@ -196,9 +196,12 @@ void CullingThreadpool::RenderJobQueue::Reset()
 	// volatile (the original field types) does not provide — a second
 	// freeze with mRenderPtrs=1,1,1,...  proved the same class of bug
 	// could still occur. The complete fix lives in two later changes:
-	//   1. The mJobs/mWritePtr/mSuspendThreads/mNumSuspendedThreads/
-	//      mKillThreads fields are now std::atomic, so writes here have
-	//      seq_cst ordering relative to worker reads (see CullingThreadpool.h).
+	//   1. The mJobs/mWritePtr/mSuspendThreads/mNumSuspendedThreads
+	//      fields are now std::atomic, so writes here have seq_cst
+	//      ordering relative to worker reads (see CullingThreadpool.h).
+	//      Worker shutdown moved from a kill-flag atomic to per-thread
+	//      stop_token (jthread); request_stop() carries its own happens-
+	//      before semantics via the stop_callback.
 	//   2. Flush() now SuspendThreads + polls until mNumSuspendedThreads
 	//      == mNumThreads BEFORE calling this method, so workers are
 	//      parked in cv.wait while Reset runs — they cannot read these
@@ -275,29 +278,35 @@ void CullingThreadpool::SetupScissors()
 	}
 }
 
-void CullingThreadpool::ThreadRun(CullingThreadpool *threadPool, unsigned int threadId)
-{ 
-	threadPool->ThreadMain(threadId); 
+void CullingThreadpool::ThreadRun(std::stop_token stop, CullingThreadpool *threadPool, unsigned int threadId)
+{
+	threadPool->ThreadMain(std::move(stop), threadId);
 }
 
-void CullingThreadpool::ThreadMain(unsigned int threadIdx)
+void CullingThreadpool::ThreadMain(std::stop_token stop, unsigned int threadIdx)
 {
-	while (true)
+	while (!stop.stop_requested())
 	{
 		bool threadIsIdle = true;
 		unsigned int threadBinIdx = threadIdx;
 
-		// Wait for threads to be woken up (low CPU load sleep)
+		// Wait for threads to be woken up (low CPU load sleep).
+		// _Claude_ cv_any.wait(lock, stop, pred) returns when pred holds
+		// OR stop is requested — request_stop() fires the stop_callback
+		// which wakes this wait directly. No separate WakeThreads call
+		// required to retire the worker; jthread's dtor handles it.
 		std::unique_lock<std::mutex> lock(mSuspendedMutex);
 		mNumSuspendedThreads++;
-		mSuspendedCV.wait(lock, [&] {return !mSuspendThreads; });
+		mSuspendedCV.wait(lock, stop, [&] {return !mSuspendThreads; });
 		mNumSuspendedThreads--;
 		lock.unlock();
+
+		if (stop.stop_requested()) return;
 
 		// Loop until suspended again
 		while (!mSuspendThreads || !threadIsIdle)
 		{
-			if (mKillThreads)
+			if (stop.stop_requested())
 				return;
 
 			threadIsIdle = false;
@@ -365,7 +374,6 @@ CullingThreadpool::CullingThreadpool(unsigned int numThreads, unsigned int binsW
 	mMaxJobs(maxJobs),
 	mBinsW(binsW),
 	mBinsH(binsH),
-	mKillThreads(false),
 	mSuspendThreads(true),
 	mNumSuspendedThreads(0),
 	mModelToClipMatrices(maxJobs),
@@ -382,28 +390,28 @@ CullingThreadpool::CullingThreadpool(unsigned int numThreads, unsigned int binsW
 	mVertexLayouts.AddData(VertexLayout(16, 4, 12));
 	mCurrentMatrix = nullptr;
 
-	mThreads = new std::thread[mNumThreads];
+	// _Claude_ jthread auto-passes its stop_token as the first argument
+	// when the callable accepts one. ThreadRun's signature was extended
+	// to receive that token; teardown happens via the jthread destructor.
+	mThreads = new std::jthread[mNumThreads];
 	for (unsigned int i = 0; i < mNumThreads; ++i)
-		mThreads[i] = std::thread(ThreadRun, this, i);
+		mThreads[i] = std::jthread(ThreadRun, this, i);
 
 }
 
 CullingThreadpool::~CullingThreadpool()
 {
-	// Wait for threads to terminate
-	if (mThreads != nullptr || !mKillThreads)
-	{
-		WakeThreads();
-		mKillThreads = true;
-		for (unsigned int i = 0; i < mNumThreads; ++i)
-			mThreads[i].join();
-
-	}
-
-	// Free memory
+	// _Claude_ SAFE_DELETE_ARRAY both null-checks and delete[]s. delete[]
+	// invokes each jthread's destructor, which calls request_stop()
+	// then join(). request_stop fires the cv_any's stop_callback,
+	// waking parked workers directly — no separate WakeThreads() /
+	// kill-flag dance needed. The mNumSuspendedThreads accounting in
+	// ThreadMain decrements on stop-induced wakeup before exit, so any
+	// concurrent observer would still see consistent counts (though we
+	// rely on caller serialisation for that — single-threaded teardown).
+	SAFE_DELETE_ARRAY(mThreads);
 	SAFE_DELETE(mRenderQueue);
 	SAFE_DELETE_ARRAY(mRects);
-	SAFE_DELETE_ARRAY(mThreads);
 }
 
 void CullingThreadpool::WakeThreads()
@@ -469,7 +477,10 @@ void CullingThreadpool::Flush()
 						f << "mSuspendThreads=" << (mSuspendThreads ? 1 : 0)
 							<< " mNumSuspendedThreads=" << mNumSuspendedThreads
 							<< "/" << mNumThreads
-							<< " mKillThreads=" << (mKillThreads ? 1 : 0) << "\n";
+							// _Claude_ stop_token replaced mKillThreads; the
+							// jthread carrying the token is per-worker, so
+							// there's no single shared "kill" boolean to log.
+							<< "\n";
 						f << "mRenderPtrs=";
 						for (unsigned int i = 0; i < mRenderQueue->mNumBins; ++i)
 							f << " " << mRenderQueue->mRenderPtrs[i].load();

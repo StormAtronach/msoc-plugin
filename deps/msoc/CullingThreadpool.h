@@ -151,16 +151,29 @@ protected:
 	unsigned int            mBinsH;
 
 	// Threads and control variables
-	std::mutex              mSuspendedMutex;
-	std::condition_variable mSuspendedCV;
+	std::mutex                  mSuspendedMutex;
+	// _Claude_ condition_variable_any (not condition_variable) so the wait
+	// can take a stop_token. mSuspendedCV.wait(lock, stop, pred) returns
+	// when pred becomes true OR the worker's stop is requested; that's
+	// what eliminates the wake-before-kill ordering trap the original
+	// kill-flag design carried.
+	std::condition_variable_any mSuspendedCV;
 	// _Claude_ Atomified — same rationale as Job/mWritePtr above. The
 	// SuspendThreads/WakeThreads handshake reads these from multiple cores
 	// without lock-protected writes; volatile alone does not establish the
 	// happens-before relationship the design assumes.
-	std::atomic<bool>       mKillThreads;
-	std::atomic<bool>       mSuspendThreads;
-	std::atomic_uint        mNumSuspendedThreads;
-	std::thread             *mThreads;
+	std::atomic<bool>           mSuspendThreads;
+	std::atomic_uint            mNumSuspendedThreads;
+	// _Claude_ jthread (not std::thread). Worker shutdown was Intel's
+	// dance: WakeThreads() to unpark, set mKillThreads, then loop-join.
+	// The dance had three latent bugs: a `||` typo in the dtor's nullity
+	// guard (could null-deref join), a wake-before-kill ordering trap
+	// (any teardown path setting kill without first calling Wake leaves
+	// parked workers waiting forever), and a one-extra-job-iteration race
+	// between wake and kill set. jthread's dtor calls request_stop+join
+	// as one atomic step; the cv_any's stop_callback wakes parked workers
+	// directly. Result: ~delete[] mThreads is the entire teardown.
+	std::jthread                *mThreads;
 
 	// State variables and command queue
 	const float             *mCurrentMatrix;
@@ -174,8 +187,8 @@ protected:
 
 	void SetupScissors();
 
-	static void ThreadRun(CullingThreadpool *threadPool, unsigned int threadId);
-	void ThreadMain(unsigned int threadIdx);
+	static void ThreadRun(std::stop_token stop, CullingThreadpool *threadPool, unsigned int threadId);
+	void ThreadMain(std::stop_token stop, unsigned int threadIdx);
 
 public:
 	/*!
