@@ -89,12 +89,55 @@ namespace msoc::patch::occlusion {
 		float vyX, float vyY, float vyZ,
 		float vzX, float vzY, float vzZ);
 
+	// Batch sphere test. Consumer passes `count` spheres as consecutive
+	// (x, y, z, r) float4 tuples (so `centersAndRadii` is count*4 floats
+	// long), and `resultsOut` is a caller-provided int array of length
+	// `count` that the plugin fills with kMaskQuery* codes. Equivalent
+	// to calling testOcclusionSphere `count` times but saves the per-
+	// call DLL boundary overhead — MGE-XE does 1500-2800 tests per cull
+	// pass and benefits measurably.
+	//
+	// If the mask isn't ready (staleness, teardown), every slot is
+	// filled with kMaskQueryNotReady and the function returns quickly.
+	void testOcclusionSphereBatch(
+		const float* centersAndRadii, int count, int* resultsOut);
+
+	// Copy the snapshot world-to-clip matrix (16 floats, Intel/column-
+	// major layout) into caller-provided buffer. Matches the depth data
+	// in g_msoc_prev — use this to project points through the exact view
+	// the mask was built for.
+	void getSnapshotViewProj(float outMatrix[16]);
+
+	// Wall-clock age of the current snapshot, in milliseconds. Returns
+	// 0 if no snapshot has ever been captured (before first swap).
+	unsigned long long getSnapshotAgeMs();
+
+	// Fixed mask resolution (currently 512x256 for this build).
+	void getMaskResolution(int* outWidth, int* outHeight);
+
 	// Write the current occlusion mask to disk as a PFM (Portable
 	// FloatMap) image. Grayscale, raw float32 depths bottom-up — opens
 	// in GIMP / Photoshop / ImageJ without conversion. Use for
 	// diagnosing occluder coverage ("is the canton actually in the
 	// mask?" without wiring visual tints). Returns true on success.
 	bool dumpOcclusionMask(const char* path);
+
+	// Queue a batch of triangles to be rasterized into the NEXT mask
+	// build. One-frame latency by design — data lands in frame N+1's
+	// mask, which consumers query in frame N+2, matching the existing
+	// double-buffer snapshot contract.
+	//
+	// Plugin takes ownership by copying the input arrays on the
+	// caller's thread; caller can free or reuse the buffers after the
+	// call returns. `modelMatrix` may be null (world-space / identity).
+	// Stride/offY/offW match MOC's VertexLayout semantics.
+	//
+	// Returns true if queued, false if rejected (budget exhausted, mask
+	// resources not live, or invalid input).
+	bool addOccluder(
+		const float* verts, int vtxCount, int stride, int offY, int offW,
+		const unsigned int* tris, int triCount,
+		const float* modelMatrix16);
 
 }
 
@@ -137,6 +180,29 @@ int __cdecl mwse_testOcclusionOBB(
 	float vyX, float vyY, float vyZ,
 	float vzX, float vzY, float vzZ);
 
+// _Claude_ Batch sphere query — same semantics as mwse_testOcclusionSphere
+// but amortises DLL-boundary cost over N tests in one call.
+//   centersAndRadii: count*4 floats: (x0,y0,z0,r0, x1,y1,z1,r1, ...)
+//   count:           number of spheres
+//   resultsOut:      caller-allocated int array of length `count`; each
+//                    slot receives a MWSE_OCC_* code.
+extern "C" __declspec(dllexport)
+void __cdecl mwse_testOcclusionSphereBatch(
+	const float* centersAndRadii, int count, int* resultsOut);
+
+// _Claude_ Snapshot metadata accessors. Help consumers reason about the
+// view the current mask was built for, and about its freshness. All
+// read-only; safe to call at any time (return harmless zeros if the
+// plugin hasn't captured a snapshot yet).
+extern "C" __declspec(dllexport)
+void __cdecl mwse_getSnapshotViewProj(float outMatrix[16]);
+
+extern "C" __declspec(dllexport)
+unsigned long long __cdecl mwse_getSnapshotAgeMs();
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_getMaskResolution(int* outWidth, int* outHeight);
+
 // _Claude_ Dump the current occlusion mask to `path` as a PFM image
 // (Portable FloatMap — 3-line ASCII header + raw float32 depths,
 // bottom-up). Returns 1 on success, 0 otherwise. Intended for
@@ -144,3 +210,15 @@ int __cdecl mwse_testOcclusionOBB(
 // picks the file path so it can sit next to its own logs.
 extern "C" __declspec(dllexport)
 int __cdecl mwse_dumpOcclusionMask(const char* path);
+
+// _Claude_ External occluder injection. Consumer (MGE-XE, other mods)
+// submits triangles that will be rasterized into the NEXT mask build,
+// alongside the plugin's native near-scene occluders. Plugin copies
+// the input arrays — caller may free after return. Returns 1 if queued,
+// 0 if rejected (over budget, invalid args, or mask resources inactive).
+// One-frame latency matches the double-buffered snapshot contract.
+extern "C" __declspec(dllexport)
+int __cdecl mwse_addOccluder(
+	const float* verts, int vtxCount, int stride, int offY, int offW,
+	const unsigned int* tris, int triCount,
+	const float* modelMatrix16);

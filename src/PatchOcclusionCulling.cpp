@@ -26,6 +26,7 @@
 #include "MaskedOcclusionCulling.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cfloat>
@@ -37,6 +38,7 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <thread>
 #include <unordered_map>
@@ -102,6 +104,44 @@ namespace msoc::patch::occlusion {
 	static unsigned long long g_snapshotTickMs = 0;
 	static constexpr unsigned long long kSnapshotMaxAgeMs = 200;
 
+	// External occluder injection (Phase B). Each PendingOccluder is a
+	// self-contained copy of a consumer's submission: vertex data, index
+	// data, optional model-to-world matrix, and MOC VertexLayout hints.
+	// Plugin owns the memory; consumer can free their input buffers as
+	// soon as mwse_addOccluder returns.
+	//
+	// The queue is populated on whatever thread the consumer calls us
+	// from and drained on the render thread at the top of the per-frame
+	// rasterization window, before native near-scene occluders rasterize.
+	// g_pendingOccludersMutex covers both operations; contention is
+	// trivial in practice (MGE-XE submits a handful of batches once per
+	// frame, plugin drains once per frame).
+	//
+	// g_externalOccluderTrisQueued tracks the sum of triCount values
+	// currently in the queue, used for budget enforcement against the
+	// existing OcclusionOccluderMaxTriangles cap. External-first
+	// rejection policy: if adding a batch would push past the cap, we
+	// reject it and log, preserving the plugin's native-occluder budget.
+	struct PendingOccluder {
+		std::vector<float> verts;              // copy of consumer vtx data
+		std::vector<std::uint32_t> tris;       // copy of consumer index data
+		int stride;
+		int offY;
+		int offW;
+		int vtxCount;
+		int triCount;
+		std::optional<std::array<float, 16>> modelMatrix;
+	};
+
+	static std::vector<PendingOccluder> g_pendingOccluders;
+	static std::mutex g_pendingOccludersMutex;
+	static int g_externalOccluderTrisQueued = 0;
+
+	// Forward decl — definition sits with the other mask-pipeline
+	// helpers further down the file; call site is inside the render
+	// hook body which appears earlier.
+	static void drainPendingOccluders();
+
 	// World-to-clip matrix, transposed from NI's row-major M*v layout into
 	// Intel's column-major v*M layout (consecutive memory = one column).
 	// Intel reads clip.x = v.x*m[0] + v.y*m[4] + v.z*m[8] + m[12].
@@ -146,6 +186,27 @@ namespace msoc::patch::occlusion {
 	// occlusion culling, and the main-scene frame is the only place where
 	// MSOC's cost is paid back.
 	static bool g_inRenderMainScene = false;
+
+	// _Claude_ Diagnostic: count of isTopLevel fires within the current
+	// renderMainScene call. Reset to 0 at the top of renderMainScene_wrapper,
+	// incremented each time CullShow_detour opens an isTopLevel block. If this
+	// ends up > 1 per game-frame, it means the engine issues multiple main-
+	// camera CullShow passes per frame (e.g. shadow-caster + main + 1st-person
+	// subtree). Each one would run ClearBuffer + its own subtree, so the
+	// LAST pass clobbers the previous passes' mask content — explaining why
+	// the snapshot ends up with only whatever the last pass traverses
+	// (typically: aggregateTerrain only, since that reads worldLandscapeRoot
+	// unconditionally).
+	static unsigned int g_isTopLevelFiresThisScene = 0;
+	static unsigned int g_maxIsTopLevelFiresSession = 0;
+	// _Claude_ Companion to g_isTopLevelFiresThisScene: counts the RAW
+	// number of main-camera CullShow detour entries per renderMainScene,
+	// BEFORE the alreadyBuiltThisScene guard. Lets us distinguish
+	// "engine only fires one pass" (attempt=1) from "engine fires multiple
+	// passes and the guard is suppressing them" (attempt>1). Both reset
+	// at the top of renderMainScene_wrapper.
+	static unsigned int g_mainCamCullShowAttemptsThisScene = 0;
+	static unsigned int g_maxMainCamCullShowAttemptsSession = 0;
 
 	// True only while the scene graph is being traversed for the worldCamera
 	// main pass. CullShow_detour gates MSOC work on this so shadow-manager,
@@ -2107,7 +2168,34 @@ namespace msoc::patch::occlusion {
 			// which sidesteps the race wholesale.
 			const bool inMenuMode = wc && wc->flagMenuMode;
 			if (inMenuMode) ++g_skippedMenuMode;
-			if (camera == mainCamera && !inMenuMode) {
+			// _Claude_ Multi-pass guard (snapshot-only-terrain hypothesis).
+			// The engine may issue more than one main-camera CullShow per
+			// renderMainScene (e.g. shadow-caster pass, main pass, 1st-
+			// person subtree) and each one would ClearBuffer + run its own
+			// subtree, so the LAST pass clobbers everything the earlier
+			// passes wrote. This explains the observed pattern where the
+			// snapshot only contains aggregateTerrain (which reads the
+			// global worldLandscapeRoot on every pass) while cantons
+			// rasterized during the first pass are wiped.
+			//
+			// Gate: only open isTopLevel on the FIRST main-camera entry
+			// per renderMainScene call. Subsequent main-camera CullShows
+			// fall through to the vanilla body path — they still render
+			// correctly (engine path), they just don't re-build the mask.
+			const bool alreadyBuiltThisScene = g_isTopLevelFiresThisScene > 0;
+			// Pre-guard OUTER-ENTRY counter — counts main-camera CullShow
+			// detour entries that are NOT recursive (i.e. the engine is not
+			// already inside an MSOC traversal). Without the !g_msocActive
+			// gate this would also count every NiAVObject child visited
+			// during scene-graph descent through the detour, which balloons
+			// into the hundreds per frame just from a normal traversal.
+			// Restricted here so a value > 1 genuinely means the engine
+			// issued multiple independent main-camera passes in one
+			// renderMainScene.
+			if (camera == mainCamera && !inMenuMode && !g_msocActive) {
+				++g_mainCamCullShowAttemptsThisScene;
+			}
+			if (camera == mainCamera && !inMenuMode && !alreadyBuiltThisScene) {
 				// Scene-type gate: let users disable MSOC in interiors or
 				// exteriors independently. Cheap flag bit test on the active
 				// cell; falls back to exterior behaviour if currentCell isn't
@@ -2188,6 +2276,7 @@ namespace msoc::patch::occlusion {
 		}
 
 		if (isTopLevel) {
+			++g_isTopLevelFiresThisScene; // _Claude_ multi-pass hypothesis diagnostic
 			g_lastStage = 1; // _Claude_ entered top-level
 			// Latch async mode once per frame so a mid-frame Lua toggle
 			// can't split submissions between threadpool and direct MOC.
@@ -2343,6 +2432,15 @@ namespace msoc::patch::occlusion {
 			}
 			g_msocActive = true;
 
+			// _Claude_ External occluder drain (Phase B). Rasterizes any
+			// triangles consumers queued via mwse_addOccluder into the
+			// freshly-cleared mask, before the native near-scene / terrain
+			// passes. Must run here — AFTER ClearBuffer so we don't get
+			// stomped, AFTER uploadCameraTransform so g_worldToClip is
+			// live for the direct-MOC path, and BEFORE any threadpool
+			// work queues (so direct g_msoc writes don't race workers).
+			drainPendingOccluders();
+
 			// _Claude_ Aggregate terrain pass: submit merged per-Land
 			// occluders before the main traversal so the depth buffer
 			// has hill/horizon silhouettes by the time non-terrain
@@ -2401,6 +2499,18 @@ namespace msoc::patch::occlusion {
 			// rejected by isOcclusionMaskReady() — guards against culling
 			// against a frozen mask during pauses / loading / alt-tab.
 			std::swap(g_msoc, g_msoc_prev);
+			// CRITICAL: CullingThreadpool caches the target buffer via
+			// SetBuffer() at init; it does NOT follow the g_msoc pointer
+			// variable. Without this re-point, the threadpool keeps
+			// rasterizing into whatever buffer g_msoc was at init — the
+			// snapshot side ends up alternating between populated and
+			// empty every frame depending on parity, and external
+			// consumers reading g_msoc_prev see garbage or nothing.
+			// Pointed to the new g_msoc so next frame's rasterization
+			// hits the correct (about-to-be-cleared, then written) buffer.
+			if (g_threadpool) {
+				g_threadpool->SetBuffer(g_msoc);
+			}
 			std::memcpy(g_worldToClip_prev, g_worldToClip, sizeof(g_worldToClip));
 			g_ndcRadiusX_prev = g_ndcRadiusX;
 			g_ndcRadiusY_prev = g_ndcRadiusY;
@@ -2510,6 +2620,10 @@ namespace msoc::patch::occlusion {
 					<< " maxDepthSess=" << g_maxCallDepthSession // _Claude_ lifetime peak
 					<< " tp=" << (g_threadpool ? 1 : 0) // _Claude_ threadpool liveness
 					<< " cfgAsync=" << (Configuration::OcclusionAsyncOccluders ? 1 : 0) // _Claude_ JSON-propagated flag (async fires iff tp && cfgAsync)
+					<< " topLvlThisScene=" << g_isTopLevelFiresThisScene // _Claude_ multi-pass hypothesis (post-guard)
+					<< " maxTopLvlSess=" << g_maxIsTopLevelFiresSession // _Claude_ lifetime peak (post-guard)
+					<< " mainAttemptsThisScene=" << g_mainCamCullShowAttemptsThisScene // _Claude_ pre-guard raw attempts
+					<< " maxMainAttemptsSess=" << g_maxMainCamCullShowAttemptsSession // _Claude_ lifetime peak (pre-guard)
 					<< " cumul=" << totalOccluded << "/" << totalTested
 					<< "(vc=" << totalViewCulled << ")" << std::endl;
 			}
@@ -2534,7 +2648,22 @@ namespace msoc::patch::occlusion {
 	static void __cdecl renderMainScene_wrapper() {
 		const bool wasActive = g_inRenderMainScene;
 		g_inRenderMainScene = true;
+		// _Claude_ Diagnostic: zero the per-scene isTopLevel counter so we
+		// can observe whether the engine fires multiple main-camera CullShow
+		// passes per renderMainScene (snapshot-only-terrain hypothesis).
+		if (!wasActive) {
+			g_isTopLevelFiresThisScene = 0;
+			g_mainCamCullShowAttemptsThisScene = 0;
+		}
 		renderMainScene_original();
+		if (!wasActive) {
+			if (g_isTopLevelFiresThisScene > g_maxIsTopLevelFiresSession) {
+				g_maxIsTopLevelFiresSession = g_isTopLevelFiresThisScene;
+			}
+			if (g_mainCamCullShowAttemptsThisScene > g_maxMainCamCullShowAttemptsSession) {
+				g_maxMainCamCullShowAttemptsSession = g_mainCamCullShowAttemptsThisScene;
+			}
+		}
 		g_inRenderMainScene = wasActive;
 
 		// Tint-debug reset: the batched renderer reads material state at
@@ -2736,6 +2865,14 @@ namespace msoc::patch::occlusion {
 		g_asyncOccluderVerts.shrink_to_fit();
 		g_asyncOccluderIndices.clear();
 		g_asyncOccluderIndices.shrink_to_fit();
+		// External occluder queue — drop any pending submissions so a
+		// subsequent re-enable doesn't replay stale occluders against
+		// the fresh mask on the first frame.
+		{
+			std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
+			g_pendingOccluders.clear();
+			g_externalOccluderTrisQueued = 0;
+		}
 		g_asyncThisFrame = false;
 		g_maskReady = false;
 
@@ -2961,6 +3098,213 @@ namespace msoc::patch::occlusion {
 		return testOcclusionSphere(cx, cy, cz, r);
 	}
 
+	void getSnapshotViewProj(float outMatrix[16]) {
+		if (!outMatrix) return;
+		std::memcpy(outMatrix, g_worldToClip_prev, sizeof(g_worldToClip_prev));
+	}
+
+	unsigned long long getSnapshotAgeMs() {
+		if (g_snapshotTickMs == 0) return 0;
+		return GetTickCount64() - g_snapshotTickMs;
+	}
+
+	void getMaskResolution(int* outWidth, int* outHeight) {
+		if (outWidth)  *outWidth  = static_cast<int>(kMsocWidth);
+		if (outHeight) *outHeight = static_cast<int>(kMsocHeight);
+	}
+
+	void testOcclusionSphereBatch(
+		const float* centersAndRadii, int count, int* resultsOut)
+	{
+		if (!resultsOut || count <= 0) {
+			return;
+		}
+		if (!centersAndRadii) {
+			for (int i = 0; i < count; ++i) {
+				resultsOut[i] = kMaskQueryNotReady;
+			}
+			return;
+		}
+
+		// Single up-front readiness check — staleness is a per-frame
+		// property; the mask can't flip mid-batch because swap happens
+		// on the render thread at drain complete, and external callers
+		// run serialized against that by construction (Morrowind is
+		// single-threaded for render-adjacent work).
+		if (!isOcclusionMaskReady()) {
+			for (int i = 0; i < count; ++i) {
+				resultsOut[i] = kMaskQueryNotReady;
+			}
+			return;
+		}
+
+		for (int i = 0; i < count; ++i) {
+			const float* s = centersAndRadii + i * 4;
+			const TES3::Vector3 center(s[0], s[1], s[2]);
+			const auto result = testSphereVisiblePrev(center, s[3]);
+			switch (result) {
+			case ::MaskedOcclusionCulling::VISIBLE:     resultsOut[i] = kMaskQueryVisible;    break;
+			case ::MaskedOcclusionCulling::OCCLUDED:    resultsOut[i] = kMaskQueryOccluded;   break;
+			case ::MaskedOcclusionCulling::VIEW_CULLED: resultsOut[i] = kMaskQueryViewCulled; break;
+			default:                                    resultsOut[i] = kMaskQueryVisible;    break;
+			}
+		}
+	}
+
+	// Multiply two column-major 4x4 matrices: `out = a * b`. Used only
+	// by drainPendingOccluders when a consumer provides a model-to-world
+	// matrix — `a` is the world-to-clip already cached in g_worldToClip,
+	// `b` is the consumer's model matrix. Both in MOC/Intel column-major
+	// layout (`m[col*4 + row]`).
+	static void mat4MulColumnMajor(const float* a, const float* b, float* out) {
+		for (int col = 0; col < 4; ++col) {
+			for (int row = 0; row < 4; ++row) {
+				float sum = 0.0f;
+				for (int k = 0; k < 4; ++k) {
+					sum += a[k * 4 + row] * b[col * 4 + k];
+				}
+				out[col * 4 + row] = sum;
+			}
+		}
+	}
+
+	// Drain the external-occluder queue, rasterizing every queued
+	// PendingOccluder into the live g_msoc. Called once per frame from
+	// the render hook AFTER uploadCameraTransform (g_worldToClip is
+	// valid) and BEFORE any threadpool work starts (no race against
+	// async workers on the shared MOC instance).
+	//
+	// Uses the direct (non-threadpool) RenderTriangles path — external
+	// submissions are tiny (tens to a few thousand tris) and serialize
+	// cleanly on the main render thread, keeping the threadpool's single
+	// "current matrix" invariant intact for the native occluder pipeline.
+	static void drainPendingOccluders() {
+		// Swap the queue out under the lock, then release — rasterization
+		// can be slow and we don't want to block a mwse_addOccluder caller
+		// on it. The externalOccluderTrisQueued counter resets too so the
+		// next frame's budget accounting starts clean.
+		std::vector<PendingOccluder> localQueue;
+		int drainedTris = 0;
+		{
+			std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
+			if (g_pendingOccluders.empty()) {
+				return;
+			}
+			localQueue = std::move(g_pendingOccluders);
+			g_pendingOccluders.clear();
+			drainedTris = g_externalOccluderTrisQueued;
+			g_externalOccluderTrisQueued = 0;
+		}
+
+		for (const auto& p : localQueue) {
+			// If consumer provided a model-to-world matrix, combine it
+			// with g_worldToClip into a full model-to-clip matrix that
+			// MOC can use directly. Both input matrices are in column-
+			// major layout so the multiply order is `worldToClip * model`.
+			float combinedMatrix[16];
+			const float* modelToClip = g_worldToClip;
+			if (p.modelMatrix.has_value()) {
+				mat4MulColumnMajor(g_worldToClip, p.modelMatrix->data(), combinedMatrix);
+				modelToClip = combinedMatrix;
+			}
+
+			const ::MaskedOcclusionCulling::VertexLayout layout(p.stride, p.offY, p.offW);
+			// BACKFACE_NONE for external submissions: consumers typically
+			// hand us closed convex hulls (box corners, simplified silhou-
+			// ettes). Rasterizing both faces produces the same mask depth
+			// as front-only because MOC stores minimum (closest) depth per
+			// Hi-Z tile — back faces of a convex shape are always behind,
+			// can't tighten the mask. Side benefit: winding doesn't matter,
+			// which removes a common footgun when consumers build geometry.
+			g_msoc->RenderTriangles(
+				p.verts.data(), p.tris.data(), p.triCount,
+				modelToClip,
+				::MaskedOcclusionCulling::BACKFACE_NONE,
+				::MaskedOcclusionCulling::CLIP_PLANE_ALL,
+				layout);
+			// Rolled into g_occluderTriangles so the per-frame stats
+			// line already in MSOC.log reflects the external contribution
+			// without needing a separate counter surface.
+			g_occluderTriangles += p.triCount;
+			++g_rasterizedAsOccluder;
+		}
+	}
+
+	bool addOccluder(
+		const float* verts, int vtxCount, int stride, int offY, int offW,
+		const unsigned int* tris, int triCount,
+		const float* modelMatrix16)
+	{
+		// Input validation — reject obviously malformed submissions
+		// rather than silently copying garbage the rasterizer would trip
+		// on. stride/offY/offW sanity: stride must be positive, Y and W
+		// offsets must sit inside one vertex's worth of bytes.
+		if (!verts || !tris || vtxCount <= 0 || triCount <= 0) {
+			return false;
+		}
+		if (stride <= 0 || offY < 0 || offW < 0
+			|| offY + static_cast<int>(sizeof(float)) > stride
+			|| offW + static_cast<int>(sizeof(float)) > stride) {
+			return false;
+		}
+
+		// If mask resources aren't live (EnableMSOC off, not yet inited,
+		// teardown in progress), drop the submission — it would have no
+		// mask to rasterize into. Not an error for the caller; just a
+		// no-op consistent with the "soft feature" semantics.
+		if (!g_msoc) {
+			return false;
+		}
+
+		// Budget check. External submissions share the configured
+		// OcclusionOccluderMaxTriangles cap with native occluders, and
+		// external-first rejection keeps the plugin's own mask intact
+		// under contention.
+		const int cap = static_cast<int>(Configuration::OcclusionOccluderMaxTriangles);
+		std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
+		if (g_externalOccluderTrisQueued + triCount > cap) {
+			// Rate-limit the log: a chatty consumer could otherwise
+			// flood MSOC.log. Once per contention burst is enough.
+			static bool warnOnce = true;
+			if (warnOnce) {
+				log::getLog() << "MSOC addOccluder: triangle budget exceeded ("
+					<< g_externalOccluderTrisQueued << " queued + " << triCount
+					<< " requested > cap " << cap
+					<< ") — rejecting external submission" << std::endl;
+				warnOnce = false;
+			}
+			return false;
+		}
+
+		// Copy the input arrays into plugin-owned storage. The consumer
+		// is free to reuse or free their buffers as soon as we return.
+		PendingOccluder p;
+		p.stride = stride;
+		p.offY = offY;
+		p.offW = offW;
+		p.vtxCount = vtxCount;
+		p.triCount = triCount;
+
+		// stride is bytes per vertex; verts is sized by total bytes, not
+		// by a per-vertex float count. Copy as raw bytes to preserve
+		// whatever layout the caller picked.
+		const size_t vtxBytes = static_cast<size_t>(vtxCount) * static_cast<size_t>(stride);
+		p.verts.resize(vtxBytes / sizeof(float));
+		std::memcpy(p.verts.data(), verts, vtxBytes);
+
+		p.tris.assign(tris, tris + static_cast<size_t>(triCount) * 3);
+
+		if (modelMatrix16) {
+			std::array<float, 16> m;
+			std::memcpy(m.data(), modelMatrix16, sizeof(m));
+			p.modelMatrix = m;
+		}
+
+		g_externalOccluderTrisQueued += triCount;
+		g_pendingOccluders.emplace_back(std::move(p));
+		return true;
+	}
+
 	bool dumpOcclusionMask(const char* path) {
 		if (path == nullptr) {
 			log::getLog() << "MSOC dump: null path" << std::endl;
@@ -2981,6 +3325,71 @@ namespace msoc::patch::occlusion {
 		std::vector<float> depth(static_cast<size_t>(kMsocWidth) * kMsocHeight, 0.0f);
 		g_msoc_prev->ComputePixelDepthBuffer(depth.data(), /*flipY*/ true);
 
+		// DIAGNOSTIC: also dump the LIVE buffer (g_msoc) alongside the
+		// snapshot so we can tell whether native near-scene occluders
+		// (cantons, walls) end up in the rasterization target but not
+		// in the swapped snapshot — would imply the swap is breaking
+		// our contract somewhere. File sits next to the main PFM with
+		// "_live" suffix.
+		if (g_msoc) {
+			std::vector<float> liveDepth(static_cast<size_t>(kMsocWidth) * kMsocHeight, 0.0f);
+			g_msoc->ComputePixelDepthBuffer(liveDepth.data(), /*flipY*/ true);
+
+			// Normalize live copy (same tone-map as snapshot below)
+			float lMinPos = FLT_MAX, lMaxPos = -FLT_MAX;
+			int lPosCount = 0;
+			for (float v : liveDepth) {
+				if (v > 0.0f) { ++lPosCount; if (v < lMinPos) lMinPos = v; if (v > lMaxPos) lMaxPos = v; }
+			}
+			const float lRange = (lPosCount > 0 && lMaxPos > lMinPos) ? (lMaxPos - lMinPos) : 1.0f;
+			for (float& v : liveDepth) {
+				if (v <= 0.0f) v = 0.0f;
+				else v = 0.2f + 0.8f * ((v - lMinPos) / lRange);
+			}
+
+			char livePath[512];
+			std::snprintf(livePath, sizeof(livePath), "%s_live.pfm", path);
+			if (FILE* fl = std::fopen(livePath, "wb")) {
+				std::fprintf(fl, "Pf\n%u %u\n-1.0\n", kMsocWidth, kMsocHeight);
+				std::fwrite(liveDepth.data(), sizeof(float), liveDepth.size(), fl);
+				std::fclose(fl);
+				log::getLog() << "MSOC: live mask also dumped to " << livePath
+					<< " (occluderPx=" << lPosCount
+					<< " rawRange=[" << lMinPos << ".." << lMaxPos << "])" << std::endl;
+			}
+		}
+
+		// Normalise for immediate display in viewers that tone-map
+		// against [0, 1]. MOC's native output uses two ranges that
+		// don't display well straight:
+		//   -1.0                           → "unwritten" tile sentinel
+		//    tiny positive 1/w (~1e-5..1e-3) → occluder depth
+		// Both collapse to black when GIMP / IrfanView auto-stretch
+		// against [0, 1]. Remap so:
+		//   unwritten → 0.0 (black)
+		//   occluder  → [0.2, 1.0] (lightest = closest to camera)
+		// This preserves the relative ordering so the silhouette
+		// remains depth-correct, just with a display-friendly scale.
+		// Log the raw stats so tooling still has exact numbers.
+		float minPos = FLT_MAX, maxPos = -FLT_MAX;
+		int posCount = 0;
+		for (float v : depth) {
+			if (v > 0.0f) {
+				++posCount;
+				if (v < minPos) minPos = v;
+				if (v > maxPos) maxPos = v;
+			}
+		}
+		const float range = (posCount > 0 && maxPos > minPos) ? (maxPos - minPos) : 1.0f;
+		for (float& v : depth) {
+			if (v <= 0.0f) {
+				v = 0.0f;
+			} else {
+				const float t = (v - minPos) / range;   // 0..1 within positive range
+				v = 0.2f + 0.8f * t;                    // map to [0.2, 1.0]
+			}
+		}
+
 		FILE* f = std::fopen(path, "wb");
 		if (!f) {
 			log::getLog() << "MSOC dump: fopen failed for '" << path
@@ -2992,7 +3401,9 @@ namespace msoc::patch::occlusion {
 		std::fclose(f);
 
 		log::getLog() << "MSOC: occlusion mask dumped to " << path
-			<< " (" << kMsocWidth << "x" << kMsocHeight << ")" << std::endl;
+			<< " (" << kMsocWidth << "x" << kMsocHeight
+			<< ", occluderPx=" << posCount
+			<< ", rawRange=[" << minPos << ".." << maxPos << "])" << std::endl;
 		return true;
 	}
 
@@ -3115,6 +3526,41 @@ int __cdecl mwse_testOcclusionOBB(
 }
 
 extern "C" __declspec(dllexport)
+void __cdecl mwse_testOcclusionSphereBatch(
+	const float* centersAndRadii, int count, int* resultsOut)
+{
+	msoc::patch::occlusion::testOcclusionSphereBatch(
+		centersAndRadii, count, resultsOut);
+}
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_getSnapshotViewProj(float outMatrix[16]) {
+	msoc::patch::occlusion::getSnapshotViewProj(outMatrix);
+}
+
+extern "C" __declspec(dllexport)
+unsigned long long __cdecl mwse_getSnapshotAgeMs() {
+	return msoc::patch::occlusion::getSnapshotAgeMs();
+}
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_getMaskResolution(int* outWidth, int* outHeight) {
+	msoc::patch::occlusion::getMaskResolution(outWidth, outHeight);
+}
+
+extern "C" __declspec(dllexport)
 int __cdecl mwse_dumpOcclusionMask(const char* path) {
 	return msoc::patch::occlusion::dumpOcclusionMask(path) ? 1 : 0;
+}
+
+extern "C" __declspec(dllexport)
+int __cdecl mwse_addOccluder(
+	const float* verts, int vtxCount, int stride, int offY, int offW,
+	const unsigned int* tris, int triCount,
+	const float* modelMatrix16)
+{
+	return msoc::patch::occlusion::addOccluder(
+		verts, vtxCount, stride, offY, offW,
+		tris, triCount,
+		modelMatrix16) ? 1 : 0;
 }
