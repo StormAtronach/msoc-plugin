@@ -45,7 +45,6 @@ namespace msoc {
     unsigned int Configuration::OcclusionThreadpoolBinsW         = 4;
     unsigned int Configuration::OcclusionThreadpoolBinsH         = 2;
     unsigned int Configuration::OcclusionTemporalCoherenceFrames = 4;
-    bool Configuration::OcclusionParallelDrain              = false;
 
     bool Configuration::OcclusionLogPerFrame  = false;
     bool Configuration::OcclusionLogAggregate = false;
@@ -122,7 +121,6 @@ int configure(lua_State* L) {
     readUInt (L, 1, "OcclusionThreadpoolBinsW",            Configuration::OcclusionThreadpoolBinsW);
     readUInt (L, 1, "OcclusionThreadpoolBinsH",            Configuration::OcclusionThreadpoolBinsH);
     readUInt (L, 1, "OcclusionTemporalCoherenceFrames",    Configuration::OcclusionTemporalCoherenceFrames);
-    readBool (L, 1, "OcclusionParallelDrain",              Configuration::OcclusionParallelDrain);
 
     readBool (L, 1, "OcclusionLogPerFrame",                Configuration::OcclusionLogPerFrame);
     readBool (L, 1, "OcclusionLogAggregate",               Configuration::OcclusionLogAggregate);

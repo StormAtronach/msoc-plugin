@@ -18,10 +18,9 @@ mwse.log("[msoc] plugin loaded, version=%s, mocLink=%s",
 local cfg = require("msoc.config")
 cfg.syncToNative(msoc)
 
-mwse.log("[msoc] config synced from msoc.json: EnableMSOC=%s, ExteriorCull=%s, ParallelDrain=%s",
+mwse.log("[msoc] config synced from msoc.json: EnableMSOC=%s, ExteriorCull=%s",
     tostring(cfg.config.EnableMSOC),
-    tostring(cfg.config.OcclusionEnableExterior),
-    tostring(cfg.config.OcclusionParallelDrain))
+    tostring(cfg.config.OcclusionEnableExterior))
 
 -- mcm.lua registers its own modConfigReady handler; require at top
 -- level so that handler is installed before the event fires.

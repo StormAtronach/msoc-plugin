@@ -70,6 +70,10 @@ namespace msoc::patch::occlusion {
 	// knobs loaded from MWSE.json; see MWSEConfig.{h,cpp} for defaults and
 	// PatchOcclusionCulling-plan.md for the rationale behind each default.
 
+	// ============================================================
+	// MSOC instance & per-frame camera state
+	// ============================================================
+
 	// Intel MSOC is allocated on the heap via Create()/Destroy(). We leak
 	// this on process exit (same pattern as other long-lived MWSE globals).
 	static ::MaskedOcclusionCulling* g_msoc = nullptr;
@@ -191,6 +195,11 @@ namespace msoc::patch::occlusion {
 	// Includes the async enqueue path when the threadpool is active —
 	// actual worker rasterisation happens in parallel and is not counted.
 	static uint64_t g_aggregateTerrainUs = 0;
+
+	// ============================================================
+	// Cache types & globals (land / drain / light)
+	// ============================================================
+
 	// _Claude_ Per-Land merged occluder cache. Key = per-Land NiNode
 	// pointer under the WorldLandscape root. Value = world-space vertex
 	// buffer + index buffer, prebuilt on first sight. Scene-graph walk
@@ -294,6 +303,10 @@ namespace msoc::patch::occlusion {
 	// shouldLightBeEnabled; see header for the full contract.
 	static std::vector<LightObservedCallback> g_lightObservers;
 
+	// ============================================================
+	// Frame counters & diagnostic state
+	// ============================================================
+
 	// File-scope frame counter. Needed by the drain loop to decide
 	// cache freshness; incremented once per top-level frame.
 	static uint32_t g_frameCounter = 0;
@@ -311,22 +324,15 @@ namespace msoc::patch::occlusion {
 	// each RenderTriangles call; drain wraps the whole drain body.
 	static uint64_t g_rasterizeTimeUs = 0;
 	static uint64_t g_drainPhaseTimeUs = 0;
-	// _Claude_ Drain sub-phase timers for the parallel-TestRect audit.
-	// testRectUs sums every testSphereVisible() call (the only path into
-	// MOC::TestRect from the drain). displayUs sums every display() call
-	// inside drainPendingDisplays — terrain-skip, tiny-skip, debug-tint,
-	// and the visible path. They should sum to ≈ drainUs minus loop bookkeeping.
-	static uint64_t g_drainTestRectUs = 0;
-	// _Claude_ Nanosecond-resolution counter for testSphereVisible work.
-	// The microsecond accumulator (g_drainTestRectUs via ScopedUsAccumulator)
-	// truncates each individual call to whole µs; on this workload most
-	// TestRect calls are sub-microsecond, so they accumulate as 0 and the
-	// reported total is an order of magnitude under the truth. This counter
-	// times each call at ns resolution and sums directly, so the total is
-	// faithful even when individual calls are 100-700 ns. Workers race-sum
-	// into this from the parallel drain path the same way they race on the
-	// µs counter — see audit §8, harmless for diagnostics.
-	static uint64_t g_drainTestRectNs = 0;
+	// _Claude_ Wall-clock time of phase 1 (the classify pass that
+	// produces every shape's verdict). Bracketed on the main thread
+	// around either the serial classifyDrainRange call or the
+	// parallel-barrier dispatch — single writer in both modes, no race.
+	// Replaces the per-call testRectUs/testRectNs sums that under-counted
+	// in parallel mode (CPU time across workers ≠ wall time) and the
+	// dedicated parallelDrainUs that duplicated this measurement on the
+	// parallel side. One number, one meaning, comparable across modes.
+	static uint64_t g_classifyUs = 0;
 	static uint64_t g_drainDisplayUs = 0;
 	// Phase 3.2: time spent in threadpool Flush() barrier before drain.
 	// Only populated when async mode is active; zero otherwise.
@@ -352,6 +358,21 @@ namespace msoc::patch::occlusion {
 	static uint32_t g_callDepth = 0;
 	static uint32_t g_maxCallDepthThisFrame = 0;
 	static uint32_t g_maxCallDepthSession = 0;
+
+	// _Claude_ RAII guard for the recursion depth counter. Incremented at
+	// CullShow_detour entry, decremented on every return path (including
+	// future early-exits) via destructor. Lifted out of the detour body
+	// for readability; state lives in g_callDepth / g_maxCallDepthThisFrame
+	// above. Used exclusively by CullShow_detour.
+	struct CallDepthGuard {
+		CallDepthGuard() {
+			++g_callDepth;
+			if (g_callDepth > g_maxCallDepthThisFrame) {
+				g_maxCallDepthThisFrame = g_callDepth;
+			}
+		}
+		~CallDepthGuard() { --g_callDepth; }
+	};
 	// _Claude_ Last-checkpoint marker. Updated as the top-level frame
 	// passes each major stage, so a debugger attached to a frozen
 	// process can identify which stage the main thread is stuck in
@@ -418,6 +439,10 @@ namespace msoc::patch::occlusion {
 	// at the safe top-of-frame point.
 	static bool ensureMSOCResourcesMatchConfig();
 
+	// ============================================================
+	// Threadpool state & per-frame config cache
+	// ============================================================
+
 	// Phase 3.2 async-rasterization state.
 	//
 	// g_threadpool is created once in installPatches and lives for the
@@ -453,44 +478,65 @@ namespace msoc::patch::occlusion {
 	static float g_occluderMinDimensionEffective  = 0.0f;
 	static float g_insideOccluderMarginEffective  = 0.0f;
 
-	// _Claude_ Drain-parallel worker pool. Sized for the measured workload
-	// (~840 TestRect queries/frame in dense scenes); profiling shows
-	// diminishing returns beyond 2-way because hiZ-buffer cache traffic
-	// between cores starts to dominate. C++17 condvar/mutex fallback in
-	// place of std::counting_semaphore (project targets stdcpp17 per
-	// MWSE.vcxproj LanguageStandard). Workers park on the start cv at
-	// ~0% CPU when idle and are spawned unconditionally so a runtime
-	// MCM toggle of OcclusionParallelDrain works without restart. Not
-	// yet wired into drainPendingDisplays — the dispatch path lands in
-	// a later commit, gated by Configuration::OcclusionParallelDrain.
-	constexpr unsigned int kDrainWorkerCount = 2;
-	constexpr size_t kParallelDrainMin = 100;
+	// _Claude_ Per-frame cache of loop-invariant Configuration:: reads.
+	// The hot paths (rasterizeTriShape, cullShowBody recursion, drain
+	// phase 2, light callback, ScopedUsAccumulator ctor) bracket opaque
+	// cross-TU calls into MaskedOcclusionCulling and NI::display. Because
+	// Configuration:: statics have external linkage, the optimiser assumes
+	// those calls may mutate them and reloads after each call; caching
+	// into these internal-linkage (static) copies lets the compiler hoist
+	// the reads out of hot loops and register-allocate them across the
+	// opaque calls. Contract: MCM never rewrites Configuration:: mid-frame
+	// (Lua side only pushes between frames), so a single refresh at the
+	// top of each active top-level CullShow call is sound. Defaults match
+	// Config.cpp so reads before the first refresh (plugin init, light
+	// callback fired on a non-active frame) still see consistent values.
+	static float        g_depthSlackWorldUnitsEffective      = 128.0f;
+	static unsigned int g_occluderMaxTrianglesEffective      = 4096;
+	static float        g_occludeeMinRadiusEffective         = 1.0f;
+	static bool         g_skipTerrainOccludeesEffective      = true;
+	static bool         g_aggregateTerrainEffective          = true;
+	static unsigned int g_terrainResolutionEffective         = 1;
+	static unsigned int g_temporalCoherenceFramesEffective   = 4;
+	static bool         g_cullLightsEffective                = true;
+	static unsigned int g_lightCullHysteresisFramesEffective = 3;
+	static bool         g_tintOccluderEffective              = false;
+	static bool         g_tintOccludedEffective              = false;
+	static bool         g_tintTestedEffective                = false;
+	static bool         g_logEnabledEffective                = false;
 
-	struct DrainWorkerRange {
-		size_t lo;
-		size_t hi;
-	};
+	// _Claude_ Drain-parallel worker pool — DISABLED. The serial drain
+	// is the only active path; the infrastructure below is preserved as
+	// commented-out reference for a future re-enable. If you bring this
+	// back, also restore: Configuration::OcclusionParallelDrain (Config.h/
+	// .cpp + Lua config/mcm), drainWorkerMain, the worker-pool spawn in
+	// installPatches, and the runParallel branch in drainPendingDisplays.
+	//
+	// Sizing rationale kept for reference: ~840 TestRect queries/frame in
+	// dense scenes, 2-way split (hiZ cache traffic dominates beyond that),
+	// C++17 condvar/mutex fallback for std::counting_semaphore, workers
+	// parked on start cv at ~0% CPU when idle.
+	//
+	// constexpr unsigned int kDrainWorkerCount = 2;
+	// constexpr size_t kParallelDrainMin = 100;
+	//
+	// struct DrainWorkerRange {
+	// 	size_t lo;
+	// 	size_t hi;
+	// };
+	//
+	// static std::jthread g_drainWorkers[kDrainWorkerCount];
+	// static DrainWorkerRange g_drainRanges[kDrainWorkerCount];
+	//
+	// static std::mutex g_drainMtx;
+	// static std::condition_variable_any g_drainStartCv;
+	// static std::condition_variable g_drainDoneCv;
+	// static unsigned int g_drainStartTickets = 0;
+	// static unsigned int g_drainDoneTickets = 0;
 
-	// _Claude_ jthread + stop_token: each worker carries a stop_token
-	// passed by the jthread runtime. Teardown is automatic via the
-	// jthread destructor (request_stop + join). The g_drainStartCv is
-	// std::condition_variable_any because only that overload supports
-	// stop-token-aware wait; the done cv stays std::condition_variable
-	// (waited only by the main thread, which isn't a jthread).
-	static std::jthread g_drainWorkers[kDrainWorkerCount];
-	static DrainWorkerRange g_drainRanges[kDrainWorkerCount];
-
-	static std::mutex g_drainMtx;
-	static std::condition_variable_any g_drainStartCv;
-	static std::condition_variable g_drainDoneCv;
-	static unsigned int g_drainStartTickets = 0;
-	static unsigned int g_drainDoneTickets = 0;
-
-	// _Claude_ Diagnostic timer for the parallel barrier (release →
-	// dispatch → wait-for-completion). Gated by the log-channel flags
-	// like the other ScopedUsAccumulator counters. Stays at 0 until
-	// commit 5 wires the parallel path; harmless until then.
-	static uint64_t g_parallelDrainUs = 0;
+	// ============================================================
+	// Watchdog implementation
+	// ============================================================
 
 	// _Claude_ Watchdog loop (body — forward-declared higher up).
 	// 250ms cadence is a compromise: fast enough to catch a freeze
@@ -541,6 +587,10 @@ namespace msoc::patch::occlusion {
 		}
 	}
 
+	// ============================================================
+	// Deferred-display queue & timing helpers
+	// ============================================================
+
 	// _Claude_ Gated on either log channel — when both are off the timer is
 	// a no-op (nullptr target, no clock reads), saving the QPC overhead in
 	// production. Read-once at construction so a mid-scope MCM toggle can't
@@ -549,8 +599,7 @@ namespace msoc::patch::occlusion {
 		uint64_t* target;
 		std::chrono::steady_clock::time_point start;
 		explicit ScopedUsAccumulator(uint64_t& t)
-			: target((Configuration::OcclusionLogPerFrame
-					   || Configuration::OcclusionLogAggregate) ? &t : nullptr) {
+			: target(g_logEnabledEffective ? &t : nullptr) {
 			if (target) start = std::chrono::steady_clock::now();
 		}
 		~ScopedUsAccumulator() {
@@ -612,6 +661,10 @@ namespace msoc::patch::occlusion {
 	};
 
 	static std::vector<DrainSlot> g_drainSlots;
+
+	// ============================================================
+	// Debug tinting & occluder property classification
+	// ============================================================
 
 	// Debug tint overlay. When any of the three DebugOcclusionTint* flags
 	// in Configuration are set, classified leaves render in a distinct hue:
@@ -876,6 +929,10 @@ namespace msoc::patch::occlusion {
 		}
 	}
 
+	// ============================================================
+	// Camera & projection math
+	// ============================================================
+
 	// Fill g_worldToClip by transposing NI::Camera::worldToCamera into
 	// Intel's column-major v*M layout. NI stores row-major M*v — clip[r] =
 	// Σ_c ni[r*4+c]*v[c] (verified against NiCamera::ScreenSpaceBoundBound
@@ -933,7 +990,7 @@ namespace msoc::patch::occlusion {
 		const TES3::Vector3& center, float radius) {
 		const ClipXYW c = projectWorld(center.x, center.y, center.z);
 
-		const float wMin = c.w - (radius + Configuration::OcclusionDepthSlackWorldUnits) * g_wGradMag;
+		const float wMin = c.w - (radius + g_depthSlackWorldUnitsEffective) * g_wGradMag;
 		if (wMin <= kNearClipW) {
 			g_queryNearClip.fetch_add(1, std::memory_order_relaxed);
 			return ::MaskedOcclusionCulling::VISIBLE;
@@ -955,6 +1012,10 @@ namespace msoc::patch::occlusion {
 
 		return g_msoc->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
 	}
+
+	// ============================================================
+	// Light culling
+	// ============================================================
 
 	// _Claude_ Registry management. Dedup on register so double-registration
 	// (e.g. DLL reload) doesn't cause duplicate observer dispatch. Called
@@ -1008,7 +1069,7 @@ namespace msoc::patch::occlusion {
 		if (!realEnabled) {
 			return false;
 		}
-		if (!Configuration::OcclusionCullLights) {
+		if (!g_cullLightsEffective) {
 			return true;
 		}
 		if (!g_msoc) {
@@ -1060,7 +1121,7 @@ namespace msoc::patch::occlusion {
 			e.lastQueryFrame = g_frameCounter;
 			if (occluded) {
 				if (e.consecOccluded < 0xFF) ++e.consecOccluded;
-				if (e.consecOccluded >= Configuration::OcclusionLightCullHysteresisFrames) {
+				if (e.consecOccluded >= g_lightCullHysteresisFramesEffective) {
 					e.cullActive = true;
 				}
 			}
@@ -1112,6 +1173,10 @@ namespace msoc::patch::occlusion {
 		}
 	}
 
+	// ============================================================
+	// Occluder rasterisation
+	// ============================================================
+
 	// Rasterise a shape's actual triangles (in world space) as an occluder.
 	// Using real triangles instead of the shape's bounding box prevents the
 	// classic "sign hanging off a wall gets falsely occluded because it
@@ -1152,7 +1217,7 @@ namespace msoc::patch::occlusion {
 		// and Intel's binning cost scale with triCount, and huge meshes rarely
 		// produce proportionally better occlusion. Still visibility-tested via
 		// their bounding sphere on the drain pass.
-		if (triCount > Configuration::OcclusionOccluderMaxTriangles) {
+		if (triCount > g_occluderMaxTrianglesEffective) {
 			++g_skippedTriCount;
 			return false;
 		}
@@ -1272,6 +1337,10 @@ namespace msoc::patch::occlusion {
 		g_occluderTriangles += outTri; // _Claude_ frame-wide triangle sum
 		return true;
 	}
+
+	// ============================================================
+	// Terrain aggregation
+	// ============================================================
 
 	// _Claude_ Simple frustum check for aggregate-terrain walk. No mask
 	// bookkeeping — the aggregate pass runs before cullShowBody so
@@ -1424,7 +1493,7 @@ namespace msoc::patch::occlusion {
 	// 2=Corners (2x2, 2 tris/subcell). Out-of-range values clamp to Full
 	// so a malformed JSON edit doesn't disable terrain entirely.
 	static unsigned int currentTerrainStep() {
-		switch (Configuration::OcclusionTerrainResolution) {
+		switch (g_terrainResolutionEffective) {
 		case 1: return 2;
 		case 2: return 4;
 		default: return 1;
@@ -1452,7 +1521,7 @@ namespace msoc::patch::occlusion {
 			}
 		}
 		entry.triCount = static_cast<unsigned int>(entry.indices.size() / 3);
-		entry.builtForResolution = static_cast<uint8_t>(Configuration::OcclusionTerrainResolution);
+		entry.builtForResolution = static_cast<uint8_t>(g_terrainResolutionEffective);
 	}
 
 	// _Claude_ Aggregate terrain rasteriser. Walks the WorldLandscape
@@ -1499,7 +1568,7 @@ namespace msoc::patch::occlusion {
 			// next visit. nodePtr stays valid (the NI::Pointer keeps
 			// the engine's NiNode pinned), so we only need to redo
 			// the verts/indices.
-			const uint8_t curRes = static_cast<uint8_t>(Configuration::OcclusionTerrainResolution);
+			const uint8_t curRes = static_cast<uint8_t>(g_terrainResolutionEffective);
 			if (inserted) {
 				entry.nodePtr = landNode;
 				buildLandCacheEntry(entry, landNode);
@@ -1563,6 +1632,10 @@ namespace msoc::patch::occlusion {
 			}
 		}
 	}
+
+	// ============================================================
+	// Main scene-graph traversal
+	// ============================================================
 
 	// Body of the engine's CullShow, with MSOC query + occluder rasterisation
 	// wedged between the frustum test and the Display call. Replaces the
@@ -1656,7 +1729,7 @@ namespace msoc::patch::occlusion {
 				// the depth buffer as merged per-Land submissions, and
 				// re-rasterising them is duplicate work (harmless depth-
 				// wise but wastes triangles / threadpool queue slots).
-				const bool skipAsAggregated = Configuration::OcclusionAggregateTerrain
+				const bool skipAsAggregated = g_aggregateTerrainEffective
 					&& isLandscapeDescendant(self, g_worldLandscapeRoot);
 				if (!skipAsAggregated
 					&& boundRadius >= g_occluderRadiusMinEffective
@@ -1674,7 +1747,7 @@ namespace msoc::patch::occlusion {
 						if (rasterizeTriShape(static_cast<NI::TriShape*>(self), eye)) {
 							++g_rasterizedAsOccluder;
 							didRasterise = true;
-							if (Configuration::DebugOcclusionTintOccluder) {
+							if (g_tintOccluderEffective) {
 								tintEmissive(self, kTintOccluder);
 							}
 						}
@@ -1692,6 +1765,10 @@ namespace msoc::patch::occlusion {
 		restoreIgnoreBits();
 	}
 
+	// ============================================================
+	// Deferred-display drain pipeline
+	// ============================================================
+
 	// _Claude_ Phase-1 of the two-phase drain. Classifies entries in the
 	// half-open range [lo, hi) of g_pendingDisplays into g_drainSlots.
 	// Read-only on shared state: no writes to g_drainCache, no counter
@@ -1703,9 +1780,9 @@ namespace msoc::patch::occlusion {
 	// and parallel modes lets the serial-only refactor commit validate
 	// the phase-1 logic before threading is introduced.
 	static void classifyDrainRange(size_t lo, size_t hi) {
-		const unsigned int tcFrames = Configuration::OcclusionTemporalCoherenceFrames;
-		const bool skipTerrainEnabled = Configuration::OcclusionSkipTerrainOccludees;
-		const float tinyThreshold = Configuration::OcclusionOccludeeMinRadius;
+		const unsigned int tcFrames = g_temporalCoherenceFramesEffective;
+		const bool skipTerrainEnabled = g_skipTerrainOccludeesEffective;
+		const float tinyThreshold = g_occludeeMinRadiusEffective;
 
 		for (size_t i = lo; i < hi; ++i) {
 			const auto& p = g_pendingDisplays[i];
@@ -1745,18 +1822,12 @@ namespace msoc::patch::occlusion {
 			}
 
 			::MaskedOcclusionCulling::CullingResult r;
-			{
-				// _Claude_ Explicit ns-resolution timer; ScopedUsAccumulator
-				// truncates sub-µs calls to 0 and individual TestRect calls
-				// here are ~100-700 ns. Accumulates into g_drainTestRectNs;
-				// emitted as testRectNs in the per-frame log line.
-				const auto t0 = std::chrono::steady_clock::now();
-				r = testSphereVisible(
-					p.shape->worldBoundOrigin, p.shape->worldBoundRadius);
-				g_drainTestRectNs += static_cast<uint64_t>(
-					std::chrono::duration_cast<std::chrono::nanoseconds>(
-						std::chrono::steady_clock::now() - t0).count());
-			}
+			// _Claude_ No per-call timing here. Phase-1 wall time is
+			// bracketed once on the main thread (see g_classifyUs at
+			// the runParallel decision in drainPendingDisplays); per-call
+			// sums across workers measured CPU time, not wall time.
+			r = testSphereVisible(
+				p.shape->worldBoundOrigin, p.shape->worldBoundRadius);
 			slot.ranTestRect = true;
 			switch (r) {
 			case ::MaskedOcclusionCulling::VISIBLE:
@@ -1772,40 +1843,33 @@ namespace msoc::patch::occlusion {
 		}
 	}
 
-	// _Claude_ Worker thread body. Sleeps on the start cv until the main
-	// thread publishes work, then runs classifyDrainRange over its assigned
-	// slice and signals completion.
+	// _Claude_ Parallel-drain worker body — DISABLED along with the rest
+	// of the parallel path. Kept as commented reference; see the worker-
+	// pool block higher in this file for the full checklist if re-enabled.
 	//
-	// Stop semantics via std::stop_token (jthread-owned). The cv_any wait
-	// returns either when the predicate becomes true OR when stop is
-	// requested (jthread destructor / explicit request_stop fires the
-	// stop callback, which internally notifies the cv). After the wait we
-	// branch on stop_requested so a teardown cleanly exits without
-	// touching g_drainRanges. workerId is bounds-asserted for refactor
-	// safety.
-	static void drainWorkerMain(std::stop_token stop, unsigned int workerId) {
-		assert(workerId < kDrainWorkerCount);
-
-		while (!stop.stop_requested()) {
-			{
-				std::unique_lock<std::mutex> lock(g_drainMtx);
-				g_drainStartCv.wait(lock, stop, [] {
-					return g_drainStartTickets > 0;
-					});
-				if (stop.stop_requested()) break;
-				--g_drainStartTickets;
-			}
-
-			const auto range = g_drainRanges[workerId];
-			classifyDrainRange(range.lo, range.hi);
-
-			{
-				std::lock_guard<std::mutex> lock(g_drainMtx);
-				++g_drainDoneTickets;
-			}
-			g_drainDoneCv.notify_one();
-		}
-	}
+	// static void drainWorkerMain(std::stop_token stop, unsigned int workerId) {
+	// 	assert(workerId < kDrainWorkerCount);
+	//
+	// 	while (!stop.stop_requested()) {
+	// 		{
+	// 			std::unique_lock<std::mutex> lock(g_drainMtx);
+	// 			g_drainStartCv.wait(lock, stop, [] {
+	// 				return g_drainStartTickets > 0;
+	// 				});
+	// 			if (stop.stop_requested()) break;
+	// 			--g_drainStartTickets;
+	// 		}
+	//
+	// 		const auto range = g_drainRanges[workerId];
+	// 		classifyDrainRange(range.lo, range.hi);
+	//
+	// 		{
+	// 			std::lock_guard<std::mutex> lock(g_drainMtx);
+	// 			++g_drainDoneTickets;
+	// 		}
+	// 		g_drainDoneCv.notify_one();
+	// 	}
+	// }
 
 	// Drain the deferred-display queue built during the main traversal.
 	// Each entry is re-tested against the now-complete depth buffer and
@@ -1846,61 +1910,52 @@ namespace msoc::patch::occlusion {
 
 		const size_t n = g_pendingDisplays.size();
 
-		// _Claude_ Gate the parallel path. Checking joinable() on every
-		// worker (not just worker 0) catches the partial-spawn-failure
-		// case from installPatches: a default-constructed std::thread
-		// reports joinable()==false, so any slot left empty by an
-		// exception during spawn cleanly disqualifies the parallel path
-		// for the rest of the session. Below kParallelDrainMin the
-		// barrier overhead dominates the work — fall back to serial.
-		bool poolReady = true;
-		for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-			if (!g_drainWorkers[i].joinable()) { poolReady = false; break; }
-		}
-		const bool runParallel =
-			Configuration::OcclusionParallelDrain
-			&& n >= kParallelDrainMin
-			&& poolReady;
+		// _Claude_ Parallel drain DISABLED. Only the serial classify path
+		// is active. The worker-pool gate, dispatch, and done-barrier are
+		// preserved below as commented reference; see the worker-pool
+		// block higher in this file for the re-enable checklist.
+		//
+		// bool poolReady = true;
+		// for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
+		// 	if (!g_drainWorkers[i].joinable()) { poolReady = false; break; }
+		// }
+		// const bool runParallel =
+		// 	Configuration::OcclusionParallelDrain
+		// 	&& n >= kParallelDrainMin
+		// 	&& poolReady;
 
-		// Phase 1: classify. Workers each take a contiguous half of
-		// g_pendingDisplays; the main thread blocks on the done barrier
-		// rather than taking a third share, because at the measured
-		// workload (~840 entries) the condvar round-trip (~1 µs) makes
-		// a 3-way split slower than a 2-way split that parks the main
-		// thread.
+		// Phase 1: classify. Serial over the whole queue.
 		g_drainSlots.resize(n);
-		if (runParallel) {
-			// _Claude_ Stage marker: a worker hang during phase 1 will
-			// freeze the main thread inside the done barrier with this
-			// stage latched. The watchdog snapshot then shows
-			// stage=14(drainClassify) with climbing sinceFrameEndMs —
-			// the diagnostic signal for this new failure mode. Serial
-			// fallback stays at stage 11 (drain) since a serial-mode
-			// freeze inside classifyDrainRange is indistinguishable
-			// from a freeze in the pre-refactor loop.
-			g_lastStage = 14;
-			const size_t half = n / 2;
-			g_drainRanges[0] = { 0, half };
-			g_drainRanges[1] = { half, n };
-			{
-				ScopedUsAccumulator tt(g_parallelDrainUs);
-				{
-					std::lock_guard<std::mutex> lock(g_drainMtx);
-					g_drainStartTickets = kDrainWorkerCount;
-					g_drainDoneTickets = 0;
-				}
-				g_drainStartCv.notify_all();
-				{
-					std::unique_lock<std::mutex> lock(g_drainMtx);
-					g_drainDoneCv.wait(lock, [] {
-						return g_drainDoneTickets >= kDrainWorkerCount;
-						});
-				}
-			}
-		}
-		else {
+		// if (runParallel) {
+		// 	g_lastStage = 14;
+		// 	const size_t half = n / 2;
+		// 	g_drainRanges[0] = { 0, half };
+		// 	g_drainRanges[1] = { half, n };
+		// }
+
+		// _Claude_ Phase-1 wall-time bracket. Kept so classifyUs still
+		// reports into MSOC.log.
+		const auto classifyT0 = std::chrono::steady_clock::now();
+		// if (runParallel) {
+		// 	{
+		// 		std::lock_guard<std::mutex> lock(g_drainMtx);
+		// 		g_drainStartTickets = kDrainWorkerCount;
+		// 		g_drainDoneTickets = 0;
+		// 	}
+		// 	g_drainStartCv.notify_all();
+		// 	{
+		// 		std::unique_lock<std::mutex> lock(g_drainMtx);
+		// 		g_drainDoneCv.wait(lock, [] {
+		// 			return g_drainDoneTickets >= kDrainWorkerCount;
+		// 			});
+		// 	}
+		// }
+		// else {
 			classifyDrainRange(0, n);
-		}
+		// }
+		g_classifyUs = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - classifyT0).count());
 
 		// _Claude_ Shared handler for OCCLUDED verdicts (from both fresh
 		// and cached paths). Lambda because the codebase forbids goto;
@@ -1908,7 +1963,7 @@ namespace msoc::patch::occlusion {
 		// rather than capturing it so the body is independent of any
 		// loop-local state.
 		auto handleOccluded = [&](const PendingDisplay& p) {
-			if (Configuration::DebugOcclusionTintOccluded) {
+			if (g_tintOccludedEffective) {
 				tintEmissive(p.shape, kTintOccluded);
 				ScopedUsAccumulator tt(g_drainDisplayUs);
 				p.shape->vTable.asAVObject->display(p.shape, p.camera);
@@ -1943,7 +1998,7 @@ namespace msoc::patch::occlusion {
 			// Fresh TestRect path (Visible / Occluded / ViewCulled).
 			if (s.ranTestRect) {
 				++g_queryTested;
-				if (Configuration::OcclusionTemporalCoherenceFrames > 0) {
+				if (g_temporalCoherenceFramesEffective > 0) {
 					++g_drainCacheMisses;
 					// _Claude_ Cache only OCCLUDED. VISIBLE and VIEW_CULLED
 					// still call display() this frame, which dereferences
@@ -1974,7 +2029,7 @@ namespace msoc::patch::occlusion {
 			// _Claude_ Skip Tested-tint for shapes that already got the
 			// Occluder tint in the main pass; last-write-wins would flip
 			// yellow → green and hide the occluder classification.
-			else if (Configuration::DebugOcclusionTintTested && !p.rasterisedAsOccluder) {
+			else if (g_tintTestedEffective && !p.rasterisedAsOccluder) {
 				tintEmissive(p.shape, kTintTested);
 			}
 			{
@@ -1985,6 +2040,10 @@ namespace msoc::patch::occlusion {
 
 		g_pendingDisplays.clear();
 	}
+
+	// ============================================================
+	// CullShow detour & frame lifecycle
+	// ============================================================
 
 	// Function-level detour installed at NiAVObject::CullShow (0x6EB480).
 	// Every direct caller in the engine — NiNode::Display, all 4
@@ -1999,20 +2058,11 @@ namespace msoc::patch::occlusion {
 	// renderMainScene (load screen, screenshots, etc.) — just runs the
 	// body, matching the engine 1:1.
 	static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera* camera) {
-		// _Claude_ Depth tracking for freeze diagnostic. Increments on
-		// every entry (top-level + recursive descents through display());
-		// the per-frame max gets surfaced in the periodic log. Wrapped in
-		// a struct so the decrement happens on every return path including
-		// any future early-exit paths.
-		struct DepthGuard {
-			DepthGuard() {
-				++g_callDepth;
-				if (g_callDepth > g_maxCallDepthThisFrame) {
-					g_maxCallDepthThisFrame = g_callDepth;
-				}
-			}
-			~DepthGuard() { --g_callDepth; }
-		} depthGuard;
+		// _Claude_ Depth tracking for freeze diagnostic. Fires on every
+		// entry (top-level + recursive descents through display()); the
+		// per-frame max is surfaced in the periodic log. RAII so the
+		// decrement happens on every return path. See CallDepthGuard.
+		CallDepthGuard depthGuard;
 		bool isTopLevel = false;
 		TES3::Cell* activeCell = nullptr;
 		if (!g_msocActive && g_inRenderMainScene) {
@@ -2076,6 +2126,23 @@ namespace msoc::patch::occlusion {
 							g_occluderMinDimensionEffective = Configuration::OcclusionOccluderMinDimensionExterior;
 							g_insideOccluderMarginEffective = Configuration::OcclusionInsideOccluderMarginExterior;
 						}
+						// _Claude_ Refresh the rest of the hot-path config
+						// cache. See the g_*Effective comment block for the
+						// mid-frame-change contract these rely on.
+						g_depthSlackWorldUnitsEffective      = Configuration::OcclusionDepthSlackWorldUnits;
+						g_occluderMaxTrianglesEffective      = Configuration::OcclusionOccluderMaxTriangles;
+						g_occludeeMinRadiusEffective         = static_cast<float>(Configuration::OcclusionOccludeeMinRadius);
+						g_skipTerrainOccludeesEffective      = Configuration::OcclusionSkipTerrainOccludees;
+						g_aggregateTerrainEffective          = Configuration::OcclusionAggregateTerrain;
+						g_terrainResolutionEffective         = Configuration::OcclusionTerrainResolution;
+						g_temporalCoherenceFramesEffective   = Configuration::OcclusionTemporalCoherenceFrames;
+						g_cullLightsEffective                = Configuration::OcclusionCullLights;
+						g_lightCullHysteresisFramesEffective = Configuration::OcclusionLightCullHysteresisFrames;
+						g_tintOccluderEffective              = Configuration::DebugOcclusionTintOccluder;
+						g_tintOccludedEffective              = Configuration::DebugOcclusionTintOccluded;
+						g_tintTestedEffective                = Configuration::DebugOcclusionTintTested;
+						g_logEnabledEffective                = Configuration::OcclusionLogPerFrame
+						                                    || Configuration::OcclusionLogAggregate;
 						// Captured for drain-loop terrain-skip.
 						g_worldLandscapeRoot = dh->worldLandscapeRoot;
 						// Forwarded to the isTopLevel block below for
@@ -2232,10 +2299,8 @@ namespace msoc::patch::occlusion {
 			}
 			g_rasterizeTimeUs = 0;
 			g_drainPhaseTimeUs = 0;
-			g_drainTestRectUs = 0; // _Claude_ audit
-			g_drainTestRectNs = 0; // _Claude_ ns-resolution counter for sub-µs TestRect calls
+			g_classifyUs = 0; // _Claude_ phase-1 wall time, comparable across serial/parallel
 			g_drainDisplayUs = 0; // _Claude_ audit
-			g_parallelDrainUs = 0; // _Claude_ parallel-drain barrier wall time
 			g_asyncFlushTimeUs = 0;
 			// _Claude_ Freeze diagnostics: per-frame counters reset here
 			// alongside the rest. Session maxes (g_max*Session) are NOT
@@ -2390,10 +2455,8 @@ namespace msoc::patch::occlusion {
 					<< " menuModeSkipped=" << g_skippedMenuMode // _Claude_ cumulative
 					<< " rasterizeUs=" << g_rasterizeTimeUs
 					<< " drainUs=" << g_drainPhaseTimeUs
-					<< " testRectUs=" << g_drainTestRectUs // _Claude_ audit (broken: truncates sub-µs calls; see testRectNs)
-					<< " testRectNs=" << g_drainTestRectNs // _Claude_ honest ns-summed TestRect total
+					<< " classifyUs=" << g_classifyUs // _Claude_ phase-1 wall (serial = work; parallel = barrier)
 					<< " displayUs=" << g_drainDisplayUs // _Claude_ audit
-					<< " parallelDrainUs=" << g_parallelDrainUs // _Claude_ phase-1 barrier wall time
 					<< " asyncFlushUs=" << g_asyncFlushTimeUs
 					<< " wakeUs=" << g_wakeThreadsTimeUs // _Claude_ this frame's WakeThreads spin
 					<< " maxWakeUsSess=" << g_maxWakeThreadsUsSession // _Claude_ lifetime peak
@@ -2406,6 +2469,10 @@ namespace msoc::patch::occlusion {
 			}
 		}
 	}
+
+	// ============================================================
+	// renderMainScene wrapper & MSOC resource management
+	// ============================================================
 
 	// Wrapper for TES3Game_static::renderMainScene (0x41C400). Installed at
 	// its 3 known call sites (renderNextFrame, takeScreenshot,
@@ -2622,6 +2689,10 @@ namespace msoc::patch::occlusion {
 		}
 	}
 
+	// ============================================================
+	// Install & public query API
+	// ============================================================
+
 	void installPatches() {
 		auto& log = log::getLog();
 
@@ -2662,41 +2733,32 @@ namespace msoc::patch::occlusion {
 				<< e.what() << std::endl;
 		}
 
-		// _Claude_ Drain-parallel worker pool. Spawned unconditionally so
-		// runtime MCM toggle of OcclusionParallelDrain works without restart;
-		// workers park on the start cv at ~0% CPU when idle.
+		// _Claude_ Drain-parallel worker pool spawn — DISABLED. The
+		// serial drain is the only active path. Preserved as commented
+		// reference; to re-enable, restore this block plus the worker
+		// globals, drainWorkerMain, the runParallel branch in
+		// drainPendingDisplays, and Configuration::OcclusionParallelDrain.
 		//
-		// All-or-nothing spawn: if any jthread ctor throws (bad_alloc, OS
-		// thread-limit exhaustion), tear down whichever workers did start
-		// by move-assigning empty jthreads — that triggers each running
-		// jthread's dtor (request_stop + join). Stop-token-aware wait in
-		// drainWorkerMain wakes the parked worker so the join completes
-		// promptly. The joinable() gate in drainPendingDisplays then
-		// cleanly rejects the parallel path for the rest of the session.
-		bool drainPoolStarted = true;
-		try {
-			for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-				// jthread auto-passes its stop_token as the first
-				// argument when the callable accepts one.
-				g_drainWorkers[i] = std::jthread(drainWorkerMain, i);
-			}
-		}
-		catch (const std::exception& e) {
-			log << "MSOC: drain worker spawn failed: " << e.what()
-				<< "; tearing down partial state, parallel drain disabled."
-				<< std::endl;
-			drainPoolStarted = false;
-			for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-				// Move-assigning an empty jthread destroys the previous
-				// (running) one, which calls request_stop + join.
-				g_drainWorkers[i] = std::jthread{};
-			}
-		}
-		if (drainPoolStarted) {
-			log << "MSOC: drain worker pool spawned; workers="
-				<< kDrainWorkerCount
-				<< " (gated by OcclusionParallelDrain)." << std::endl;
-		}
+		// bool drainPoolStarted = true;
+		// try {
+		// 	for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
+		// 		g_drainWorkers[i] = std::jthread(drainWorkerMain, i);
+		// 	}
+		// }
+		// catch (const std::exception& e) {
+		// 	log << "MSOC: drain worker spawn failed: " << e.what()
+		// 		<< "; tearing down partial state, parallel drain disabled."
+		// 		<< std::endl;
+		// 	drainPoolStarted = false;
+		// 	for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
+		// 		g_drainWorkers[i] = std::jthread{};
+		// 	}
+		// }
+		// if (drainPoolStarted) {
+		// 	log << "MSOC: drain worker pool spawned; workers="
+		// 		<< kDrainWorkerCount
+		// 		<< " (gated by OcclusionParallelDrain)." << std::endl;
+		// }
 
 		// Function-level detour at NiAVObject::CullShow. The 5-byte
 		// prologue (sub esp,14h; push ebx; push esi) gets overwritten
@@ -2784,6 +2846,10 @@ namespace msoc::patch::occlusion {
 	}
 
 }
+
+// ============================================================
+// C-ABI exports (out-of-tree consumers: MGE-XE etc.)
+// ============================================================
 
 // _Claude_ Stable C-ABI shims. Named for GetProcAddress lookup from
 // out-of-tree consumers (MGE-XE etc.). NI::Light* and void* share

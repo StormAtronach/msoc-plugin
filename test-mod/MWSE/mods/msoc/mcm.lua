@@ -354,16 +354,6 @@ local function registerModConfig()
         callback    = applyChangeClamped,
     })
 
-    threadpool:createOnOffButton({
-        label       = "Parallel drain",
-        description = "Run the visibility-drain phase on the threadpool too. "
-            .. "Experimental; enables another worker pool after Flush() so TestRect "
-            .. "calls fan out across cores. Gains depend on drain being a bottleneck "
-            .. "in MSOC.log metrics.",
-        configKey   = "OcclusionParallelDrain",
-        callback    = applyChange,
-    })
-
     ----------------------------------------------------------------
     -- Debug tinting / logging
     ----------------------------------------------------------------

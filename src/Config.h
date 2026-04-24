@@ -57,7 +57,6 @@ namespace msoc {
         static unsigned int OcclusionThreadpoolBinsW;
         static unsigned int OcclusionThreadpoolBinsH;
         static unsigned int OcclusionTemporalCoherenceFrames;
-        static bool OcclusionParallelDrain;
 
         static bool OcclusionLogPerFrame;
         static bool OcclusionLogAggregate;

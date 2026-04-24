@@ -46,7 +46,6 @@ local default_config = {
     OcclusionThreadpoolBinsW            = 4,
     OcclusionThreadpoolBinsH            = 2,
     OcclusionTemporalCoherenceFrames    = 4,
-    OcclusionParallelDrain              = false,
 
     -- Logging.
     OcclusionLogPerFrame                = false,
