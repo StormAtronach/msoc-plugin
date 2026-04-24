@@ -2,6 +2,7 @@
 .vs/
 *.user
 *.suo
+*.code-workspace
 
 # CMake build trees
 /build/

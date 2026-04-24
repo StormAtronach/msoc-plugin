@@ -76,6 +76,26 @@ namespace msoc::patch::occlusion {
 		float minX, float minY, float minZ,
 		float maxX, float maxY, float maxZ);
 
+	// World-space oriented bounding box (OBB) test. Expands `center +
+	// (±vx ±vy ±vz)` into 8 corners, runs MOC's TestTriangles against
+	// the 12 box faces. Tighter than testOcclusionSphere for non-
+	// spherical shapes (architectural giants, towers) — catches meshes
+	// whose sphere was too loose to fit behind a single occluder in
+	// screen space. Expect ~1-5 μs per call vs ~100 ns for TestRect;
+	// callers should gate on radius threshold before using this path.
+	MaskQueryResult testOcclusionOBB(
+		float cx, float cy, float cz,
+		float vxX, float vxY, float vxZ,
+		float vyX, float vyY, float vyZ,
+		float vzX, float vzY, float vzZ);
+
+	// Write the current occlusion mask to disk as a PFM (Portable
+	// FloatMap) image. Grayscale, raw float32 depths bottom-up — opens
+	// in GIMP / Photoshop / ImageJ without conversion. Use for
+	// diagnosing occluder coverage ("is the canton actually in the
+	// mask?" without wiring visual tints). Returns true on success.
+	bool dumpOcclusionMask(const char* path);
+
 }
 
 // Stable C-ABI exports for out-of-tree consumers (MGE-XE etc.). Resolve
@@ -104,3 +124,23 @@ extern "C" __declspec(dllexport)
 int __cdecl mwse_testOcclusionAABB(
 	float minX, float minY, float minZ,
 	float maxX, float maxY, float maxZ);
+
+// _Claude_ OBB (oriented bounding box) test — 12 floats describe the
+// box as center + 3 axis half-extent vectors (vx/vy/vz). Escalation
+// path for giants whose bounding sphere is too loose to ever resolve
+// as OCCLUDED even when most of the mesh sits behind an occluder.
+// Return codes match the MWSE_OCC_* set used by the sphere/AABB exports.
+extern "C" __declspec(dllexport)
+int __cdecl mwse_testOcclusionOBB(
+	float cx, float cy, float cz,
+	float vxX, float vxY, float vxZ,
+	float vyX, float vyY, float vyZ,
+	float vzX, float vzY, float vzZ);
+
+// _Claude_ Dump the current occlusion mask to `path` as a PFM image
+// (Portable FloatMap — 3-line ASCII header + raw float32 depths,
+// bottom-up). Returns 1 on success, 0 otherwise. Intended for
+// keypress-driven diagnostics from consumer processes; consumer
+// picks the file path so it can sit next to its own logs.
+extern "C" __declspec(dllexport)
+int __cdecl mwse_dumpOcclusionMask(const char* path);

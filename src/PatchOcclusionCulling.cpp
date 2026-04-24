@@ -77,6 +77,30 @@ namespace msoc::patch::occlusion {
 	// Intel MSOC is allocated on the heap via Create()/Destroy(). We leak
 	// this on process exit (same pattern as other long-lived MWSE globals).
 	static ::MaskedOcclusionCulling* g_msoc = nullptr;
+	// Double-buffer: g_msoc_prev holds the PREVIOUS frame's completed
+	// mask and is what external consumers (MGE-XE via mwse_testOcclusion*)
+	// read from. The plugin's own render pipeline rasterizes into g_msoc
+	// each frame; at drain-complete we swap the pointers so the freshly-
+	// built buffer becomes the next snapshot available to external queries
+	// and the (now stale) ex-prev buffer becomes the write target for the
+	// next frame's rasterization. Gives consumers a stable, race-free view:
+	// they always see "the mask as of the end of the previous frame".
+	static ::MaskedOcclusionCulling* g_msoc_prev = nullptr;
+	// Matrix + NDC constants snapshotted at the same instant as the mask
+	// swap — external queries project sphere centers through LAST frame's
+	// view matrix, matching the depth data in g_msoc_prev.
+	static float g_worldToClip_prev[16] = {};
+	static float g_ndcRadiusX_prev = 0.0f;
+	static float g_ndcRadiusY_prev = 0.0f;
+	static float g_wGradMag_prev   = 0.0f;
+
+	// Freshness gate. Wall-clock tick recorded at swap time; external
+	// queries reject the snapshot if it's older than kSnapshotMaxAgeMs.
+	// Guards against consuming a very stale mask when the plugin hasn't
+	// rendered for a while (alt-tab, pause menu that skips the hook,
+	// loading screen, cell-load stall). 0 here means "never captured".
+	static unsigned long long g_snapshotTickMs = 0;
+	static constexpr unsigned long long kSnapshotMaxAgeMs = 200;
 
 	// World-to-clip matrix, transposed from NI's row-major M*v layout into
 	// Intel's column-major v*M layout (consecutive memory = one column).
@@ -2357,10 +2381,32 @@ namespace msoc::patch::occlusion {
 			}
 			g_lastStage = 11; // _Claude_ drain
 			drainPendingDisplays();
-			// _Claude_ Mask is now complete and stable for external query.
-			// Flush above (if async) has retired all worker writes; drain
-			// has run every deferred test. g_maskReady stays true until
-			// next frame's ClearBuffer clears it.
+			// _Claude_ Snapshot swap — hands the just-completed mask to
+			// external consumers (MGE-XE) and rotates the ex-prev buffer
+			// in as the next frame's write target. The ex-prev buffer
+			// still carries the previous snapshot's depth data at this
+			// point; the existing ClearBuffer() at the TOP of the next
+			// frame's renderMainScene hook handles that reset (MOC's
+			// RenderTriangles is depth-min, so a clear is mandatory to
+			// prevent occluder depths from accumulating across frames).
+			// Memory-wise nothing grows — two fixed-size MOC buffers, a
+			// 16-float matrix copy, 3 floats, and a 64-bit tick.
+			//
+			// After the swap:
+			//   g_msoc_prev = this frame's completed mask (external reads)
+			//   g_msoc      = stale data, cleared next frame, re-written
+			//
+			// Freshness timestamp tags the snapshot with its wall-clock
+			// capture time; queries more than kSnapshotMaxAgeMs stale are
+			// rejected by isOcclusionMaskReady() — guards against culling
+			// against a frozen mask during pauses / loading / alt-tab.
+			std::swap(g_msoc, g_msoc_prev);
+			std::memcpy(g_worldToClip_prev, g_worldToClip, sizeof(g_worldToClip));
+			g_ndcRadiusX_prev = g_ndcRadiusX;
+			g_ndcRadiusY_prev = g_ndcRadiusY;
+			g_wGradMag_prev   = g_wGradMag;
+			g_snapshotTickMs  = GetTickCount64();
+
 			g_maskReady = true;
 			if (g_asyncThisFrame) {
 				g_lastStage = 12; // _Claude_ suspendThreads
@@ -2524,6 +2570,25 @@ namespace msoc::patch::occlusion {
 			g_msoc->SetNearClipPlane(kNearClipW);
 		}
 
+		if (!g_msoc_prev) {
+			// Snapshot buffer — external consumers read this one. Same
+			// configuration as g_msoc so the pointer swap at drain-complete
+			// preserves all rasterizer state. Pre-cleared so the very first
+			// external query sees a defined (all-far) mask even before a
+			// single frame has completed.
+			g_msoc_prev = ::MaskedOcclusionCulling::Create();
+			if (!g_msoc_prev) {
+				log << "MSOC: snapshot buffer Create() returned null; occlusion disabled." << std::endl;
+				::MaskedOcclusionCulling::Destroy(g_msoc);
+				g_msoc = nullptr;
+				return false;
+			}
+			g_msoc_prev->SetResolution(kMsocWidth, kMsocHeight);
+			g_msoc_prev->SetNearClipPlane(kNearClipW);
+			g_msoc_prev->ClearBuffer();
+			g_snapshotTickMs = 0;
+		}
+
 		if (!g_threadpool) {
 			const unsigned int binCount = Configuration::OcclusionThreadpoolBinsW
 				* Configuration::OcclusionThreadpoolBinsH;
@@ -2662,6 +2727,11 @@ namespace msoc::patch::occlusion {
 			::MaskedOcclusionCulling::Destroy(g_msoc);
 			g_msoc = nullptr;
 		}
+		if (g_msoc_prev) {
+			::MaskedOcclusionCulling::Destroy(g_msoc_prev);
+			g_msoc_prev = nullptr;
+		}
+		g_snapshotTickMs = 0;
 		g_asyncOccluderVerts.clear();
 		g_asyncOccluderVerts.shrink_to_fit();
 		g_asyncOccluderIndices.clear();
@@ -2810,11 +2880,57 @@ namespace msoc::patch::occlusion {
 	}
 
 	// _Claude_ Mask query API for out-of-tree consumers (MGE-XE etc.).
-	// Single-threaded: Morrowind's renderer is single-threaded and the
-	// MSOC drain has already Flushed all threadpool work by the time
-	// g_maskReady goes true, so no synchronisation is required here.
+	// Queries read the SNAPSHOT (g_msoc_prev) — the mask from the
+	// previous frame, frozen at drain-complete. This makes external
+	// queries race-free: no matter where in the game frame the consumer
+	// calls us, we always serve a stable, completely-built mask with
+	// no mid-frame transitions.
+	//
+	// Freshness gate (kSnapshotMaxAgeMs) rejects snapshots older than
+	// ~200ms so pauses / loading screens / alt-tab don't hand consumers
+	// a stale frozen mask. The tick is recorded at each swap.
 	bool isOcclusionMaskReady() {
-		return g_maskReady && g_msoc != nullptr;
+		if (!g_msoc_prev || g_snapshotTickMs == 0) {
+			return false;
+		}
+		const unsigned long long now = GetTickCount64();
+		return (now - g_snapshotTickMs) <= kSnapshotMaxAgeMs;
+	}
+
+	// Project a world-space sphere against the SNAPSHOT buffer using
+	// the _prev matrix + NDC constants captured at swap time. Mirrors
+	// testSphereVisible's math exactly; kept separate so the plugin's
+	// internal (in-progress mask) path stays untouched.
+	static ::MaskedOcclusionCulling::CullingResult testSphereVisiblePrev(
+		const TES3::Vector3& center, float radius)
+	{
+		// Project center through last frame's world-to-clip.
+		const float* m = g_worldToClip_prev;
+		const float wx = center.x, wy = center.y, wz = center.z;
+		const float cx = wx * m[0] + wy * m[4] + wz * m[8] + m[12];
+		const float cy = wx * m[1] + wy * m[5] + wz * m[9] + m[13];
+		const float cw = wx * m[3] + wy * m[7] + wz * m[11] + m[15];
+
+		const float wMin = cw - (radius + g_depthSlackWorldUnitsEffective) * g_wGradMag_prev;
+		if (wMin <= kNearClipW) {
+			return ::MaskedOcclusionCulling::VISIBLE;
+		}
+
+		const float invW = 1.0f / cw;
+		const float cxNdc = cx * invW;
+		const float cyNdc = cy * invW;
+		const float rxNdc = radius * g_ndcRadiusX_prev * invW;
+		const float ryNdc = radius * g_ndcRadiusY_prev * invW;
+
+		float ndcMinX = std::max(cxNdc - rxNdc, -1.0f);
+		float ndcMinY = std::max(cyNdc - ryNdc, -1.0f);
+		float ndcMaxX = std::min(cxNdc + rxNdc, 1.0f);
+		float ndcMaxY = std::min(cyNdc + ryNdc, 1.0f);
+		if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY) {
+			return ::MaskedOcclusionCulling::VIEW_CULLED;
+		}
+
+		return g_msoc_prev->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
 	}
 
 	MaskQueryResult testOcclusionSphere(float worldX, float worldY, float worldZ, float radius) {
@@ -2822,7 +2938,7 @@ namespace msoc::patch::occlusion {
 			return kMaskQueryNotReady;
 		}
 		const TES3::Vector3 center(worldX, worldY, worldZ);
-		const auto result = testSphereVisible(center, radius);
+		const auto result = testSphereVisiblePrev(center, radius);
 		switch (result) {
 		case ::MaskedOcclusionCulling::VISIBLE:     return kMaskQueryVisible;
 		case ::MaskedOcclusionCulling::OCCLUDED:    return kMaskQueryOccluded;
@@ -2843,6 +2959,91 @@ namespace msoc::patch::occlusion {
 		const float dz = maxZ - cz;
 		const float r = std::sqrt(dx * dx + dy * dy + dz * dz);
 		return testOcclusionSphere(cx, cy, cz, r);
+	}
+
+	bool dumpOcclusionMask(const char* path) {
+		if (path == nullptr) {
+			log::getLog() << "MSOC dump: null path" << std::endl;
+			return false;
+		}
+		if (!isOcclusionMaskReady()) {
+			const unsigned long long ageMs = g_snapshotTickMs
+				? (GetTickCount64() - g_snapshotTickMs) : 0;
+			log::getLog() << "MSOC dump: mask not ready (snapshotTick="
+				<< g_snapshotTickMs << ", ageMs=" << ageMs
+				<< ", prevPtr=" << (g_msoc_prev ? "ok" : "null") << ")" << std::endl;
+			return false;
+		}
+
+		// ComputePixelDepthBuffer wants a caller-owned float buffer
+		// sized for the full mask. kMsocWidth/Height are fixed at
+		// construction (512x256 in this build). Reads the SNAPSHOT.
+		std::vector<float> depth(static_cast<size_t>(kMsocWidth) * kMsocHeight, 0.0f);
+		g_msoc_prev->ComputePixelDepthBuffer(depth.data(), /*flipY*/ true);
+
+		FILE* f = std::fopen(path, "wb");
+		if (!f) {
+			log::getLog() << "MSOC dump: fopen failed for '" << path
+				<< "' errno=" << errno << std::endl;
+			return false;
+		}
+		std::fprintf(f, "Pf\n%u %u\n-1.0\n", kMsocWidth, kMsocHeight);
+		std::fwrite(depth.data(), sizeof(float), depth.size(), f);
+		std::fclose(f);
+
+		log::getLog() << "MSOC: occlusion mask dumped to " << path
+			<< " (" << kMsocWidth << "x" << kMsocHeight << ")" << std::endl;
+		return true;
+	}
+
+	MaskQueryResult testOcclusionOBB(
+		float cx, float cy, float cz,
+		float vxX, float vxY, float vxZ,
+		float vyX, float vyY, float vyZ,
+		float vzX, float vzY, float vzZ)
+	{
+		if (!isOcclusionMaskReady()) {
+			return kMaskQueryNotReady;
+		}
+
+		// Expand 8 corners as center + (±vx ±vy ±vz). Layout is
+		// (x, y, z, w) per vertex, stride 16 — matches VertexLayout below.
+		float corners[8 * 4];
+		const float sx[8] = { -1, +1, +1, -1, -1, +1, +1, -1 };
+		const float sy[8] = { -1, -1, +1, +1, -1, -1, +1, +1 };
+		const float sz[8] = { -1, -1, -1, -1, +1, +1, +1, +1 };
+		for (int i = 0; i < 8; ++i) {
+			corners[i * 4 + 0] = cx + sx[i] * vxX + sy[i] * vyX + sz[i] * vzX;
+			corners[i * 4 + 1] = cy + sx[i] * vxY + sy[i] * vyY + sz[i] * vzY;
+			corners[i * 4 + 2] = cz + sx[i] * vxZ + sy[i] * vyZ + sz[i] * vzZ;
+			corners[i * 4 + 3] = 1.0f;
+		}
+
+		static const unsigned int tris[12 * 3] = {
+			0, 1, 2,  0, 2, 3,   // -Z face (0-1-2-3)
+			4, 6, 5,  4, 7, 6,   // +Z face (4-5-6-7)
+			0, 5, 1,  0, 4, 5,   // -Y face (0-1-5-4)
+			3, 2, 6,  3, 6, 7,   // +Y face (3-2-6-7)
+			0, 3, 7,  0, 7, 4,   // -X face (0-3-7-4)
+			1, 5, 6,  1, 6, 2,   // +X face (1-2-6-5)
+		};
+
+		const ::MaskedOcclusionCulling::VertexLayout layout(16, 4, 12); // stride, offY, offW
+
+		// Test against the SNAPSHOT buffer with the SNAPSHOT matrix.
+		const auto result = g_msoc_prev->TestTriangles(
+			corners, tris, 12,
+			g_worldToClip_prev,
+			::MaskedOcclusionCulling::BACKFACE_NONE,
+			::MaskedOcclusionCulling::CLIP_PLANE_ALL,
+			layout);
+
+		switch (result) {
+		case ::MaskedOcclusionCulling::VISIBLE:     return kMaskQueryVisible;
+		case ::MaskedOcclusionCulling::OCCLUDED:    return kMaskQueryOccluded;
+		case ::MaskedOcclusionCulling::VIEW_CULLED: return kMaskQueryViewCulled;
+		}
+		return kMaskQueryVisible;
 	}
 
 }
@@ -2896,4 +3097,24 @@ int __cdecl mwse_testOcclusionAABB(
 {
 	return static_cast<int>(
 		msoc::patch::occlusion::testOcclusionAABB(minX, minY, minZ, maxX, maxY, maxZ));
+}
+
+extern "C" __declspec(dllexport)
+int __cdecl mwse_testOcclusionOBB(
+	float cx, float cy, float cz,
+	float vxX, float vxY, float vxZ,
+	float vyX, float vyY, float vyZ,
+	float vzX, float vzY, float vzZ)
+{
+	return static_cast<int>(
+		msoc::patch::occlusion::testOcclusionOBB(
+			cx, cy, cz,
+			vxX, vxY, vxZ,
+			vyX, vyY, vyZ,
+			vzX, vzY, vzZ));
+}
+
+extern "C" __declspec(dllexport)
+int __cdecl mwse_dumpOcclusionMask(const char* path) {
+	return msoc::patch::occlusion::dumpOcclusionMask(path) ? 1 : 0;
 }
