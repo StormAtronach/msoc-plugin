@@ -139,6 +139,23 @@ namespace msoc::patch::occlusion {
 		const unsigned int* tris, int triCount,
 		const float* modelMatrix16);
 
+	// Queue a batch of PRE-TRANSFORMED (clip-space) triangles for the
+	// NEXT mask build. Identical semantics to addOccluder except the
+	// plugin skips the world-to-clip multiply when rasterizing — input
+	// vertices are already in homogeneous clip space (x, y, w), so they
+	// feed MOC's RenderTriangles with modelToClipMatrix=nullptr.
+	//
+	// MOC reads depth from the w component (offset offW in the vertex).
+	// Expected layout: stride=16, offY=4, offW=12 matches MOC's default
+	// layout for `{x, y, z_ignored, w}` tuples — the canonical clip-space
+	// vertex. The `z` slot at offset 8 is not read by MOC.
+	//
+	// Designed for consumers that build screen-space occluder geometry
+	// directly in clip space (e.g. horizon-curtain terrain silhouettes).
+	bool addPreTransformedOccluder(
+		const float* verts, int vtxCount, int stride, int offY, int offW,
+		const unsigned int* tris, int triCount);
+
 }
 
 // Stable C-ABI exports for out-of-tree consumers (MGE-XE etc.). Resolve
@@ -222,3 +239,12 @@ int __cdecl mwse_addOccluder(
 	const float* verts, int vtxCount, int stride, int offY, int offW,
 	const unsigned int* tris, int triCount,
 	const float* modelMatrix16);
+
+// _Claude_ Pre-transformed variant: vertices already in clip space
+// (x, y, w) per MOC's default layout. Plugin rasterizes without a
+// world-to-clip multiply (nullptr to MOC::RenderTriangles). Intended
+// for screen-space occluder geometry like horizon curtains.
+extern "C" __declspec(dllexport)
+int __cdecl mwse_addPreTransformedOccluder(
+	const float* verts, int vtxCount, int stride, int offY, int offW,
+	const unsigned int* tris, int triCount);

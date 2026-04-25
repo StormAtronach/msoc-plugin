@@ -131,6 +131,11 @@ namespace msoc::patch::occlusion {
 		int vtxCount;
 		int triCount;
 		std::optional<std::array<float, 16>> modelMatrix;
+		// When true: verts are already in clip space (homogeneous x,y,w);
+		// drain path passes nullptr to MOC::RenderTriangles to skip the
+		// world-to-clip multiply. Used by screen-space submitters such
+		// as horizon-curtain terrain occluders.
+		bool preTransformed = false;
 	};
 
 	static std::vector<PendingOccluder> g_pendingOccluders;
@@ -3197,15 +3202,18 @@ namespace msoc::patch::occlusion {
 		}
 
 		for (const auto& p : localQueue) {
-			// If consumer provided a model-to-world matrix, combine it
-			// with g_worldToClip into a full model-to-clip matrix that
-			// MOC can use directly. Both input matrices are in column-
-			// major layout so the multiply order is `worldToClip * model`.
+			// Matrix selection:
+			//   preTransformed=true  → nullptr (MOC skips the transform,
+			//                           consumes clip-space vertices as-is)
+			//   otherwise             → g_worldToClip [* p.modelMatrix if set]
 			float combinedMatrix[16];
-			const float* modelToClip = g_worldToClip;
-			if (p.modelMatrix.has_value()) {
-				mat4MulColumnMajor(g_worldToClip, p.modelMatrix->data(), combinedMatrix);
-				modelToClip = combinedMatrix;
+			const float* modelToClip = nullptr;
+			if (!p.preTransformed) {
+				modelToClip = g_worldToClip;
+				if (p.modelMatrix.has_value()) {
+					mat4MulColumnMajor(g_worldToClip, p.modelMatrix->data(), combinedMatrix);
+					modelToClip = combinedMatrix;
+				}
 			}
 
 			const ::MaskedOcclusionCulling::VertexLayout layout(p.stride, p.offY, p.offW);
@@ -3299,6 +3307,60 @@ namespace msoc::patch::occlusion {
 			std::memcpy(m.data(), modelMatrix16, sizeof(m));
 			p.modelMatrix = m;
 		}
+
+		g_externalOccluderTrisQueued += triCount;
+		g_pendingOccluders.emplace_back(std::move(p));
+		return true;
+	}
+
+	bool addPreTransformedOccluder(
+		const float* verts, int vtxCount, int stride, int offY, int offW,
+		const unsigned int* tris, int triCount)
+	{
+		// Same validation + budget semantics as addOccluder; only difference
+		// is the preTransformed flag on the queued entry and no model-matrix
+		// path. Intentionally duplicates the validation block rather than
+		// pulling in a shared helper — keeps both public paths readable in
+		// isolation and the code is small.
+		if (!verts || !tris || vtxCount <= 0 || triCount <= 0) {
+			return false;
+		}
+		if (stride <= 0 || offY < 0 || offW < 0
+			|| offY + static_cast<int>(sizeof(float)) > stride
+			|| offW + static_cast<int>(sizeof(float)) > stride) {
+			return false;
+		}
+		if (!g_msoc) {
+			return false;
+		}
+
+		const int cap = static_cast<int>(Configuration::OcclusionOccluderMaxTriangles);
+		std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
+		if (g_externalOccluderTrisQueued + triCount > cap) {
+			static bool warnOnce = true;
+			if (warnOnce) {
+				log::getLog() << "MSOC addPreTransformedOccluder: triangle budget exceeded ("
+					<< g_externalOccluderTrisQueued << " queued + " << triCount
+					<< " requested > cap " << cap
+					<< ") — rejecting external submission" << std::endl;
+				warnOnce = false;
+			}
+			return false;
+		}
+
+		PendingOccluder p;
+		p.stride = stride;
+		p.offY = offY;
+		p.offW = offW;
+		p.vtxCount = vtxCount;
+		p.triCount = triCount;
+		p.preTransformed = true;
+
+		const size_t vtxBytes = static_cast<size_t>(vtxCount) * static_cast<size_t>(stride);
+		p.verts.resize(vtxBytes / sizeof(float));
+		std::memcpy(p.verts.data(), verts, vtxBytes);
+
+		p.tris.assign(tris, tris + static_cast<size_t>(triCount) * 3);
 
 		g_externalOccluderTrisQueued += triCount;
 		g_pendingOccluders.emplace_back(std::move(p));
@@ -3563,4 +3625,14 @@ int __cdecl mwse_addOccluder(
 		verts, vtxCount, stride, offY, offW,
 		tris, triCount,
 		modelMatrix16) ? 1 : 0;
+}
+
+extern "C" __declspec(dllexport)
+int __cdecl mwse_addPreTransformedOccluder(
+	const float* verts, int vtxCount, int stride, int offY, int offW,
+	const unsigned int* tris, int triCount)
+{
+	return msoc::patch::occlusion::addPreTransformedOccluder(
+		verts, vtxCount, stride, offY, offW,
+		tris, triCount) ? 1 : 0;
 }
