@@ -56,8 +56,19 @@ namespace msoc::patch::occlusion {
 	// MSOC tile-buffer resolution. Decoupled from the game viewport: the
 	// rasterizer works in NDC via the camera's world-to-clip matrix, then maps
 	// NDC to this framebuffer via its own internal scale/offset.
-	constexpr unsigned int kMsocWidth = 512;
-	constexpr unsigned int kMsocHeight = 256;
+	// _Claude_ No longer constexpr — latched from Configuration at install
+	// time (see installPatches::latchMaskResolution). Values are otherwise
+	// treated as immutable for the session: changing
+	// Configuration::OcclusionMaskWidth/Height after install is a no-op
+	// (and the comment above each Lua-side default flags it as restart-
+	// only). Hot-path uses (depth-buffer sizing, dump-to-PFM headers,
+	// SetResolution / GetResolution accessors) all read these, but none
+	// in tight per-frame loops where the lost compile-time folding would
+	// matter — MOC's tile loop reads its own internal mWidth/mHeight at
+	// runtime regardless, so the rasterizer wasn't const-folding these
+	// to begin with.
+	unsigned int kMsocWidth  = 512;
+	unsigned int kMsocHeight = 256;
 
 	// Clip-space w floor. Intel MSOC treats this as the near plane. In
 	// Morrowind units (1 unit ~= 1.4 cm) 1.0 is a safe floor below the
@@ -71,6 +82,47 @@ namespace msoc::patch::occlusion {
 	// min occludee radius, scene-type gates) are Configuration::Occlusion*
 	// knobs loaded from MWSE.json; see MWSEConfig.{h,cpp} for defaults and
 	// PatchOcclusionCulling-plan.md for the rationale behind each default.
+
+	// _Claude_ NI::Camera field accessors that adapt to the upstream MWSE
+	// NICamera.h layout. Upstream only decodes `cullingPlanes[6]` directly
+	// and labels the surrounding slots as `unknown_*`; the proposed (but
+	// unmerged) NICamera.h adds named fields for `cullingPlanePtrs` (0x148),
+	// `countCullingPlanes` (0x160), and `usedCullingPlanesBitfield[4]`
+	// (0x1C4). Rather than depend on the unmerged proposal we read those
+	// slots through the upstream `cullingPlanes[6]` storage:
+	//
+	//   - countCullingPlanes is always 6 for Morrowind's main world camera
+	//     (frustum planes only — no user clip planes are ever set up by
+	//     the engine for CullShow). The proposed header's comment confirms
+	//     this. Hardcoded here.
+	//
+	//   - cullingPlanePtrs[i] in the engine is a TArray of NiPlane* whose
+	//     first 6 entries point at the inline cullingPlanes[6] mirror
+	//     (NiCamera::UpdateWorldData copies plane data into the inline
+	//     array via those pointers). Reading `&cullingPlanes[i]` directly
+	//     yields the same plane data — confirmed by the proposed header's
+	//     comment "the first 6 pointers target the inline cullingPlanes[6]".
+	//
+	//   - usedCullingPlanesBitfield[4] lives at offset 0x1C4, which is
+	//     exactly `&cullingPlanes[6]` — the byte right past the 6-element
+	//     inline array. We compute that address via offset arithmetic
+	//     from `&cullingPlanes[0]` (legitimate base) + 6 * sizeof(Vector4)
+	//     to avoid the past-end-deref UB of `&cullingPlanes[6].x`.
+	//
+	// If/when the upstream header adds these fields, swap the bodies for
+	// `cam->countCullingPlanes` etc.; call sites stay unchanged.
+	static inline int cameraCountCullingPlanes(const NI::Camera* /*cam*/) {
+		return 6;
+	}
+
+	static inline const TES3::Vector4* cameraCullingPlane(NI::Camera* cam, int i) {
+		return &cam->cullingPlanes[i];
+	}
+
+	static inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
+		auto* base = reinterpret_cast<char*>(&cam->cullingPlanes[0]);
+		return reinterpret_cast<uint32_t*>(base + sizeof(TES3::Vector4) * 6);
+	}
 
 	// ============================================================
 	// MSOC instance & per-frame camera state
@@ -1437,10 +1489,10 @@ namespace msoc::patch::occlusion {
 	// usedCullingPlanesBitfield is still clean and we don't mutate it.
 	// Matches the plane-vs-sphere sign convention at cullShowBody L661.
 	static bool frustumCulledSphere(NI::AVObject* obj, NI::Camera* camera) {
-		const int n = camera->countCullingPlanes;
+		const int n = cameraCountCullingPlanes(camera);
 		const float r = obj->worldBoundRadius;
 		for (int i = 0; i < n; ++i) {
-			const auto* plane = static_cast<const TES3::Vector4*>(camera->cullingPlanePtrs.storage[i]);
+			const auto* plane = cameraCullingPlane(camera, i);
 			const float d = plane->x * obj->worldBoundOrigin.x
 				+ plane->y * obj->worldBoundOrigin.y
 				+ plane->z * obj->worldBoundOrigin.z
@@ -1742,8 +1794,8 @@ namespace msoc::patch::occlusion {
 		// setBits tracks bits WE flipped in usedCullingPlanesBitfield so we
 		// can unflip them before returning (the engine's LABEL_10 cleanup).
 		uint32_t setBits[4] = { 0, 0, 0, 0 };
-		const int nPlanes = camera->countCullingPlanes;
-		auto* mask = camera->usedCullingPlanesBitfield;
+		const int nPlanes = cameraCountCullingPlanes(camera);
+		auto* mask = cameraUsedPlanesMask(camera);
 
 		auto restoreIgnoreBits = [&]() {
 			for (int j = 0; j < nPlanes; ++j) {
@@ -1761,7 +1813,7 @@ namespace msoc::patch::occlusion {
 			if ((bit & mask[word]) != 0) {
 				continue;
 			}
-			const auto* plane = static_cast<const TES3::Vector4*>(camera->cullingPlanePtrs.storage[i]);
+			const auto* plane = cameraCullingPlane(camera, i);
 			const float d = plane->x * self->worldBoundOrigin.x
 				+ plane->y * self->worldBoundOrigin.y
 				+ plane->z * self->worldBoundOrigin.z
@@ -2752,7 +2804,17 @@ namespace msoc::patch::occlusion {
 				// so auto path naturally respects the livelock cap; the
 				// gate below catches manual overrides.
 				const unsigned hw = std::thread::hardware_concurrency();
-				const unsigned int hwBudget = hw > 2 ? hw - 2 : 1;
+				// _Claude_ Reservation policy: hw > 4 reserves 2 cores
+				// (main render thread + scheduling slack), hw ≤ 4 only
+				// reserves 1. The old hw-2 was a many-core heuristic that
+				// stranded half the CPU on 4-thread parts (i5-2400 etc.):
+				// hw=4 → hwBudget=2 left binCap=4 unused and gave only 2
+				// workers when the spare hardware threads could happily
+				// take 3. The clamp below (binCap, kAutoMax) still prevents
+				// over-subscription and the 12-thread livelock cap.
+				const unsigned int hwBudget = (hw <= 4)
+					? (hw > 1 ? hw - 1 : 1)
+					: hw - 2;
 				const unsigned int binCap = binCount / 2 > 0 ? binCount / 2 : 1;
 				threadCount = std::min({ hwBudget, binCap, kAutoMax });
 			}
@@ -2911,6 +2973,34 @@ namespace msoc::patch::occlusion {
 		log << "MSOC: installPatches entered; Configuration::EnableMSOC="
 			<< (Configuration::EnableMSOC ? "true" : "false")
 			<< std::endl;
+
+		// _Claude_ Latch mask resolution from Configuration. Must run
+		// BEFORE createMSOCResources (which calls SetResolution with
+		// kMsocWidth/Height) so the snapshot buffer, threadpool, and
+		// every later reader sees the tier-resolved size. Round down
+		// to MOC's required alignment (width % SUB_TILE_WIDTH == 0,
+		// height % SUB_TILE_HEIGHT == 0; SUB_TILE_WIDTH=8, SUB_TILE_HEIGHT=4
+		// per MaskedOcclusionCullingCommon.inl) and clamp to a sane
+		// range — pathological tiny resolutions trip MOC's edge-case
+		// tile math (assert on width=0), and pathological huge ones
+		// blow out the ~57MB threadpool ring buffer.
+		{
+			unsigned int w = Configuration::OcclusionMaskWidth;
+			unsigned int h = Configuration::OcclusionMaskHeight;
+			w = (w / 8) * 8;
+			h = (h / 4) * 4;
+			if (w < 64)   w = 64;
+			if (h < 32)   h = 32;
+			if (w > 2048) w = 2048;
+			if (h > 1024) h = 1024;
+			kMsocWidth  = w;
+			kMsocHeight = h;
+			log << "MSOC: mask resolution latched at " << kMsocWidth
+				<< "x" << kMsocHeight
+				<< " (cfg requested " << Configuration::OcclusionMaskWidth
+				<< "x" << Configuration::OcclusionMaskHeight << ")."
+				<< std::endl;
+		}
 
 		// _Claude_ Hooks always install. The detour body is free when the
 		// runtime gate (sceneEnabled at top-of-frame) is false — it just

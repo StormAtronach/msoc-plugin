@@ -15,6 +15,8 @@
 
 #include <Windows.h>
 
+#include <thread>
+
 #include "Config.h"
 #include "MaskedOcclusionCulling.h"
 #include "PatchOcclusionCulling.h"
@@ -32,18 +34,32 @@ void setStringField(lua_State* L, const char* key, const char* value) {
     lua_settable(L, -3);
 }
 
+void setNumberField(lua_State* L, const char* key, lua_Number value) {
+    lua_pushstring(L, key);
+    lua_pushnumber(L, value);
+    lua_settable(L, -3);
+}
+
 void setCFunctionField(lua_State* L, const char* key, lua_CFunction fn) {
     lua_pushstring(L, key);
     lua_pushcfunction(L, fn);
     lua_settable(L, -3);
 }
 
+// _Claude_ Probe result. linkText is the human-readable link verdict
+// shown in MWSE.log; impl is the raw MaskedOcclusionCulling::Implementation
+// integer value (or -1 on probe failure) for HardwareTier classification.
+struct ProbeResult {
+    const char* linkText;
+    int         impl;
+};
+
 // Probe the MOC link by creating an instance, exercising one method,
 // destroying it. Catches AVX2/AVX512 specialisation link failures at
 // load rather than waiting for the patch to actually use MOC.
-const char* probeMocLink() {
+ProbeResult probeMocLink() {
     auto* moc = MaskedOcclusionCulling::Create();
-    if (!moc) return "Create() returned null";
+    if (!moc) return { "Create() returned null", -1 };
 
     moc->SetResolution(64, 32);
     unsigned int w = 0, h = 0;
@@ -52,14 +68,30 @@ const char* probeMocLink() {
     auto impl = moc->GetImplementation();
     MaskedOcclusionCulling::Destroy(moc);
 
-    if (w != 64 || h != 32) return "GetResolution mismatch after SetResolution";
+    const int implInt = static_cast<int>(impl);
+    if (w != 64 || h != 32) {
+        return { "GetResolution mismatch after SetResolution", implInt };
+    }
 
     switch (impl) {
-        case MaskedOcclusionCulling::SSE2:    return "ok (SSE2)";
-        case MaskedOcclusionCulling::SSE41:   return "ok (SSE4.1)";
-        case MaskedOcclusionCulling::AVX2:    return "ok (AVX2)";
-        case MaskedOcclusionCulling::AVX512:  return "ok (AVX-512)";
-        default:                              return "ok (unknown ISA)";
+        case MaskedOcclusionCulling::SSE2:    return { "ok (SSE2)",    implInt };
+        case MaskedOcclusionCulling::SSE41:   return { "ok (SSE4.1)",  implInt };
+        case MaskedOcclusionCulling::AVX2:    return { "ok (AVX2)",    implInt };
+        case MaskedOcclusionCulling::AVX512:  return { "ok (AVX-512)", implInt };
+        default:                              return { "ok (unknown ISA)", implInt };
+    }
+}
+
+// _Claude_ Map the MOC implementation enum to a stable short string for
+// the Lua side. Kept separate from probeMocLink's "ok (XXX)" so the Lua
+// MCM can switch on simdLevel cleanly without parsing the link verdict.
+const char* simdLevelName(int impl) {
+    switch (impl) {
+        case MaskedOcclusionCulling::SSE2:    return "SSE2";
+        case MaskedOcclusionCulling::SSE41:   return "SSE4.1";
+        case MaskedOcclusionCulling::AVX2:    return "AVX2";
+        case MaskedOcclusionCulling::AVX512:  return "AVX-512";
+        default:                              return "unknown";
     }
 }
 
@@ -69,8 +101,28 @@ extern "C" __declspec(dllexport)
 int luaopen_msoc(lua_State* L) {
     lua_newtable(L);
 
-    setStringField(L, "version", "0.0.6-installPatches");
-    setStringField(L, "mocLink", probeMocLink());
+    // _Claude_ Probe MOC + classify hardware BEFORE installPatches() so
+    // the Configuration::* statics that the threadpool reads at first
+    // createMSOCResources() (called from inside installPatches when
+    // EnableMSOC starts true) reflect the tier picks rather than the
+    // module-init defaults from Config.cpp.
+    //
+    // Lua's later cfg.syncToNative(msoc) → plugin.configure(table) call
+    // can still overwrite these, so the Lua-side default_config in
+    // test-mod/.../config.lua reads msoc.hardwareTier and applies the
+    // matching overrides for first-run users (no msoc.json yet). Saved
+    // user values in msoc.json take precedence over both, which is
+    // intentional — explicit user choices are sticky.
+    const auto probe = probeMocLink();
+    const unsigned hwConcurrency = std::thread::hardware_concurrency();
+    const auto tier = msoc::classifyHardwareTier(probe.impl, hwConcurrency);
+    msoc::applyHardwareTierDefaults(tier);
+
+    setStringField(L, "version", "0.0.7-hw-tier-defaults");
+    setStringField(L, "mocLink", probe.linkText);
+    setStringField(L, "simdLevel", simdLevelName(probe.impl));
+    setStringField(L, "hardwareTier", msoc::hardwareTierName(tier));
+    setNumberField(L, "cpuThreads", static_cast<lua_Number>(hwConcurrency));
     setCFunctionField(L, "configure", &msoc::configure);
 
     // Install the occlusion patches exactly once. MWSE's include() can

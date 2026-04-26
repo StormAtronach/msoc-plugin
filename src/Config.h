@@ -58,6 +58,14 @@ namespace msoc {
         static unsigned int OcclusionThreadpoolBinsH;
         static unsigned int OcclusionTemporalCoherenceFrames;
 
+        // _Claude_ Mask resolution. Read once during installPatches() —
+        // subsequent msoc.configure() updates are ignored for this
+        // session. MOC requires width % 8 == 0 and height % 4 == 0
+        // (asserted in MaskedOcclusionCullingCommon.inl::SetResolution);
+        // installPatches rounds down + clamps to safe bounds.
+        static unsigned int OcclusionMaskWidth;
+        static unsigned int OcclusionMaskHeight;
+
         static bool OcclusionLogPerFrame;
         static bool OcclusionLogAggregate;
     };
@@ -66,4 +74,26 @@ namespace msoc {
     // at stack index 1 and writes it into the matching static above.
     // Unknown keys ignored; missing keys leave the static untouched.
     int configure(lua_State* L);
+
+    // _Claude_ Hardware-tier classifier. The plugin's per-frame work is
+    // split between the main render thread (occluder selection, depth
+    // testing) and the MOC threadpool (rasterization). On weaker CPUs
+    // — Sandy Bridge / Ivy Bridge with no AVX2, or any 4-thread part —
+    // the cost/benefit shifts: SSE4.1 raster is 2× slower per tile, the
+    // threadpool's WakeThreads/Flush/SuspendThreads tax stays the same,
+    // and only 2 spare hardware threads are available for workers. The
+    // result is that the async occluder path can be net-negative.
+    //
+    // Tiers map to coarse defaults applied at plugin load. Lua-side
+    // first-run defaults (test-mod/.../config.lua) read msoc.hardwareTier
+    // and apply matching overrides; the C++-side defaults below run as
+    // defence-in-depth in case Lua never calls configure().
+    //
+    // Integer parameter to keep this header MOC-free; values match
+    // MaskedOcclusionCulling::Implementation (SSE2=0, SSE41=1, AVX2=2,
+    // AVX512=3). Negative means probe failed — treat as Low.
+    enum class HardwareTier { Low = 0, Mid = 1, High = 2 };
+    HardwareTier classifyHardwareTier(int simdImpl, unsigned hwConcurrency);
+    const char*  hardwareTierName(HardwareTier tier);
+    void         applyHardwareTierDefaults(HardwareTier tier);
 }
