@@ -118,7 +118,7 @@ int luaopen_msoc(lua_State* L) {
     const auto tier = msoc::classifyHardwareTier(probe.impl, hwConcurrency);
     msoc::applyHardwareTierDefaults(tier);
 
-    setStringField(L, "version", "0.0.11-layer-a-horizon");
+    setStringField(L, "version", "0.0.12-single-worker-bypass");
     setStringField(L, "mocLink", probe.linkText);
     setStringField(L, "simdLevel", simdLevelName(probe.impl));
     setStringField(L, "hardwareTier", msoc::hardwareTierName(tier));

@@ -3360,6 +3360,34 @@ namespace msoc::patch::occlusion {
 					<< " (threads > bins causes worker crash)." << std::endl;
 				threadCount = binCount;
 			}
+			// _Claude_ Worker-floor short-circuit. With only one worker the
+			// threadpool path pays its full per-frame cost — job-queue
+			// enqueue, WakeThreads cv broadcast, Flush yield-spin —
+			// against zero parallelism gain (one worker rasterizing
+			// serially is the same wall-clock as the main thread doing
+			// it directly, plus the dispatch tax). Reachable when:
+			//   - hw == 2 (auto path: hwBudget = hw - 1 = 1)
+			//   - User manually sets OcclusionThreadpoolThreadCount = 1.
+			// In both cases the synchronous path strictly wins.
+			//
+			// Effect: g_threadpool stays nullptr → the per-frame gate
+			// (g_asyncThisFrame = g_threadpool && cfgAsync) evaluates
+			// false unconditionally → every rasterizeTriShape call takes
+			// the existing serial branch via g_msoc->RenderTriangles.
+			// Configuration::OcclusionAsyncOccluders=true is silently
+			// downgraded; the log line documents why so a user who set
+			// it explicitly sees the override.
+			if (threadCount <= 1) {
+				log << "MSOC: threadCount=" << threadCount
+					<< " — skipping threadpool allocation. Async path"
+					   " would pay dispatch overhead with no parallelism"
+					   " gain; using direct serial submission instead."
+					   " Set OcclusionThreadpoolThreadCount=2+ to override."
+					<< std::endl;
+				g_threadpool = nullptr;
+				return true;
+			}
+
 			constexpr unsigned int kMaxJobs = 64;
 			// _Claude_ Partial-failure cleanup. The realistic throw site is
 			// the threadpool ctor's per-thread state ring buffer (~57 MB
