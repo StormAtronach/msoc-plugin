@@ -118,22 +118,30 @@ local function registerModConfig()
     })
 
     -- LAYER-A-HORIZON: tri-state replaces the previous on/off checkbox.
-    -- Off skips terrain occlusion entirely. Raster is the legacy path
-    -- that submits the merged subcell triangle mesh to MOC. Horizon
-    -- replaces that with a 1D-horizon-curtain pipeline (~120 tris vs
-    -- ~10,000) — see the LAYER-A handoff doc for the design.
+    -- Off skips terrain occlusion entirely. Raster submits the merged
+    -- subcell triangle mesh to MOC; Horizon submits a ~120-tri silhouette
+    -- curtain. They have different cost characteristics, not a strict
+    -- "old vs new" — see description below for the trade-off.
     main:createDropdown({
         label       = "Terrain occluder mode",
-        description = "Off: no terrain in the occlusion mask (cheapest, lowest cull rate). "
-            .. "Raster (legacy): merges each visible Land's 16 subcell patches into a "
-            .. "single combined occluder. Best for highland areas. Horizon: builds a "
-            .. "1D screen-space silhouette from terrain verts and submits ~120 curtain "
-            .. "triangles instead of the full mesh — much cheaper, similar cull rate "
-            .. "in cliff/mountain scenes.",
+        description = "Off: no terrain in the occlusion mask (lowest CPU, lowest cull rate). "
+            .. "Raster: rasterizes terrain triangles directly into the mask. "
+            .. "Pairs well with Async Occluders enabled — workers parallelize "
+            .. "the rasterization, hiding most of its cost on multi-core CPUs. "
+            .. "On weaker CPUs or with async off, the cost surfaces on the main "
+            .. "thread and can be expensive in dense terrain. "
+            .. "Horizon: builds a 1D screen-space silhouette and submits ~120 "
+            .. "curtain triangles synchronously. Construction is bounded-cost "
+            .. "regardless of how much terrain is in view, which makes it the "
+            .. "safer pick on weaker CPUs or when async is off. On fast CPUs "
+            .. "with idle workers, Horizon's sync projection becomes the "
+            .. "critical path and Raster+Async tends to win. "
+            .. "Cull rate is comparable across both modes in most scenes — pick "
+            .. "based on the cost shape that fits your hardware.",
         options     = {
-            { label = "Off",              value = 0 },
-            { label = "Raster (legacy)",  value = 1 },
-            { label = "Horizon",          value = 2 },
+            { label = "Off",      value = 0 },
+            { label = "Raster",   value = 1 },
+            { label = "Horizon",  value = 2 },
         },
         configKey   = "OcclusionAggregateTerrain",
         callback    = applyChange,
