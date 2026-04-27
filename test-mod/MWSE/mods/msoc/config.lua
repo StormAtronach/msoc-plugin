@@ -58,6 +58,21 @@ local default_config = {
     OcclusionMaskWidth                  = 512,
     OcclusionMaskHeight                 = 256,
 
+    -- Per-phase budgets in microseconds. 0 = unlimited (gate off).
+    -- Hybrid budgeting in C++ — both budgets target MSOC-only work:
+    --   - Rasterize: cumulative MOC::RenderTriangles SIMD time only,
+    --     not wall-clock-since-frame-start (which would include the
+    --     vanilla cullShowBody traversal between rasterize calls).
+    --   - Classify: the TestRect loop in classifyDrainRange only,
+    --     not the whole drain phase (whose phase 2 display() calls
+    --     are vanilla D3D8 submissions that happen regardless).
+    -- Tier-overridden below. Low-tier sets non-zero values that
+    -- bound spike cost; High-tier disables the gates entirely.
+    -- (Was OcclusionDrainBudgetUs in 0.0.9; renamed in 0.0.10 for
+    --  semantic accuracy. Migration cleans up the old key.)
+    OcclusionRasterizeBudgetUs          = 0,
+    OcclusionClassifyBudgetUs           = 0,
+
     -- Logging.
     OcclusionLogPerFrame                = false,
     OcclusionLogAggregate               = false,
@@ -86,28 +101,38 @@ local function applyTierDefaults(plugin, target)
         -- per-frame fixed cost outweighs the parallel rasterization
         -- win when SIMD is 4-wide and only 1-2 spare workers are
         -- available. Synchronous path skips the entire threadpool
-        -- dance. Mask 256×128 = ¼ rasterization work.
-        target.OcclusionAsyncOccluders  = false
-        target.OcclusionThreadpoolBinsW = 2
-        target.OcclusionThreadpoolBinsH = 1
-        target.OcclusionMaskWidth       = 256
-        target.OcclusionMaskHeight      = 128
+        -- dance. Mask 256×128 = ¼ rasterization work. Tight per-
+        -- phase budgets clip cell-load spikes (we saw 32 ms drain
+        -- spikes on i5-2400 in the wild).
+        target.OcclusionAsyncOccluders     = false
+        target.OcclusionThreadpoolBinsW    = 2
+        target.OcclusionThreadpoolBinsH    = 1
+        target.OcclusionMaskWidth          = 256
+        target.OcclusionMaskHeight         = 128
+        target.OcclusionRasterizeBudgetUs  = 1500
+        target.OcclusionClassifyBudgetUs   = 1500
     elseif tier == "mid" then
         -- 6-8 threads with AVX2: async pays off, but 4×2=8 bins is
         -- atomic-ping-pong overkill for ~4-6 workers. 2×2 keeps
         -- work-stealing alive at lower per-bin coordination cost.
-        -- Mask 384×192 ≈ 56% of full work.
-        target.OcclusionAsyncOccluders  = true
-        target.OcclusionThreadpoolBinsW = 2
-        target.OcclusionThreadpoolBinsH = 2
-        target.OcclusionMaskWidth       = 384
-        target.OcclusionMaskHeight      = 192
+        -- Mask 384×192 ≈ 56% of full work. Looser budgets, only
+        -- intervene on spikes.
+        target.OcclusionAsyncOccluders     = true
+        target.OcclusionThreadpoolBinsW    = 2
+        target.OcclusionThreadpoolBinsH    = 2
+        target.OcclusionMaskWidth          = 384
+        target.OcclusionMaskHeight         = 192
+        target.OcclusionRasterizeBudgetUs  = 3000
+        target.OcclusionClassifyBudgetUs   = 3000
     elseif tier == "high" then
-        target.OcclusionAsyncOccluders  = true
-        target.OcclusionThreadpoolBinsW = 4
-        target.OcclusionThreadpoolBinsH = 2
-        target.OcclusionMaskWidth       = 512
-        target.OcclusionMaskHeight      = 256
+        target.OcclusionAsyncOccluders     = true
+        target.OcclusionThreadpoolBinsW    = 4
+        target.OcclusionThreadpoolBinsH    = 2
+        target.OcclusionMaskWidth          = 512
+        target.OcclusionMaskHeight         = 256
+        -- Budgets disabled — High-tier hardware doesn't need them.
+        target.OcclusionRasterizeBudgetUs  = 0
+        target.OcclusionClassifyBudgetUs   = 0
     end
     -- Unknown / nil tier: leave default_config untouched (matches
     -- legacy behaviour for safety).

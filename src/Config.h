@@ -66,6 +66,29 @@ namespace msoc {
         static unsigned int OcclusionMaskWidth;
         static unsigned int OcclusionMaskHeight;
 
+        // _Claude_ Per-phase microsecond budgets. 0 = unlimited.
+        // Hybrid budgeting (see PatchOcclusionCulling.cpp):
+        //   - Predictive skip: at top-of-frame, if EMA(prevFrames) > 2× budget,
+        //     skip the whole phase this frame (mark all testees Visible /
+        //     don't submit any occluders). Self-regulating, zero in-loop
+        //     overhead.
+        //   - Spike clip: inside the phase, sampled time check (every 32
+        //     iterations of the inner loop) bails when this frame's running
+        //     elapsed exceeds the budget. Bounds worst-case latency.
+        // Soft fallback in both: untested testees become Visible (over-render,
+        // never wrongly cull); unsubmitted occluders just miss the mask.
+        // MOC's TestRect invariant (false negatives only) keeps it safe.
+        //
+        // Both budgets target MSOC-only work — not vanilla rendering:
+        //   - RasterizeBudgetUs bounds the cumulative ScopedUsAccumulator
+        //     time inside MOC::RenderTriangles, not wall-clock-since-frame-
+        //     start (which would also include cullShowBody traversal).
+        //   - ClassifyBudgetUs bounds the TestRect loop in classifyDrainRange,
+        //     not the whole drain phase (whose phase 2 display() calls are
+        //     vanilla D3D8 submissions that run regardless of MSOC).
+        static unsigned int OcclusionRasterizeBudgetUs;
+        static unsigned int OcclusionClassifyBudgetUs;
+
         static bool OcclusionLogPerFrame;
         static bool OcclusionLogAggregate;
     };

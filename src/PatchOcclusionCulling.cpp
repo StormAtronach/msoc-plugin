@@ -476,6 +476,58 @@ namespace msoc::patch::occlusion {
 	// parallel side. One number, one meaning, comparable across modes.
 	static uint64_t g_classifyUs = 0;
 	static uint64_t g_drainDisplayUs = 0;
+
+	// _Claude_ Hybrid phase budgeting (Configuration::Occlusion*BudgetUs).
+	// Two-layer defence:
+	//   Layer 1 — predictive skip: at top-of-frame, if EMA(last frames)
+	//     exceeds 2× budget, skip the whole phase this frame. Self-
+	//     regulating, zero in-loop overhead. The 2× multiplier means a
+	//     single one-shot spike (clipped by Layer 2 to ~budget anyway)
+	//     won't trigger sustained skipping; only genuine sustained
+	//     overruns do.
+	//   Layer 2 — spike clip: rasterize side checks the cumulative
+	//     g_rasterizeTimeUs at top of every rasterizeTriShape call;
+	//     classify side checks elapsedUsSince(g_classifyPhaseStart)
+	//     every 32 iterations inside classifyDrainRange. Bails when
+	//     budget is exceeded; remaining work is treated conservatively
+	//     (occluders skipped, testees marked Visible).
+	// Soft fallback: untested testees → Visible (over-render, never
+	// wrongly cull); unsubmitted occluders → just miss the mask. MOC's
+	// TestRect invariant (false negatives only) keeps this safe.
+	//
+	// Both budgets target MSOC-only work, not vanilla rendering:
+	//   - rasterize budget bounds RenderTriangles SIMD time only —
+	//     the cullShowBody traversal between rasterize calls is NOT
+	//     measured (would fire spuriously on every frame, see 0.0.9).
+	//   - classify budget bounds the TestRect loop only — phase 2's
+	//     display() calls in drainPendingDisplays are vanilla D3D8
+	//     submissions that happen with or without MSOC, so bounding
+	//     them would be pointless (we can't skip vanilla rendering).
+	//
+	// EMA = (prev * 7 + sample) >> 3. 1/8 weight to new sample → ~6
+	// frame half-life; smooth enough to ignore single-frame jitter,
+	// fast enough to react to sustained overruns within ~10 frames.
+	static uint64_t g_rasterizeEmaUs = 0;
+	static uint64_t g_classifyEmaUs  = 0;
+	static uint64_t g_rasterizeBudgetUsEffective = 0;
+	static uint64_t g_classifyBudgetUsEffective  = 0;
+	static bool     g_skipRasterizeThisFrame = false;
+	static bool     g_skipClassifyThisFrame  = false;
+	static std::chrono::steady_clock::time_point g_classifyPhaseStart;
+	static uint32_t g_rasterizeBudgetTrips = 0; // per-frame: 1 if we cut short, 0 otherwise
+	static uint32_t g_classifyBudgetTrips  = 0;
+	static uint64_t g_rasterizeBudgetTripsSession = 0;
+	static uint64_t g_classifyBudgetTripsSession  = 0;
+
+	static inline uint64_t elapsedUsSince(std::chrono::steady_clock::time_point t0) {
+		return static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - t0).count());
+	}
+
+	static inline uint64_t emaUpdate(uint64_t prev, uint64_t sample) {
+		return (prev * 7 + sample) >> 3;
+	}
 	// Phase 3.2: time spent in threadpool Flush() barrier before drain.
 	// Only populated when async mode is active; zero otherwise.
 	static uint64_t g_asyncFlushTimeUs = 0;
@@ -1327,6 +1379,32 @@ namespace msoc::patch::occlusion {
 	// Returns true if we actually rasterised; false if the shape was skipped
 	// (no data, too thin on some axis, or camera inside the tight AABB).
 	static bool rasterizeTriShape(NI::TriShape* shape, const TES3::Vector3& eye) {
+		// _Claude_ Phase budget gate. Either the predictive skip flag is
+		// set (sustained overrun, skip whole phase) or the cumulative
+		// SIMD time inside RenderTriangles has crossed the budget
+		// (spike clip). Both return false to mean "this occluder didn't
+		// contribute to the mask".
+		//
+		// Compares against g_rasterizeTimeUs (the ScopedUsAccumulator
+		// total over completed RenderTriangles calls), NOT against
+		// wall-clock-since-frame-start. The latter would also include
+		// cullShowBody traversal / frustum-cull / app-cull work that
+		// runs interleaved between rasterize calls — which produced
+		// false-positive trips on every frame in 0.0.9 (see the i5
+		// user's log: rastTrip=1 every frame even though rasterizeUs
+		// was always under budget). g_rasterizeTimeUs only updates
+		// when ScopedUsAccumulator destructs after each RenderTriangles
+		// call, so between calls the value is stable and accurate.
+		if (g_skipRasterizeThisFrame) {
+			g_rasterizeBudgetTrips = 1;
+			return false;
+		}
+		if (g_rasterizeBudgetUsEffective > 0
+			&& g_rasterizeTimeUs > g_rasterizeBudgetUsEffective) {
+			g_rasterizeBudgetTrips = 1;
+			return false;
+		}
+
 		// Skip skinned meshes (NPCs, creatures). Their vertices live in
 		// bind-pose space and need skinInstance->deform() to produce the
 		// current animated positions — rasterising the bind-pose verts
@@ -1922,14 +2000,57 @@ namespace msoc::patch::occlusion {
 	// and parallel modes lets the serial-only refactor commit validate
 	// the phase-1 logic before threading is introduced.
 	static void classifyDrainRange(size_t lo, size_t hi) {
+		// _Claude_ Capture phase start here (not at drainPendingDisplays
+		// entry) so the spike clip measures classify-only elapsed —
+		// excluding phase 2's display() calls which are vanilla D3D8
+		// submissions, not MSOC overhead.
+		g_classifyPhaseStart = std::chrono::steady_clock::now();
+
+		// _Claude_ Predictive skip path. EMA crossed 2× budget over
+		// recent frames → skip TestRect entirely this frame. Mark
+		// every slot Visible so phase 2 calls display() for all of
+		// them — equivalent to running with EnableMSOC=false for
+		// this single frame, except the threadpool / mask-build still
+		// happen so we don't lose recovery momentum once the EMA
+		// drops back under threshold.
+		if (g_skipClassifyThisFrame) {
+			g_classifyBudgetTrips = 1;
+			for (size_t i = lo; i < hi; ++i) {
+				g_drainSlots[i].verdict     = DrainVerdict::Visible;
+				g_drainSlots[i].ranTestRect = false;
+			}
+			return;
+		}
+
 		const unsigned int tcFrames = g_temporalCoherenceFramesEffective;
 		const bool skipTerrainEnabled = g_skipTerrainOccludeesEffective;
 		const float tinyThreshold = g_occludeeMinRadiusEffective;
+
+		// _Claude_ Spike-clip parameters. budgetActive==true means the
+		// in-loop check is armed; kCheckMask gates the timer read to
+		// every 32nd iteration so per-iteration overhead is ~one
+		// branch (the i & 31 test). When the clip fires, mark every
+		// remaining slot as Visible (no TestRect) — phase 2 then calls
+		// display() unconditionally for those, matching the safe-
+		// fallback MOC invariant.
+		const bool budgetActive = (g_classifyBudgetUsEffective > 0);
+		constexpr size_t kCheckMask = 31;
 
 		for (size_t i = lo; i < hi; ++i) {
 			const auto& p = g_pendingDisplays[i];
 			auto& slot = g_drainSlots[i];
 			slot.ranTestRect = false;
+
+			if (budgetActive && i > lo && (i & kCheckMask) == 0) {
+				if (elapsedUsSince(g_classifyPhaseStart) > g_classifyBudgetUsEffective) {
+					g_classifyBudgetTrips = 1;
+					for (size_t j = i; j < hi; ++j) {
+						g_drainSlots[j].verdict   = DrainVerdict::Visible;
+						g_drainSlots[j].ranTestRect = false;
+					}
+					return;
+				}
+			}
 
 			if (skipTerrainEnabled
 				&& isLandscapeDescendant(p.shape, g_worldLandscapeRoot)) {
@@ -2477,6 +2598,24 @@ namespace msoc::patch::occlusion {
 			// reset — they're lifetime peaks for the periodic log.
 			g_wakeThreadsTimeUs = 0;
 			g_maxCallDepthThisFrame = 0;
+
+			// _Claude_ Phase budgeting setup. Read effective values from
+			// Configuration once per frame so a mid-frame Lua configure()
+			// doesn't split a phase across two budget regimes. Predictive
+			// skip threshold is 2× budget — chosen so a one-shot spike
+			// (which Layer 2 already clipped to ~budget anyway) doesn't
+			// trigger sustained skipping; only genuine sustained EMA
+			// overruns do. Budget==0 means unlimited (gate disabled).
+			g_rasterizeBudgetUsEffective = Configuration::OcclusionRasterizeBudgetUs;
+			g_classifyBudgetUsEffective  = Configuration::OcclusionClassifyBudgetUs;
+			g_skipRasterizeThisFrame =
+				(g_rasterizeBudgetUsEffective > 0)
+				&& (g_rasterizeEmaUs > 2 * g_rasterizeBudgetUsEffective);
+			g_skipClassifyThisFrame =
+				(g_classifyBudgetUsEffective > 0)
+				&& (g_classifyEmaUs > 2 * g_classifyBudgetUsEffective);
+			g_rasterizeBudgetTrips = 0;
+			g_classifyBudgetTrips  = 0;
 			g_lastStage = 6; // _Claude_ uploadCamera
 			uploadCameraTransform(camera);
 			if (g_asyncThisFrame) {
@@ -2592,6 +2731,22 @@ namespace msoc::patch::occlusion {
 			if (g_maxCallDepthThisFrame > g_maxCallDepthSession) {
 				g_maxCallDepthSession = g_maxCallDepthThisFrame;
 			}
+
+			// _Claude_ Update phase EMAs for next frame's predictive-skip
+			// gate. Samples are MSOC-only work:
+			//   - rasterize: g_rasterizeTimeUs = sum of RenderTriangles
+			//     SIMD time. Excludes cullShowBody traversal between
+			//     calls (vanilla scene-graph walk, runs regardless).
+			//   - classify: g_classifyUs = TestRect loop time only.
+			//     Excludes phase 2's display() calls (vanilla D3D8
+			//     submission, runs regardless).
+			// Including non-MSOC work would have the gate triggering on
+			// vanilla render slowness — which is exactly the bug 0.0.10
+			// fixed (drainEma in 0.0.9 included display() calls).
+			g_rasterizeEmaUs = emaUpdate(g_rasterizeEmaUs, g_rasterizeTimeUs);
+			g_classifyEmaUs  = emaUpdate(g_classifyEmaUs,  g_classifyUs);
+			g_rasterizeBudgetTripsSession += g_rasterizeBudgetTrips;
+			g_classifyBudgetTripsSession  += g_classifyBudgetTrips;
 			g_lastStage = 13; // _Claude_ exited top-level cleanly
 			// _Claude_ Publish the frame-end timestamp for the
 			// watchdog. If the next frame freezes mid-body, the
@@ -2671,6 +2826,14 @@ namespace msoc::patch::occlusion {
 					<< " classifyUs=" << g_classifyUs // _Claude_ phase-1 wall (serial = work; parallel = barrier)
 					<< " displayUs=" << g_drainDisplayUs // _Claude_ audit
 					<< " asyncFlushUs=" << g_asyncFlushTimeUs
+					<< " rastBudgetUs=" << g_rasterizeBudgetUsEffective
+					<< " rastEmaUs=" << g_rasterizeEmaUs
+					<< " rastTrip=" << g_rasterizeBudgetTrips
+					<< " rastTripsSess=" << g_rasterizeBudgetTripsSession
+					<< " classBudgetUs=" << g_classifyBudgetUsEffective
+					<< " classEmaUs=" << g_classifyEmaUs
+					<< " classTrip=" << g_classifyBudgetTrips
+					<< " classTripsSess=" << g_classifyBudgetTripsSession
 					<< " wakeUs=" << g_wakeThreadsTimeUs // _Claude_ this frame's WakeThreads spin
 					<< " maxWakeUsSess=" << g_maxWakeThreadsUsSession // _Claude_ lifetime peak
 					<< " maxDepthFrame=" << g_maxCallDepthThisFrame // _Claude_ this frame's recursion peak

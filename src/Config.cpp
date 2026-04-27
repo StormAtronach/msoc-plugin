@@ -53,6 +53,13 @@ namespace msoc {
     unsigned int Configuration::OcclusionMaskWidth  = 512;
     unsigned int Configuration::OcclusionMaskHeight = 256;
 
+    // _Claude_ Phase budgets default to 0 (unlimited) so the patch's
+    // historical behaviour is preserved on Mid/High tier and when the
+    // user explicitly disables them. Low tier sets non-zero values
+    // that bound the per-frame cost — see applyHardwareTierDefaults.
+    unsigned int Configuration::OcclusionRasterizeBudgetUs = 0;
+    unsigned int Configuration::OcclusionClassifyBudgetUs  = 0;
+
     bool Configuration::OcclusionLogPerFrame  = false;
     bool Configuration::OcclusionLogAggregate = false;
 
@@ -147,6 +154,16 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionThreadpoolBinsH = 1;
             Configuration::OcclusionMaskWidth      = 256;
             Configuration::OcclusionMaskHeight     = 128;
+            // _Claude_ Tight budgets bound the spike cost. Sized for
+            // a 4-thread SSE4.1 part where the user's log showed
+            // drainUs spiking to 32ms; 1500us cuts that off at ~5%
+            // of a 30fps frame budget. Steady-state (~1.5-3ms in
+            // that log) sits at or under the cap, so most frames
+            // are unaffected. Predictive skip kicks in only when
+            // EMA sustainably overruns 2× budget — i.e. the system
+            // is genuinely behind, not on one-shot spikes.
+            Configuration::OcclusionRasterizeBudgetUs = 1500;
+            Configuration::OcclusionClassifyBudgetUs  = 1500;
             break;
 
         case HardwareTier::Mid:
@@ -166,6 +183,10 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionThreadpoolBinsH = 2;
             Configuration::OcclusionMaskWidth      = 384;
             Configuration::OcclusionMaskHeight     = 192;
+            // Looser budgets — Mid CPUs handle steady-state fine,
+            // budgets only intervene on cell-load spikes.
+            Configuration::OcclusionRasterizeBudgetUs = 3000;
+            Configuration::OcclusionClassifyBudgetUs  = 3000;
             break;
 
         case HardwareTier::High:
@@ -177,6 +198,12 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionThreadpoolBinsH = 2;
             Configuration::OcclusionMaskWidth      = 512;
             Configuration::OcclusionMaskHeight     = 256;
+            // Effectively unlimited — High-tier hardware doesn't
+            // need the bound, and the budget machinery's overhead
+            // (one branch per phase entry, sampled timer in the
+            // drain inner loop) is negligible but not zero.
+            Configuration::OcclusionRasterizeBudgetUs = 0;
+            Configuration::OcclusionClassifyBudgetUs  = 0;
             break;
     }
 }
@@ -222,6 +249,8 @@ int configure(lua_State* L) {
     // (the value gets stored, just doesn't take effect until next launch).
     readUInt (L, 1, "OcclusionMaskWidth",                  Configuration::OcclusionMaskWidth);
     readUInt (L, 1, "OcclusionMaskHeight",                 Configuration::OcclusionMaskHeight);
+    readUInt (L, 1, "OcclusionRasterizeBudgetUs",          Configuration::OcclusionRasterizeBudgetUs);
+    readUInt (L, 1, "OcclusionClassifyBudgetUs",           Configuration::OcclusionClassifyBudgetUs);
 
     readBool (L, 1, "OcclusionLogPerFrame",                Configuration::OcclusionLogPerFrame);
     readBool (L, 1, "OcclusionLogAggregate",               Configuration::OcclusionLogAggregate);
