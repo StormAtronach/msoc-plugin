@@ -32,7 +32,12 @@ namespace msoc {
     bool Configuration::OcclusionEnableInterior        = true;
     bool Configuration::OcclusionEnableExterior        = true;
     bool Configuration::OcclusionSkipTerrainOccludees  = true;
-    bool Configuration::OcclusionAggregateTerrain      = true;
+    // LAYER-A-HORIZON: 0=Off, 1=Raster, 2=Horizon. Default flipped to
+    // Horizon after Step 6 validation showed cost win + cull-rate parity
+    // across all sampled scene types (mid-density, architecture-rich,
+    // pure-terrain hill→mountain). Raster path stays in the codebase as
+    // fallback for users who prefer the legacy behaviour.
+    int  Configuration::OcclusionAggregateTerrain      = 2;
     // _Claude_ 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). Index→step
     // mapping in PatchOcclusionCulling.cpp::currentTerrainStep().
     unsigned int Configuration::OcclusionTerrainResolution = 1;
@@ -92,6 +97,24 @@ void readUInt(lua_State* L, int tbl, const char* key, unsigned int& out) {
         const lua_Number n = lua_tonumber(L, -1);
         // Negative values would wrap around to huge unsigneds; clamp to 0.
         out = (n < 0.0) ? 0u : static_cast<unsigned int>(n);
+    }
+    lua_pop(L, 1);
+}
+
+// LAYER-A-HORIZON: tri-state int with legacy-bool acceptance.
+// OcclusionAggregateTerrain was a bool prior to LAYER-A; existing
+// config.lua / serialised mcm states may still carry true/false.
+// Map: false→0 (Off), true→1 (Raster), int N→N (clamped to [0,2]).
+void readTerrainOcclusionMode(lua_State* L, int tbl, const char* key, int& out) {
+    lua_getfield(L, tbl, key);
+    if (lua_isnumber(L, -1)) {
+        const lua_Number n = lua_tonumber(L, -1);
+        int v = static_cast<int>(n);
+        if (v < 0) v = 0;
+        if (v > 2) v = 2;
+        out = v;
+    } else if (lua_isboolean(L, -1)) {
+        out = lua_toboolean(L, -1) ? 1 : 0;
     }
     lua_pop(L, 1);
 }
@@ -232,7 +255,8 @@ int configure(lua_State* L) {
     readBool (L, 1, "OcclusionEnableInterior",             Configuration::OcclusionEnableInterior);
     readBool (L, 1, "OcclusionEnableExterior",             Configuration::OcclusionEnableExterior);
     readBool (L, 1, "OcclusionSkipTerrainOccludees",       Configuration::OcclusionSkipTerrainOccludees);
-    readBool (L, 1, "OcclusionAggregateTerrain",           Configuration::OcclusionAggregateTerrain);
+    // LAYER-A-HORIZON: tri-state via the bool-tolerant reader.
+    readTerrainOcclusionMode(L, 1, "OcclusionAggregateTerrain", Configuration::OcclusionAggregateTerrain);
     readUInt (L, 1, "OcclusionTerrainResolution",          Configuration::OcclusionTerrainResolution);
 
     readBool (L, 1, "OcclusionCullLights",                 Configuration::OcclusionCullLights);

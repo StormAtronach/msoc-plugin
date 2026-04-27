@@ -17,7 +17,12 @@ local default_config = {
     OcclusionEnableInterior             = true,
     OcclusionEnableExterior             = true,
     OcclusionSkipTerrainOccludees       = true,
-    OcclusionAggregateTerrain           = true,
+    -- LAYER-A-HORIZON: tri-state. 0=Off, 1=Raster (legacy), 2=Horizon.
+    -- Default Horizon — Step 6 validation showed cost win + cull-rate
+    -- parity across mid-density, architecture-rich, and pure-terrain
+    -- scenes. Set to 1 to use the legacy Raster path; 0 disables
+    -- terrain in the mask entirely.
+    OcclusionAggregateTerrain           = 2,
     OcclusionTerrainResolution          = 1,
 
     -- Light culling.
@@ -157,6 +162,71 @@ end
 local config = mwse.loadConfig("msoc", default_config) ---@cast config table
 config.confPath = "msoc"
 config.default  = default_config
+
+-- _Claude_ Tier-default migration. mwse.loadConfig favours saved-JSON
+-- values over default_config — the right semantics for keys the user
+-- has explicitly tuned via MCM, but a footgun for keys whose ideal
+-- value is a function of the plugin's heuristics, not the user's
+-- choice. Without this migration, an upgrading user keeps stale tier-
+-- insensitive defaults forever (e.g. OcclusionAsyncOccluders=true
+-- saved from an old build silently overrides the new Low-tier `false`,
+-- preserving the very perf footgun the tier system was meant to fix).
+--
+-- Strategy: stamp the plugin version into config.lastSeenVersion. When
+-- it doesn't match the loaded plugin version, force-re-apply the tier-
+-- sensitive subset from default_config (already tier-adjusted above)
+-- and persist immediately. Subsequent MCM edits to these keys stick
+-- until the next plugin version bump — same predictable semantics for
+-- both first-run and upgrading users.
+--
+-- Trade-off: a user who manually overrode (e.g.) OcclusionAsyncOccluders
+-- to gauge cost loses that override exactly once per plugin update.
+-- They can re-set it in MCM and it persists until the next bump.
+-- Acceptable: we'd rather have one forced re-evaluation than silently
+-- pin every upgrading user to obsolete heuristics.
+local kTierMigratedKeys = {
+    "OcclusionAsyncOccluders",
+    "OcclusionThreadpoolBinsW",
+    "OcclusionThreadpoolBinsH",
+    "OcclusionMaskWidth",
+    "OcclusionMaskHeight",
+    "OcclusionRasterizeBudgetUs",
+    "OcclusionClassifyBudgetUs",
+}
+
+-- _Claude_ Renamed / removed keys. Each version bump that drops a
+-- field appends it here so the migration can clean it out of the
+-- user's saved JSON. Without this the JSON accumulates dead keys
+-- forever — harmless, but clutters the file.
+local kRetiredKeys = {
+    "OcclusionDrainBudgetUs", -- 0.0.10: renamed to OcclusionClassifyBudgetUs
+}
+
+local pluginVersion = mscPlugin and mscPlugin.version or "unknown"
+if config.lastSeenVersion ~= pluginVersion then
+    local oldVer = config.lastSeenVersion
+    for _, k in ipairs(kTierMigratedKeys) do
+        config[k] = default_config[k]
+    end
+    -- Remove keys that have been renamed or dropped in this or a
+    -- prior version. Setting to nil drops the entry from the table,
+    -- so the next mwse.saveConfig won't write it back to JSON.
+    local removed = {}
+    for _, k in ipairs(kRetiredKeys) do
+        if config[k] ~= nil then
+            config[k] = nil
+            table.insert(removed, k)
+        end
+    end
+    config.lastSeenVersion = pluginVersion
+    mwse.saveConfig("msoc", config)
+    mwse.log("[msoc] tier defaults migrated: lastSeen=%s -> %s; async=%s bins=%dx%d mask=%dx%d; retired=[%s]",
+        tostring(oldVer), tostring(pluginVersion),
+        tostring(config.OcclusionAsyncOccluders),
+        config.OcclusionThreadpoolBinsW, config.OcclusionThreadpoolBinsH,
+        config.OcclusionMaskWidth, config.OcclusionMaskHeight,
+        table.concat(removed, ","))
+end
 
 -- Push the live config table into the native plugin. `plugin` is the
 -- table returned from include("msoc"); pass it explicitly rather than

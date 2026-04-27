@@ -46,7 +46,12 @@ namespace msoc {
         static bool OcclusionEnableInterior;
         static bool OcclusionEnableExterior;
         static bool OcclusionSkipTerrainOccludees;
-        static bool OcclusionAggregateTerrain;
+        // LAYER-A-HORIZON: tri-state — 0=Off, 1=Raster, 2=Horizon. Was
+        // bool prior to the LAYER-A handoff. Lua side accepts both bool
+        // (true→1, false→0) and int forms; see Config.cpp's parser.
+        // Default Raster initially; flipped to Horizon after Step 6
+        // validation per the handoff doc.
+        static int  OcclusionAggregateTerrain;
         static unsigned int OcclusionTerrainResolution;
 
         static bool OcclusionCullLights;

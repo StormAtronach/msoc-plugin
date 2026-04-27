@@ -51,6 +51,10 @@ add_library(msoc SHARED
     src/plugin.cpp
     src/Log.cpp
     src/Config.cpp
+    # 1D-horizon → curtain occluder used by the Horizon mode of
+    # rasterizeAggregateTerrain. Adapted from MGE-XE's distant-land
+    # equivalent; see src/HorizonOccluder.h for the rationale.
+    src/HorizonOccluder.cpp
     src/PatchOcclusionCulling.cpp
     # Local forwarders for the NI/TES3 engine methods the patch calls.
     # UIE-style: each body is a one-liner reinterpret_cast to a fixed

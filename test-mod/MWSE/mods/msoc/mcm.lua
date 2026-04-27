@@ -117,12 +117,24 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
-    main:createOnOffButton({
-        label       = "Aggregate terrain as occluder",
-        description = "Merges the 16 subcell patches of each visible Land into a "
-            .. "single combined occluder in one submission. Produces the hill/horizon "
-            .. "silhouette that actually occludes architecture behind slopes. Most "
-            .. "beneficial in highland areas; safe to disable on flat-terrain profiles.",
+    -- LAYER-A-HORIZON: tri-state replaces the previous on/off checkbox.
+    -- Off skips terrain occlusion entirely. Raster is the legacy path
+    -- that submits the merged subcell triangle mesh to MOC. Horizon
+    -- replaces that with a 1D-horizon-curtain pipeline (~120 tris vs
+    -- ~10,000) — see the LAYER-A handoff doc for the design.
+    main:createDropdown({
+        label       = "Terrain occluder mode",
+        description = "Off: no terrain in the occlusion mask (cheapest, lowest cull rate). "
+            .. "Raster (legacy): merges each visible Land's 16 subcell patches into a "
+            .. "single combined occluder. Best for highland areas. Horizon: builds a "
+            .. "1D screen-space silhouette from terrain verts and submits ~120 curtain "
+            .. "triangles instead of the full mesh — much cheaper, similar cull rate "
+            .. "in cliff/mountain scenes.",
+        options     = {
+            { label = "Off",              value = 0 },
+            { label = "Raster (legacy)",  value = 1 },
+            { label = "Horizon",          value = 2 },
+        },
         configKey   = "OcclusionAggregateTerrain",
         callback    = applyChange,
     })

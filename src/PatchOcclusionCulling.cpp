@@ -3,6 +3,9 @@
 #include "Log.h"
 #include "MemoryUtil.h"
 #include "Config.h"
+// LAYER-A-HORIZON: 1D horizon → curtain occluder used by the Horizon
+// mode of rasterizeAggregateTerrain. See src/HorizonOccluder.h.
+#include "HorizonOccluder.h"
 
 #include "TES3Cell.h"
 #include "TES3DataHandler.h"
@@ -338,6 +341,25 @@ namespace msoc::patch::occlusion {
 	// actual worker rasterisation happens in parallel and is not counted.
 	static uint64_t g_aggregateTerrainUs = 0;
 
+	// LAYER-A-HORIZON: Horizon-mode counters. Active only when
+	// g_aggregateTerrainEffective == 2. Bucket discipline (mirrors the
+	// LAYER-A handoff doc Step 5):
+	//   - g_horizonBuildUs:   end-to-end time in rasterizeAggregateTerrainHorizon
+	//                         (project + simplify + emit + RenderTriangles).
+	//   - g_horizonRasterUs:  inner subset — ONLY the curtain's RenderTriangles
+	//                         call. Lets validation isolate construction cost
+	//                         from MOC raster cost.
+	// Pure construction cost = g_horizonBuildUs - g_horizonRasterUs.
+	// Curtain raster also accumulates into g_rasterizeTimeUs alongside
+	// other occluders, so total rasterize-budget framing stays consistent.
+	static uint64_t g_horizonBuildUs        = 0;
+	static uint64_t g_horizonRasterUs       = 0;
+	static uint64_t g_horizonLandsFed       = 0;  // lands that contributed verts this frame
+	static uint64_t g_horizonVertsFed       = 0;  // total verts projected through clip
+	static uint64_t g_horizonColumnsTouched = 0;  // non-sentinel columns after build
+	static uint64_t g_horizonCurtainTris    = 0;  // curtain triangles emitted
+	static float    g_horizonAdaptiveEpsD   = 0;  // depth-split threshold this frame
+
 	// ============================================================
 	// Cache types & globals (land / drain / light)
 	// ============================================================
@@ -369,6 +391,24 @@ namespace msoc::patch::occlusion {
 		// flush. Sentinel 0xff means "uninitialised" (any real value
 		// triggers rebuild).
 		uint8_t builtForResolution = 0xff;
+
+		// Per-subcell ranges into `indices`. Lets the submit path
+		// frustum-cull at subcell granularity instead of submitting the
+		// whole Land in one call. Built by buildLandCacheEntry; consumed
+		// by rasterizeAggregateTerrain (per-subcell RenderTriangles
+		// calls) and by rasterizeAggregateTerrainHorizon (per-subcell
+		// vertex-projection skip).
+		//
+		// `node` is the subcell NiNode pointer — used per frame as the
+		// frustumCulledSphere argument so the worldBound stays current
+		// regardless of the cache hit. Lifetime is the same as the
+		// parent Land's nodePtr (subcells are owned by the Land NiNode).
+		struct SubcellRange {
+			NI::Node* node;        // for per-frame frustumCulledSphere
+			unsigned int firstIdx; // start position in `indices`
+			unsigned int triCount; // triangles in this subcell
+		};
+		std::vector<SubcellRange> subcellRanges;
 	};
 	static std::unordered_map<NI::Node*, LandCacheEntry> g_landCache;
 	static uint64_t g_landCacheHits = 0;
@@ -689,7 +729,10 @@ namespace msoc::patch::occlusion {
 	static unsigned int g_occluderMaxTrianglesEffective      = 4096;
 	static float        g_occludeeMinRadiusEffective         = 1.0f;
 	static bool         g_skipTerrainOccludeesEffective      = true;
-	static bool         g_aggregateTerrainEffective          = true;
+	// LAYER-A-HORIZON: 0=Off, 1=Raster, 2=Horizon. Latched once per
+	// top-level CullShow_detour entry from Configuration::OcclusionAggregateTerrain.
+	// Default mirrors Config.cpp.
+	static int          g_aggregateTerrainEffective          = 1;
 	static unsigned int g_terrainResolutionEffective         = 1;
 	static unsigned int g_temporalCoherenceFramesEffective   = 4;
 	static bool         g_cullLightsEffective                = true;
@@ -1723,6 +1766,7 @@ namespace msoc::patch::occlusion {
 	static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
 		entry.verts.clear();
 		entry.indices.clear();
+		entry.subcellRanges.clear();
 		const unsigned int step = currentTerrainStep();
 		const auto& subcells = landNode->children;
 		for (size_t j = 0; j < subcells.endIndex; ++j) {
@@ -1730,6 +1774,13 @@ namespace msoc::patch::occlusion {
 			if (!sub) continue;
 			if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
 			auto* subNode = static_cast<NI::Node*>(sub);
+
+			// Bracket this subcell's contribution to the index buffer so
+			// the per-subcell submit path knows the range. firstIdx is
+			// captured BEFORE walking shapes; triCount derives from the
+			// delta after.
+			const unsigned int firstIdxBefore = static_cast<unsigned int>(entry.indices.size());
+
 			const auto& shapes = subNode->children;
 			for (size_t k = 0; k < shapes.endIndex; ++k) {
 				auto* shape = shapes.storage[k].get();
@@ -1739,9 +1790,228 @@ namespace msoc::patch::occlusion {
 				if (p.alpha || p.stencil) continue;
 				appendTerrainShape(entry.verts, entry.indices, static_cast<NI::TriShape*>(shape), step);
 			}
+
+			const unsigned int firstIdxAfter = static_cast<unsigned int>(entry.indices.size());
+			if (firstIdxAfter > firstIdxBefore) {
+				LandCacheEntry::SubcellRange r;
+				r.node     = subNode;
+				r.firstIdx = firstIdxBefore;
+				r.triCount = (firstIdxAfter - firstIdxBefore) / 3;
+				entry.subcellRanges.push_back(r);
+			}
 		}
 		entry.triCount = static_cast<unsigned int>(entry.indices.size() / 3);
 		entry.builtForResolution = static_cast<uint8_t>(g_terrainResolutionEffective);
+	}
+
+	// LAYER-A-HORIZON: Horizon-mode terrain occluder.
+	//
+	// Walks WorldLandscape just like rasterizeAggregateTerrain, but
+	// instead of submitting raw terrain triangles to MOC, projects each
+	// vertex into clip space, bins the result into a 1D max-y/max-w
+	// horizon, simplifies to ~60 adaptive samples, emits ~120 curtain
+	// triangles, and submits THOSE to MOC.
+	//
+	// Decision references (LAYER-A handoff):
+	//   D6  — sync submit via g_msoc->RenderTriangles, never the threadpool
+	//   D7  — no g_landCache; fresh projection each frame
+	//   D9  — frustum-cull at land granularity only, same as raster path
+	//   D12 — adaptive epsD (NEVER pass 1e30 like the MGE-XE distant path)
+	static void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
+		if (!g_worldLandscapeRoot) return;
+		if (g_worldLandscapeRoot->getAppCulled()) return;
+
+		// Outer bucket: project + simplify + emit + RenderTriangles.
+		// Inner RenderTriangles call also accumulates into g_horizonRasterUs
+		// and g_rasterizeTimeUs (see Step 5 bucket discipline).
+		ScopedUsAccumulator timer(g_horizonBuildUs);
+
+		auto& horizon = msoc::horizon::HorizonOccluder::getInstance();
+		// Lazy-init at fixed 512 cols / 60 samples — matches MGE-XE's
+		// distant-land path. Idempotent after first call.
+		horizon.init(512, 60);
+		horizon.reset();
+
+		const int   resolution = horizon.resolution();
+		const float halfSpan   = 0.5f * static_cast<float>(resolution - 1);
+
+		uint64_t landsContributed = 0;
+		uint64_t vertsProjected   = 0;
+
+		const auto& landChildren = g_worldLandscapeRoot->children;
+		for (size_t i = 0; i < landChildren.endIndex; ++i) {
+			auto* land = landChildren.storage[i].get();
+			if (!land) continue;
+			if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
+			if (land->getAppCulled()) continue;
+			if (frustumCulledSphere(land, camera)) continue;
+
+			auto* landNode = static_cast<NI::Node*>(land);
+			bool landFedAny = false;
+
+			const auto& subcells = landNode->children;
+			for (size_t j = 0; j < subcells.endIndex; ++j) {
+				auto* sub = subcells.storage[j].get();
+				if (!sub) continue;
+				if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
+				auto* subNode = static_cast<NI::Node*>(sub);
+
+				// Per-subcell frustum cull. A visible Land covers an
+				// 8192×8192 cell; only ~5–8 of its 16 subcells are
+				// typically in-frustum. Skipping the rest avoids the
+				// per-vertex matrix multiply for invisible subcells —
+				// the dominant cost in this function. Quality is
+				// unchanged: the late `c.w <= kNearClipW` and
+				// `ndcX out of [-1,1]` checks below would have rejected
+				// these verts anyway, just AFTER the projection.
+				if (frustumCulledSphere(subNode, camera)) continue;
+
+				const auto& shapes = subNode->children;
+				for (size_t k = 0; k < shapes.endIndex; ++k) {
+					auto* shape = shapes.storage[k].get();
+					if (!shape) continue;
+					if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
+
+					// Skip alpha/stencil shapes — same gate as the raster
+					// path. A transparent terrain patch shouldn't write
+					// occlusion regardless of mode.
+					const auto props = classifyOccluderProperties(shape);
+					if (props.alpha || props.stencil) continue;
+
+					auto* tri = static_cast<NI::TriShape*>(shape);
+					// getModelData returns a smart Pointer<TriShapeData>,
+					// not a raw pointer — use auto, not auto*. Matches
+					// appendTerrainShape's pattern at line ~1614.
+					auto data = tri->getModelData();
+					if (!data) continue;
+					const unsigned short vcount = data->getActiveVertexCount();
+					if (vcount == 0 || data->vertex == nullptr) continue;
+
+					const auto& xf = tri->worldTransform;
+					const auto& R  = xf.rotation;
+					const auto& T  = xf.translation;
+					const float s  = xf.scale;
+
+					// Mirrors appendTerrainShape's transform convention.
+					for (unsigned short v = 0; v < vcount; ++v) {
+						const auto& vp = data->vertex[v];
+						const float rx = R.m0.x * vp.x + R.m0.y * vp.y + R.m0.z * vp.z;
+						const float ry = R.m1.x * vp.x + R.m1.y * vp.y + R.m1.z * vp.z;
+						const float rz = R.m2.x * vp.x + R.m2.y * vp.y + R.m2.z * vp.z;
+						const float wx = rx * s + T.x;
+						const float wy = ry * s + T.y;
+						const float wz = rz * s + T.z;
+
+						const ClipXYW c = projectWorld(wx, wy, wz);
+						// Behind / on / very near the camera plane —
+						// projection is unstable, skip. Matches the
+						// kNearClipW guard testSphereVisible uses.
+						if (c.w <= kNearClipW) continue;
+
+						const float invW = 1.0f / c.w;
+						const float ndcX = c.x * invW;
+						const float ndcY = c.y * invW;
+
+						// Off-screen X: column index would clamp to an
+						// edge and contaminate the sentinel state at the
+						// boundary. Drop instead.
+						if (ndcX < -1.0f || ndcX > 1.0f) continue;
+						// Below the screen: nothing about its silhouette
+						// can occlude visible geometry. Drop.
+						if (ndcY < -1.0f) continue;
+						// Above the screen: clamp upward — terrain that
+						// extends past the top still defines the
+						// silhouette in that column.
+						const float clampedY = (ndcY > 1.0f) ? 1.0f : ndcY;
+
+						int col = static_cast<int>((ndcX + 1.0f) * halfSpan);
+						if (col < 0) col = 0;
+						if (col >= resolution) col = resolution - 1;
+
+						// D3 inside update(): writes h[c] AND d[c] only when
+						// y_upper strictly exceeds h[c]. Order-independent.
+						horizon.update(col, clampedY, c.w);
+						++vertsProjected;
+						landFedAny = true;
+					}
+				}
+			}
+			if (landFedAny) ++landsContributed;
+		}
+
+		if (vertsProjected == 0) return;
+
+		// Simplify → margin → emit → fixup → submit.
+		constexpr int   kMaxSamples    = 60;
+		constexpr float kEpsH          = 0.01f;
+		constexpr int   kTileAlign     = 16;
+		constexpr float kNdcYBottom    = -1.1f;
+		constexpr float kYSafetyMargin = 0.04f;
+		constexpr float kEpsDFraction  = 0.05f;
+		constexpr float kEpsDFloor     = 100.0f;
+
+		// D12: adaptive epsD computed from this frame's depth range.
+		// computeAdaptiveEpsD returns +infinity if fewer than 2 cols are
+		// active — equivalent to disabling the depth term, safe fallback.
+		const float adaptiveEpsD = horizon.computeAdaptiveEpsD(kEpsDFraction, kEpsDFloor);
+
+		static msoc::horizon::Sample samples[kMaxSamples];
+		const int nSamples = horizon.simplify(samples, kMaxSamples, kEpsH, adaptiveEpsD, kTileAlign);
+		if (nSamples < 2) return;
+
+		// Pull the curtain top down by the safety margin. Skip sentinel
+		// rows (those columns will be skipped by emit anyway).
+		for (int i = 0; i < nSamples; ++i) {
+			if (samples[i].h > -1.0e29f) samples[i].h -= kYSafetyMargin;
+		}
+
+		// Per-frame scratch — function-static so allocations amortise.
+		// Sized for the worst case (every segment emits 6 verts).
+		static std::vector<msoc::horizon::CurtainVertex> curtainVerts;
+		curtainVerts.resize(static_cast<size_t>(6 * (nSamples - 1)));
+		const int triCount = horizon.emitCurtainNDC(samples, nSamples, kNdcYBottom,
+			curtainVerts.data(), static_cast<int>(curtainVerts.size()));
+		if (triCount <= 0) return;
+
+		// Convert NDC layout (x, y, z=depth, w=1) → MOC pre-transformed
+		// layout (x*d, y*d, _, d) in place. Submit with VertexLayout
+		// matching that layout: stride=16, offY=4, offW=12.
+		msoc::horizon::HorizonOccluder::fixupForMOC(curtainVerts.data(), triCount * 3);
+
+		static std::vector<unsigned int> curtainIdx;
+		const int vtxCount = triCount * 3;
+		curtainIdx.resize(static_cast<size_t>(vtxCount));
+		for (int i = 0; i < vtxCount; ++i) {
+			curtainIdx[i] = static_cast<unsigned int>(i);
+		}
+
+		// Submit synchronously into the current frame's mask.
+		// Time accumulates into TWO buckets simultaneously:
+		//   - g_rasterizeTimeUs (so total rasterize cost stays
+		//     comparable across modes)
+		//   - g_horizonRasterUs (so the curtain's specific raster cost
+		//     is separately measurable for Step 6 validation)
+		// Bypasses the threadpool intentionally (D6, D10) — ~120 tris
+		// is below the threshold where dispatch overhead pays back.
+		{
+			ScopedUsAccumulator t1(g_rasterizeTimeUs);
+			ScopedUsAccumulator t2(g_horizonRasterUs);
+			g_msoc->RenderTriangles(
+				reinterpret_cast<const float*>(curtainVerts.data()),
+				curtainIdx.data(), triCount,
+				/*modelToClip=*/nullptr,
+				::MaskedOcclusionCulling::BACKFACE_NONE,
+				::MaskedOcclusionCulling::CLIP_PLANE_ALL,
+				::MaskedOcclusionCulling::VertexLayout(16, 4, 12));
+		}
+
+		// Telemetry. columnsTouched does a linear scan, but it's once per
+		// frame so the cost is negligible.
+		g_horizonCurtainTris    = static_cast<uint64_t>(triCount);
+		g_horizonLandsFed       = landsContributed;
+		g_horizonVertsFed       = vertsProjected;
+		g_horizonColumnsTouched = static_cast<uint64_t>(horizon.columnsTouched());
+		g_horizonAdaptiveEpsD   = adaptiveEpsD;
 	}
 
 	// _Claude_ Aggregate terrain rasteriser. Walks the WorldLandscape
@@ -1813,29 +2083,69 @@ namespace msoc::patch::occlusion {
 			if (frustumCulledSphere(land, camera)) continue;
 			if (entry.triCount == 0) continue;
 
-			if (g_asyncThisFrame) {
-				// Cached buffers outlive this submission (persistent in
-				// g_landCache until evicted), so we pass their pointers
-				// directly. MSOC queues work for worker threads which
-				// consume it during the drain-phase Flush; by the time
-				// we'd ever evict, that Flush has completed.
-				ScopedUsAccumulator t(g_rasterizeTimeUs);
-				g_threadpool->RenderTriangles(entry.verts.data(), entry.indices.data(),
-					static_cast<int>(entry.triCount),
-					::MaskedOcclusionCulling::BACKFACE_NONE,
-					::MaskedOcclusionCulling::CLIP_PLANE_ALL);
-			}
-			else {
-				ScopedUsAccumulator t(g_rasterizeTimeUs);
-				g_msoc->RenderTriangles(entry.verts.data(), entry.indices.data(),
-					static_cast<int>(entry.triCount), g_worldToClip,
-					::MaskedOcclusionCulling::BACKFACE_NONE,
-					::MaskedOcclusionCulling::CLIP_PLANE_ALL,
-					::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
+			// Per-subcell frustum culling. A visible Land's 16 subcells
+			// typically have only ~5–8 in the view frustum; skipping the
+			// rest means N small RenderTriangles calls instead of one
+			// big one, but submitting fewer total triangles to MOC. Net
+			// win on per-tile rasterization cost and on async queue
+			// pressure. Behaviour-equivalent: triangles outside the
+			// frustum get clipped by MOC anyway, we just save the
+			// upstream cost of submitting them.
+			//
+			// Fallback: if the cache was built before the SubcellRange
+			// field landed (entry.subcellRanges is empty) treat the
+			// whole entry as one range so a stale build doesn't get
+			// silently dropped. Should be a no-op in steady state.
+			unsigned int submittedTris = 0;
+			if (!entry.subcellRanges.empty()) {
+				for (const auto& range : entry.subcellRanges) {
+					if (range.triCount == 0) continue;
+					if (range.node && frustumCulledSphere(range.node, camera)) continue;
+
+					if (g_asyncThisFrame) {
+						ScopedUsAccumulator t(g_rasterizeTimeUs);
+						g_threadpool->RenderTriangles(
+							entry.verts.data(),
+							entry.indices.data() + range.firstIdx,
+							static_cast<int>(range.triCount),
+							::MaskedOcclusionCulling::BACKFACE_NONE,
+							::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+					} else {
+						ScopedUsAccumulator t(g_rasterizeTimeUs);
+						g_msoc->RenderTriangles(
+							entry.verts.data(),
+							entry.indices.data() + range.firstIdx,
+							static_cast<int>(range.triCount),
+							g_worldToClip,
+							::MaskedOcclusionCulling::BACKFACE_NONE,
+							::MaskedOcclusionCulling::CLIP_PLANE_ALL,
+							::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
+					}
+					submittedTris += range.triCount;
+				}
+			} else {
+				// Fallback path — single submission for the whole Land.
+				if (g_asyncThisFrame) {
+					ScopedUsAccumulator t(g_rasterizeTimeUs);
+					g_threadpool->RenderTriangles(entry.verts.data(), entry.indices.data(),
+						static_cast<int>(entry.triCount),
+						::MaskedOcclusionCulling::BACKFACE_NONE,
+						::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+				} else {
+					ScopedUsAccumulator t(g_rasterizeTimeUs);
+					g_msoc->RenderTriangles(entry.verts.data(), entry.indices.data(),
+						static_cast<int>(entry.triCount), g_worldToClip,
+						::MaskedOcclusionCulling::BACKFACE_NONE,
+						::MaskedOcclusionCulling::CLIP_PLANE_ALL,
+						::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
+				}
+				submittedTris = entry.triCount;
 			}
 
-			++g_aggregateTerrainLands;
-			g_aggregateTerrainTris += entry.triCount;
+			if (submittedTris > 0) {
+				++g_aggregateTerrainLands;
+				g_aggregateTerrainTris += submittedTris;
+			}
 		}
 
 		// Sweep: drop entries whose per-Land NiNode isn't a child of
@@ -1949,7 +2259,10 @@ namespace msoc::patch::occlusion {
 				// the depth buffer as merged per-Land submissions, and
 				// re-rasterising them is duplicate work (harmless depth-
 				// wise but wastes triangles / threadpool queue slots).
-				const bool skipAsAggregated = g_aggregateTerrainEffective
+				// LAYER-A-HORIZON: tri-state — non-zero (Raster or Horizon)
+				// means terrain is being submitted as a merged occluder
+				// somewhere in the frame, so per-patch rasterise is dup work.
+				const bool skipAsAggregated = (g_aggregateTerrainEffective != 0)
 					&& isLandscapeDescendant(self, g_worldLandscapeRoot);
 				if (!skipAsAggregated
 					&& boundRadius >= g_occluderRadiusMinEffective
@@ -2528,6 +2841,14 @@ namespace msoc::patch::occlusion {
 			g_aggregateTerrainLands = 0;
 			g_aggregateTerrainTris = 0;
 			g_aggregateTerrainUs = 0;
+			// LAYER-A-HORIZON: per-frame reset for the Horizon-mode counters.
+			g_horizonBuildUs        = 0;
+			g_horizonRasterUs       = 0;
+			g_horizonLandsFed       = 0;
+			g_horizonVertsFed       = 0;
+			g_horizonColumnsTouched = 0;
+			g_horizonCurtainTris    = 0;
+			g_horizonAdaptiveEpsD   = 0.0f;
 			g_landCacheHits = 0;
 			g_landCacheMisses = 0;
 			g_landCacheEvictions = 0;
@@ -2643,9 +2964,24 @@ namespace msoc::patch::occlusion {
 			// leaves reach the drain. Individual 25v/32t patches would
 			// fail the thin-axis gate; merging them reclaims terrain
 			// as a useful occluder. Gated for A/B profiling.
-			if (Configuration::OcclusionAggregateTerrain) {
+			// LAYER-A-HORIZON: tri-state dispatch.
+			//   0 = Off:     no terrain in the mask.
+			//   1 = Raster:  legacy merged-triangle path.
+			//   2 = Horizon: 1D-horizon-curtain path.
+			// Reads the latched g_aggregateTerrainEffective rather than
+			// Configuration:: directly so the value can't change mid-frame.
+			switch (g_aggregateTerrainEffective) {
+			case 1:
 				g_lastStage = 8; // _Claude_ aggTerrain
 				rasterizeAggregateTerrain(camera);
+				break;
+			case 2:
+				g_lastStage = 8; // LAYER-A-HORIZON: aggTerrain (horizon)
+				rasterizeAggregateTerrainHorizon(camera);
+				break;
+			case 0:
+			default:
+				break;
 			}
 		}
 
@@ -2812,6 +3148,16 @@ namespace msoc::patch::occlusion {
 					<< " aggTerrainLands=" << g_aggregateTerrainLands // _Claude_
 					<< " aggTerrainTris=" << g_aggregateTerrainTris // _Claude_
 					<< " aggTerrainUs=" << g_aggregateTerrainUs // _Claude_
+					// LAYER-A-HORIZON: per-frame Horizon-mode counters. All
+					// zero unless g_aggregateTerrainEffective == 2. See the
+					// Step 5 bucket discipline in the handoff doc.
+					<< " horizonBuildUs=" << g_horizonBuildUs
+					<< " horizonRasterUs=" << g_horizonRasterUs
+					<< " horizonLandsFed=" << g_horizonLandsFed
+					<< " horizonVertsFed=" << g_horizonVertsFed
+					<< " horizonColumnsTouched=" << g_horizonColumnsTouched
+					<< " horizonCurtainTris=" << g_horizonCurtainTris
+					<< " horizonAdaptiveEpsD=" << g_horizonAdaptiveEpsD
 					<< " landCacheHit=" << g_landCacheHits // _Claude_
 					<< " landCacheMiss=" << g_landCacheMisses // _Claude_
 					<< " landCacheEvict=" << g_landCacheEvictions // _Claude_
@@ -2826,6 +3172,15 @@ namespace msoc::patch::occlusion {
 					<< " classifyUs=" << g_classifyUs // _Claude_ phase-1 wall (serial = work; parallel = barrier)
 					<< " displayUs=" << g_drainDisplayUs // _Claude_ audit
 					<< " asyncFlushUs=" << g_asyncFlushTimeUs
+					// _Claude_ Hybrid budget diagnostics. *Trip is per-frame (0/1),
+					// *TripsSess is lifetime sum, *Ema is the predictive-skip metric
+					// (compared against 2× *BudgetUs). *BudgetUs=0 means the gate
+					// is disabled for that phase.
+					//
+					// Names changed in 0.0.10: was drain*BudgetUs/Ema/Trip; renamed
+					// to class*BudgetUs/Ema/Trip because the phase being budgeted
+					// is classifyDrainRange (TestRect work), not the whole drain
+					// (whose phase 2 display() calls are vanilla render work).
 					<< " rastBudgetUs=" << g_rasterizeBudgetUsEffective
 					<< " rastEmaUs=" << g_rasterizeEmaUs
 					<< " rastTrip=" << g_rasterizeBudgetTrips
