@@ -451,6 +451,32 @@ namespace msoc::patch::occlusion {
 	static uint64_t g_drainCacheHits = 0;
 	static uint64_t g_drainCacheMisses = 0;
 
+	// Terrain-descendant membership cache. Replaces a parent-chain walk
+	// (~7 random pointer chases per call, called twice per deferred leaf —
+	// one from the rasterize path, one from classifyDrainRange) with a
+	// flat-pointer lookup. Profile baseline (Vivec exterior peak frame):
+	// 2354 calls × 7.3 steps avg = 17202 random parent-pointer chases per
+	// frame, dominated by L2 misses on cold scene-graph nodes.
+	//
+	// Lifetime: same NI::Pointer discipline as g_drainCache — refcount
+	// holds the AVObject alive while a cache entry exists, so the pointer
+	// key stays unique-among-live-objects. Wiped on cell change (same
+	// hook as the other caches at line ~2810).
+	//
+	// Staleness: the result for a given AVObject can only change if the
+	// scene-graph reparents it OR if g_worldLandscapeRoot changes. Within
+	// a cell both are stable; cell-change wipes the cache. Reparenting a
+	// reference into/out of inventory mid-cell is theoretically possible
+	// but the failure mode is benign (a wrongly-cached "is terrain" skips
+	// the rasterize path for one item — harmless under-occlusion).
+	struct TerrainMembershipEntry {
+		NI::Pointer<NI::AVObject> objPtr;
+		bool isDescendant;
+	};
+	static std::unordered_map<NI::AVObject*, TerrainMembershipEntry> g_terrainMembership;
+	static uint64_t g_terrainMembershipHits   = 0;
+	static uint64_t g_terrainMembershipMisses = 0;
+
 	// _Claude_ Per-light occlusion cache for the updateLights hook (gated
 	// by Configuration::OcclusionCullLights). Keyed by NI::Light*. Entry
 	// records the last frame the light was queried, the most recent MSOC
@@ -1032,17 +1058,34 @@ namespace msoc::patch::occlusion {
 
 	// _Claude_ Ancestor-walk: true iff obj sits under DataHandler's
 	// worldLandscapeRoot. The terrain tree is shallow — leaf trishape →
-	// subcell NiNode → per-Land NiNode → WorldLandscape root is exactly
-	// four levels, so terrain hits return at iteration 4. Non-terrain
-	// shapes run the loop to scene root (~5–8 levels) and return false;
-	// that's the cost we pay for the terrain skip, measured in cache-hot
-	// pointer chases so it stays under ~1 µs even at 500 deferred leaves.
+	// Subcell NiNode → per-Land NiNode → WorldLandscape root is exactly four
+	// levels for terrain hits; non-terrain leaves run to scene root (~6-8
+	// levels) before returning false. Profile baseline (Vivec exterior peak,
+	// pre-cache): 2354 calls × 7.3 steps avg = ~17000 random parent-pointer
+	// dereferences per frame, dominated by L2 misses on cold scene-graph
+	// nodes. Estimated cost 66-172 µs/frame mixed-cache, well above the
+	// "<1 µs" the original implementation comment claimed.
+	//
+	// Cache: the result is stable per-AVObject for the lifetime of a cell
+	// (parent-chain doesn't change), so a single populate per shape per
+	// cell carries across BOTH call sites (rasterize-path line ~2266 and
+	// drain-path line ~2369) AND every subsequent frame until cell change.
+	// Wiped on cell change alongside the other engine-pointer-keyed caches.
 	static bool isLandscapeDescendant(NI::AVObject* obj, NI::Node* root) {
-		if (!root) return false;
-		for (NI::AVObject* cur = obj; cur; cur = cur->parentNode) {
-			if (cur == root) return true;
+		if (!root || !obj) return false;
+		auto it = g_terrainMembership.find(obj);
+		if (it != g_terrainMembership.end()) {
+			++g_terrainMembershipHits;
+			return it->second.isDescendant;
 		}
-		return false;
+		++g_terrainMembershipMisses;
+		bool result = false;
+		for (NI::AVObject* cur = obj; cur; cur = cur->parentNode) {
+			if (cur == root) { result = true; break; }
+		}
+		g_terrainMembership.emplace(
+			obj, TerrainMembershipEntry{ NI::Pointer<NI::AVObject>(obj), result });
+		return result;
 	}
 
 	// Allocate a standalone NiMaterialProperty seeded from source (if any)
@@ -2810,6 +2853,7 @@ namespace msoc::patch::occlusion {
 				g_landCache.clear();
 				g_drainCache.clear();
 				g_lightCullCache.clear();
+				g_terrainMembership.clear();
 				// _Claude_ Debug-tint map: releases our NI::Pointer refs
 				// on shapes from the outgoing cell so they can actually
 				// be freed. Shapes that survive the cell change (player,
@@ -2849,6 +2893,8 @@ namespace msoc::patch::occlusion {
 			g_horizonColumnsTouched = 0;
 			g_horizonCurtainTris    = 0;
 			g_horizonAdaptiveEpsD   = 0.0f;
+			g_terrainMembershipHits   = 0;
+			g_terrainMembershipMisses = 0;
 			g_landCacheHits = 0;
 			g_landCacheMisses = 0;
 			g_landCacheEvictions = 0;
@@ -3158,6 +3204,9 @@ namespace msoc::patch::occlusion {
 					<< " horizonColumnsTouched=" << g_horizonColumnsTouched
 					<< " horizonCurtainTris=" << g_horizonCurtainTris
 					<< " horizonAdaptiveEpsD=" << g_horizonAdaptiveEpsD
+					<< " landMembershipHit=" << g_terrainMembershipHits
+					<< " landMembershipMiss=" << g_terrainMembershipMisses
+					<< " landMembershipSize=" << g_terrainMembership.size()
 					<< " landCacheHit=" << g_landCacheHits // _Claude_
 					<< " landCacheMiss=" << g_landCacheMisses // _Claude_
 					<< " landCacheEvict=" << g_landCacheEvictions // _Claude_
