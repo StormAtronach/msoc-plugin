@@ -17,12 +17,16 @@ local default_config = {
     OcclusionEnableInterior             = true,
     OcclusionEnableExterior             = true,
     OcclusionSkipTerrainOccludees       = true,
-    -- LAYER-A-HORIZON: tri-state. 0=Off, 1=Raster (legacy), 2=Horizon.
-    -- Default Horizon — Step 6 validation showed cost win + cull-rate
-    -- parity across mid-density, architecture-rich, and pure-terrain
-    -- scenes. Set to 1 to use the legacy Raster path; 0 disables
-    -- terrain in the mask entirely.
-    OcclusionAggregateTerrain           = 2,
+    -- LAYER-A-HORIZON: tri-state. 0=Off, 1=Raster (default), 2=Horizon.
+    -- Default Raster — on multi-core CPUs with async occluders enabled
+    -- (the medium/high hardware tiers), the threadpool parallelizes the
+    -- terrain triangle rasterization and Raster outperforms Horizon's
+    -- main-thread vertex projection. The low hardware tier overrides
+    -- this back to 2 (Horizon) since async is off there and Raster's
+    -- cost would surface on the main thread.
+    -- Set to 2 to force Horizon (bounded-cost regardless of scene); 0
+    -- disables terrain in the mask entirely.
+    OcclusionAggregateTerrain           = 1,
     OcclusionTerrainResolution          = 1,
 
     -- Light culling.
@@ -116,6 +120,10 @@ local function applyTierDefaults(plugin, target)
         target.OcclusionMaskHeight         = 128
         target.OcclusionRasterizeBudgetUs  = 1500
         target.OcclusionClassifyBudgetUs   = 1500
+        -- Override the global default (Raster) back to Horizon: with
+        -- async off the rasterization cost surfaces on the main thread,
+        -- and Horizon's bounded-cost projection is cheaper there.
+        target.OcclusionAggregateTerrain   = 2
     elseif tier == "mid" then
         -- 6-8 threads with AVX2: async pays off, but 4×2=8 bins is
         -- atomic-ping-pong overkill for ~4-6 workers. 2×2 keeps

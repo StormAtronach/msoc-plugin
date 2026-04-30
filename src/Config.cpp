@@ -32,12 +32,16 @@ namespace msoc {
     bool Configuration::OcclusionEnableInterior        = true;
     bool Configuration::OcclusionEnableExterior        = true;
     bool Configuration::OcclusionSkipTerrainOccludees  = true;
-    // LAYER-A-HORIZON: 0=Off, 1=Raster, 2=Horizon. Default flipped to
-    // Horizon after Step 6 validation showed cost win + cull-rate parity
-    // across all sampled scene types (mid-density, architecture-rich,
-    // pure-terrain hill→mountain). Raster path stays in the codebase as
-    // fallback for users who prefer the legacy behaviour.
-    int  Configuration::OcclusionAggregateTerrain      = 2;
+    // LAYER-A-HORIZON: 0=Off, 1=Raster, 2=Horizon. Default is Raster
+    // because on multi-core CPUs with async occluders enabled (mid/high
+    // hardware tier) the threadpool parallelizes the per-subcell
+    // rasterization and outperforms Horizon's main-thread vertex
+    // projection. The Lua-side hardware-tier configuration overrides
+    // this back to 2 (Horizon) on the low tier where async is off and
+    // Raster's cost would surface on the main thread. Cull-rate parity
+    // across both modes was confirmed during Step 6 validation; the
+    // remaining axis is cost-shape, which the tier override handles.
+    int  Configuration::OcclusionAggregateTerrain      = 1;
     // _Claude_ 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). Index→step
     // mapping in PatchOcclusionCulling.cpp::currentTerrainStep().
     unsigned int Configuration::OcclusionTerrainResolution = 1;

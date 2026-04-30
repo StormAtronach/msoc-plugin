@@ -120,24 +120,25 @@ local function registerModConfig()
     -- LAYER-A-HORIZON: tri-state replaces the previous on/off checkbox.
     -- Off skips terrain occlusion entirely. Raster submits the merged
     -- subcell triangle mesh to MOC; Horizon submits a ~120-tri silhouette
-    -- curtain. They have different cost characteristics, not a strict
-    -- "old vs new" — see description below for the trade-off.
+    -- curtain. They have different cost characteristics — Raster wins
+    -- on multi-core+async, Horizon wins on weaker hardware.
     main:createDropdown({
         label       = "Terrain occluder mode",
         description = "Off: no terrain in the occlusion mask (lowest CPU, lowest cull rate). "
-            .. "Raster: rasterizes terrain triangles directly into the mask. "
-            .. "Pairs well with Async Occluders enabled — workers parallelize "
-            .. "the rasterization, hiding most of its cost on multi-core CPUs. "
-            .. "On weaker CPUs or with async off, the cost surfaces on the main "
-            .. "thread and can be expensive in dense terrain. "
-            .. "Horizon: builds a 1D screen-space silhouette and submits ~120 "
-            .. "curtain triangles synchronously. Construction is bounded-cost "
-            .. "regardless of how much terrain is in view, which makes it the "
-            .. "safer pick on weaker CPUs or when async is off. On fast CPUs "
-            .. "with idle workers, Horizon's sync projection becomes the "
-            .. "critical path and Raster+Async tends to win. "
+            .. "Raster (default for medium/high hardware tier): rasterizes "
+            .. "terrain triangles directly into the mask. With Async Occluders "
+            .. "enabled, the threadpool parallelizes the rasterization, hiding "
+            .. "most of its cost on multi-core CPUs. "
+            .. "Horizon (default for low hardware tier): builds a 1D screen-"
+            .. "space silhouette and submits ~120 curtain triangles "
+            .. "synchronously. Construction is bounded-cost regardless of how "
+            .. "much terrain is in view, which makes it the safer pick when "
+            .. "async is off — its cost stays on the main thread but is "
+            .. "predictable. "
             .. "Cull rate is comparable across both modes in most scenes — pick "
-            .. "based on the cost shape that fits your hardware.",
+            .. "based on the cost shape that fits your hardware. The default "
+            .. "tracks your hardware tier; flip it manually only if your "
+            .. "specific setup contradicts the tier auto-pick.",
         options     = {
             { label = "Off",      value = 0 },
             { label = "Raster",   value = 1 },
