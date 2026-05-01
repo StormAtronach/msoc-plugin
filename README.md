@@ -174,11 +174,11 @@ sudden camera reveals) so the per-frame cost stays bounded.
   When the integration ships, MGE-XE will dynamic-resolve the plugin's
   exports at load time and fall back cleanly on older plugin versions, so
   forward/backward compatibility will be a non-issue.
-- **ENB / shader replacers:** unaffected. The plugin operates before GPU
-  submission; ENB sees fewer draw calls but otherwise unchanged geometry.
-- **Other MWSE mods:** the plugin patches the same engine path MWSE proper
-  used to (`OcclusionCulling`). It assumes nothing else is hooking the same
-  CullShow detour. If you have another mod doing CPU occlusion, disable one.
+- **Other MWSE mods:** the plugin detours Morrowind's `cullShow` — the
+  per-frame scene-graph traversal that does frustum culling and dispatches
+  `display()` calls. The plugin assumes nothing else is hooking the same
+  detour. If you have another mod doing CPU occlusion or otherwise
+  intercepting `cullShow`, disable one.
 - **Save games:** no save-game state. Toggling the plugin on/off is reversible
   per-launch.
 
