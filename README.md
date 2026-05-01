@@ -117,10 +117,6 @@ Open the MCM (Mod Configuration Menu) → **MSOC**. The interesting knobs:
 - **Terrain occluder mode** — `Off / Raster / Horizon`. Default tracks your
   hardware tier (Raster on multi-core, Horizon on low). Read the in-MCM
   description if you want to tune; otherwise leave it.
-- **Occlusion source** — `MSOC mask` (default) or `MGE depth pass`. Stick
-  with `MSOC mask` unless you know what you're doing — the depth-pass
-  alternative requires specific MGE-XE builds and is documented as
-  experimental.
 - **Async occluders** — controls whether mask-rasterization runs on the
   threadpool or the main thread. Hardware-tier default is correct for most
   users; flip only if you're benchmarking or debugging.
