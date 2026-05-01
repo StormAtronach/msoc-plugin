@@ -13,6 +13,11 @@
 // License for the specific language governing permissions and limitations
 // under the License.
 ////////////////////////////////////////////////////////////////////////////////
+//
+// Modified by Storm Atronach (2026) for the MSOC plugin: threading model
+// switched from std::thread + kill-flag to std::jthread + stop_token. See
+// deps/msoc/NOTICE for the full list of modifications and rationale.
+//
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Common shared include file to hide compiler/os specific functions from the rest of the code. 

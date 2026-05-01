@@ -1,0 +1,41 @@
+This directory contains a modified copy of Intel's Masked Software Occlusion
+Culling (MSOC) library. It is distributed under Apache License 2.0; see
+LICENSE-Apache-2.0.txt in this directory.
+
+Original work
+-------------
+  Project:    Masked Software Occlusion Culling
+  Source:     https://github.com/GameTechDev/MaskedOcclusionCulling
+  Copyright:  (c) 2017 Intel Corporation
+  License:    Apache License 2.0
+
+Modifications
+-------------
+  Modified by: Storm Atronach
+  Year:        2026
+
+Summary of changes:
+
+  * Threading model rework. The original CullingThreadpool used std::thread
+    plus an mKillThreads atomic flag for worker shutdown. This was replaced
+    with C++20 std::jthread and stop_token-driven cooperative cancellation.
+    Worker shutdown now propagates via stop_callback rather than a polled
+    flag, simplifying lifecycle management at suspend / kill / clear-buffer
+    boundaries. Affected files:
+
+      - CullingThreadpool.cpp
+      - CullingThreadpool.h
+      - MaskedOcclusionCulling.cpp
+      - MaskedOcclusionCulling.h
+      - MaskedOcclusionCullingAVX2.cpp
+      - MaskedOcclusionCullingAVX512.cpp
+      - MaskedOcclusionCullingCommon.inl
+      - CompilerSpecific.inl
+
+    The change is functional-equivalent in steady-state behavior; the
+    visible difference is shutdown semantics (no polling latency) and
+    slightly simplified call-site code. No public API changes.
+
+The original Apache 2.0 copyright headers in each source file are
+preserved unchanged. A short "Modified by" notice has been added below
+the original header in each file we changed, per Apache 2.0 §4(b).
