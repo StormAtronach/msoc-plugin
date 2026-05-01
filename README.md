@@ -1,14 +1,20 @@
 # MSOC plugin
 
-CPU-side occlusion culling for Morrowind's distant statics, integrated with
-MGE-XE.
+CPU-side occlusion culling for Morrowind. Each frame the plugin software-
+rasterizes a coarse depth mask from opaque near-scene geometry, then tests
+every small NiTriShape leaf against it before the engine draws it. Leaves
+that fall fully behind the mask are skipped — fewer GPU draw calls, fewer
+vertex-shader invocations on geometry the player would never have seen.
 
-The plugin builds a coarse software-rasterized depth mask each frame from
-opaque near-scene geometry plus an optional terrain-silhouette curtain, then
-tests every distant-static bounding sphere against it before MGE-XE submits
-the static to the GPU. Distant statics that fall fully behind the mask are
-skipped — fewer instanced draw calls, less GPU work, fewer vertex-shader
-invocations on geometry the player would never have seen.
+This is the **near-scene** half of the work and runs standalone — no extra
+mods required beyond MWSE.
+
+A **distant-statics** half is also implemented: the plugin exposes its mask
+to MGE-XE, which can then skip distant statics that fall fully behind it.
+The MGE-XE side of this integration **is not yet released upstream** —
+the work lives on a development branch and will land in a future MGE-XE
+release. Until then the plugin's distant-statics path is dormant, and the
+near-scene culling is what you get.
 
 ## Hardware notes
 
@@ -35,23 +41,31 @@ applied automatically. The MCM lets you override if needed.
 - **Morrowind** (vanilla `Morrowind.exe`). OpenMW is **not** supported — the
   plugin links against MWSE which only targets the original engine.
 - **MWSE** (recent build). The plugin loads via the MWSE Lua loader.
-- **MGE-XE 0.16+** with distant statics enabled. Without MGE-XE rendering
-  distant statics, the plugin has nothing to act on and silently no-ops.
 - **CPU** with at least SSE4.1. AVX2 / AVX-512 paths are auto-selected when
   available. Fallback path exists below SSE4.1 but isn't recommended.
+
+Optional, for the additional distant-statics culling layer:
+
+- **MGE-XE** with distant statics rendering enabled.
+- **MGE-XE build with msoc-plugin integration.** This is not yet in any
+  released MGE-XE; the integration lives on a development branch and will
+  be upstreamed in a future MGE-XE release. With an unintegrated MGE-XE,
+  distant statics are still rendered normally — the plugin simply can't
+  cull them, and only the near-scene path is active.
 - **Static instancing** (`MGE.ini → [Misc] → Use Static Instancing=True`)
-  is strongly recommended. The plugin culls *which* statics are submitted;
-  instancing reduces *how many draw calls* the survivors produce. Both
-  optimizations stack.
+  is strongly recommended once integration ships. The plugin culls *which*
+  statics are submitted; instancing reduces *how many draw calls* the
+  survivors produce.
 
 ## Performance characteristics
 
 Per-frame plugin cost measured on a high-tier (AVX2, 8+ thread) reference
-machine, comparing the four meaningful mode combinations on a representative
+machine, comparing the four meaningful mode combinations in a representative
 exterior scene. All values are total per-frame CPU time spent inside the
-plugin's hot path — *cost*, not *gain*. Scene-specific gain depends on how
-many distant statics get culled, which depends on geometry, camera, and mod
-stack.
+plugin's hot path — *cost*, not *gain*. The mask-build is the same regardless
+of whether MGE-XE distant-statics integration is active, so these numbers
+apply both to the standalone near-scene path and to the future integrated
+build.
 
 | Mode          | aggTerrainUs           | horizonBuildUs | rasterizeUs       | asyncFlushUs | Total visible |
 |---------------|------------------------|----------------|-------------------|--------------|---------------|
@@ -69,10 +83,10 @@ the full per-shape terrain rasterization synchronously — and is the default
 on the low-tier (no-async) preset.
 
 These numbers are the plugin's own CPU cost, not the time it saves
-downstream. The actual user-visible win is fewer GPU draw calls / vertex-
-shader invocations on culled distant statics; how that translates into FPS
-depends entirely on whether your scene was CPU-draw-bound or GPU-bound to
-begin with.
+downstream. The user-visible win is fewer GPU draw calls / vertex-shader
+invocations on culled near-scene leaves today, plus distant-statics culling
+once MGE-XE integration ships. How that translates into FPS depends entirely
+on whether your scene was CPU-draw-bound or GPU-bound to begin with.
 
 ## Installation
 
@@ -141,20 +155,25 @@ Each frame, while Morrowind's renderer traverses the scene graph:
 4. **Drain.** Every queued leaf gets `TestRect` against the now-complete
    mask. Verdicts: VISIBLE, OCCLUDED, VIEW_CULLED. OCCLUDED leaves skip
    `display()` entirely.
-5. **External consumers query the mask.** MGE-XE pulls the same mask via
-   `mwse_testOcclusionSphere(Batch)` and skips occluded distant statics in
-   its instanced-draw setup.
+5. **External consumers query the mask.** The plugin exposes
+   `mwse_testOcclusionSphere(Batch)` and a few snapshot accessors so other
+   native code can use the same mask without rebuilding it. MGE-XE will use
+   this once the integration is upstreamed (see Requirements above) to skip
+   occluded distant statics in its instanced-draw setup. Until then the
+   exports are present but no consumer is calling them.
 
 Phase budgets and temporal coherence absorb worst-case spikes (cell loads,
 sudden camera reveals) so the per-frame cost stays bounded.
 
 ## Compatibility
 
-- **MGE-XE versions:** the plugin links against MGE-XE's external-occluder
-  ABI (`mwse_addOccluder`, `mwse_addPreTransformedOccluder`, the snapshot
-  accessors). MGE-XE checks for these symbols at load time and falls back
-  cleanly if a build is older. If MGE-XE doesn't see the plugin at all, no
-  culling happens but nothing breaks.
+- **MGE-XE versions:** the plugin's distant-statics-culling path is dormant
+  on every released MGE-XE build to date; the consumer-side code is on a
+  development branch awaiting upstream merge. The plugin still loads cleanly
+  and runs near-scene culling regardless of MGE-XE's version (or absence).
+  When the integration ships, MGE-XE will dynamic-resolve the plugin's
+  exports at load time and fall back cleanly on older plugin versions, so
+  forward/backward compatibility will be a non-issue.
 - **ENB / shader replacers:** unaffected. The plugin operates before GPU
   submission; ENB sees fewer draw calls but otherwise unchanged geometry.
 - **Other MWSE mods:** the plugin patches the same engine path MWSE proper
