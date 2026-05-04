@@ -17,7 +17,11 @@
 #include "NIDefines.h"
 #include "NIDynamicEffect.h"
 #include "NIGeometryData.h"
+#include "NIAmbientLight.h"
+#include "NIDirectionalLight.h"
 #include "NILight.h"
+#include "NIPointLight.h"
+#include "NISpotLight.h"
 #include "NINode.h"
 #include "NIProperty.h"
 #include "NITArray.h"
@@ -287,6 +291,20 @@ namespace msoc::patch::occlusion {
 	static uint64_t g_recursiveCalls = 0;
 	static uint64_t g_recursiveAppCulled = 0;
 	static uint64_t g_recursiveFrustumCulled = 0;
+	// _Claude_ Many-lights audit (MSOC_MANY_LIGHTS_AUDIT.md Step 1):
+	// localize where NiLight nodes are being lost on the way from the
+	// scene-graph walk to g_currentFrameLights. Increments only when
+	// g_lightExportEffective is on, so they read 0 with the gate off.
+	// Conservation: lightObservedTotal ==
+	//     lightCapturedToSnapshot + lightFrustumCulled + lightAppCulled.
+	// If observed is small (~peakMsoc) the walk itself isn't reaching
+	// most lights (H2 — effectList-only attachment); if observed is
+	// large but frustumCulled dominates, H1 (degenerate-bound cull) is
+	// the producer.
+	static uint64_t g_lightObservedTotal       = 0;
+	static uint64_t g_lightFrustumCulled       = 0;
+	static uint64_t g_lightAppCulled           = 0;
+	static uint64_t g_lightCapturedToSnapshot  = 0;
 	static uint64_t g_rasterizedAsOccluder = 0;
 	// _Claude_ Per-frame sum of outTri across successful rasterizeTriShape
 	// calls. Used to size the threadpool queue (maxJobs): each submission
@@ -499,6 +517,29 @@ namespace msoc::patch::occlusion {
 		float boundRadius;
 	};
 	static std::unordered_map<NI::Light*, LightCullEntry> g_lightCullCache;
+
+	// _Claude_ Many-lights snapshot. Populated by cullShowBody when
+	// g_lightExportEffective is true: every NiLight (any subtype —
+	// Point, Spot, Directional, Ambient) that survives frustum culling
+	// during this frame's main-camera CullShow walk is pushed here.
+	// Cleared at top-of-frame in CullShow_detour. Read by the
+	// mwse_getCurrentFrameLights export (consumer-pull model).
+	//
+	// Storage as NI::Light (the base) so all four subclasses fit; the
+	// export does the per-type field dispatch via isOfType when copying
+	// into the wire-format MwseLight records.
+	//
+	// NiPointer holds a refcount on each light so a Lua-driven reference
+	// disable mid-frame can't free the underlying object between the
+	// CullShow walk that pushed it and the consumer's later query.
+	static std::vector<NI::Pointer<NI::Light>> g_currentFrameLights;
+
+	// _Claude_ Revision counter — incremented every time we clear+rebuild
+	// the snapshot at top-of-frame. Consumers compare against their
+	// cached value to know when to re-upload GPU representations
+	// (texture-backed light pools, etc). Wraps at UINT_MAX; consumers
+	// must use inequality comparison.
+	static unsigned int g_currentFrameLightsRevision = 0;
 	static uint64_t g_lightsTested = 0;
 	static uint64_t g_lightsOccluded = 0;
 	static uint64_t g_lightCullCacheHits = 0;
@@ -542,6 +583,12 @@ namespace msoc::patch::occlusion {
 	// parallel side. One number, one meaning, comparable across modes.
 	static uint64_t g_classifyUs = 0;
 	static uint64_t g_drainDisplayUs = 0;
+	// _Claude_ Many-lights audit Step 3 instrument. Wall-time of the
+	// recursive worldObjectRoot light walk that populates the snapshot.
+	// Logged so we can confirm the walk is cheap relative to drain /
+	// display (typical comparators ~6000 us). If this spikes, switch
+	// to the cell-change-cached approach.
+	static uint64_t g_lightWalkUs = 0;
 
 	// _Claude_ Hybrid phase budgeting (Configuration::Occlusion*BudgetUs).
 	// Two-layer defence:
@@ -763,6 +810,10 @@ namespace msoc::patch::occlusion {
 	static unsigned int g_temporalCoherenceFramesEffective   = 4;
 	static bool         g_cullLightsEffective                = true;
 	static unsigned int g_lightCullHysteresisFramesEffective = 3;
+	// _Claude_ Many-lights export gate, mirror of Configuration::OcclusionLightExport.
+	// Refreshed in the isTopLevel block so the cullShowBody hot path reads a
+	// stable per-frame value. Default false — opt-in via MCM/Lua.
+	static bool         g_lightExportEffective               = false;
 	static bool         g_tintOccluderEffective              = false;
 	static bool         g_tintOccludedEffective              = false;
 	static bool         g_tintTestedEffective                = false;
@@ -2216,8 +2267,31 @@ namespace msoc::patch::occlusion {
 	// Behaviour matches the engine 1:1 when g_msocActive is false.
 	static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camera* camera) {
 		if (g_msocActive) ++g_recursiveCalls;
+		// _Claude_ Many-lights audit Step 1. Type check is gated on the
+		// export flag so the hot path (NiNodes / NiTriShapes) pays nothing
+		// when the feature is off. When it's on, we resolve the RTTI once
+		// and reuse the result across every early-return branch below to
+		// keep accounting consistent (observed == captured + frustumCulled
+		// + appCulled).
+		const bool isLight = g_lightExportEffective
+			&& self->isInstanceOfType(NI::RTTIStaticPtr::NiLight);
+		if (isLight) ++g_lightObservedTotal;
 		if (self->getAppCulled()) {
 			if (g_msocActive) ++g_recursiveAppCulled;
+			if (isLight) ++g_lightAppCulled;
+			return;
+		}
+
+		// _Claude_ Many-lights audit Step 2 (skip-cull preserved).
+		// Skip frustum cull entirely for NiLights so the engine's
+		// per-object effectList attachment + existing OcclusionCullLights
+		// hook keep firing for off-camera lights. Snapshot population
+		// for MGE-XE no longer happens here — see the worldObjectRoot
+		// effectList walk at top-of-frame (Step 3) for the canonical
+		// enumeration. cullShowBody continues to track lightObserved
+		// as a regression sentinel.
+		if (isLight) {
+			self->vTable.asAVObject->display(self, camera);
 			return;
 		}
 
@@ -2784,6 +2858,113 @@ namespace msoc::patch::occlusion {
 						g_temporalCoherenceFramesEffective   = Configuration::OcclusionTemporalCoherenceFrames;
 						g_cullLightsEffective                = Configuration::OcclusionCullLights;
 						g_lightCullHysteresisFramesEffective = Configuration::OcclusionLightCullHysteresisFrames;
+						// _Claude_ Many-lights snapshot reset + gate refresh.
+						// Cleared unconditionally so a stale set from the
+						// previous frame doesn't leak when the gate is on;
+						// the cullShowBody hook re-populates as the walk
+						// progresses. The gate refresh allows MCM toggling
+						// of OcclusionLightExport mid-session. Revision
+						// tick lets consumers (MGE-XE texture-light path)
+						// detect "new snapshot, re-upload" once per frame.
+						g_lightExportEffective               = Configuration::OcclusionLightExport;
+						// _Claude_ lightWalkUs is reset every frame; the
+						// other walk-owned counters are kept across
+						// frames when we skip the walk so the periodic
+						// log line still shows the last snapshot's
+						// stats (otherwise they'd read 0 on skip frames
+						// and confuse the tail).
+						g_lightWalkUs = 0;
+						// _Claude_ Throttled scene-graph light walk.
+						// The walk itself is the same pattern as before
+						// (recursive descent looking for NiLight
+						// children, both worldObjectRoot and
+						// worldPickObjectRoot — the latter catches
+						// lights on pickable references like dropped
+						// torches or quest lanterns). What's new here
+						// is the gating: skip the walk on most frames
+						// when the scene-graph topology hasn't changed.
+						//
+						// Triggers (any one fires the walk):
+						//   1. cell change — instant fresh snapshot on load
+						//   2. root child count delta — new/removed
+						//      reference (NPC equips torch, player drops
+						//      light item, script spawns reference)
+						//   3. periodic safety net — every N frames
+						//      regardless, in case a script swapped a
+						//      reference for another with the same total
+						//      count, or content shifted in some other
+						//      way the count check missed
+						//
+						// When all three are quiet, reuse the snapshot
+						// from the last walk: don't clear, don't bump
+						// the revision counter (consumer-side MGE-XE
+						// keys re-uploads on revision so it also
+						// skips), and the captured pointers stay
+						// valid (NiPointer holds them).
+						//
+						// Worst-case staleness: (N - 1) frames for a
+						// scene change that doesn't alter root counts.
+						// At N=5 / 60fps that's ~67ms — invisible for
+						// static lanterns, mild lag for fast-moving
+						// NPC-held torches (their NiLight* doesn't
+						// change so root count is unchanged; the
+						// torch's WORLD position lags by up to ~67ms,
+						// which is sub-perceptual at typical NPC walk
+						// speed of ~5 units/frame).
+						constexpr unsigned int kMaxFramesBetweenLightWalks = 5;
+						static unsigned int s_lastObjectRootCount = (unsigned int)-1;
+						static unsigned int s_lastPickRootCount   = (unsigned int)-1;
+						static unsigned int s_framesSinceLightWalk = kMaxFramesBetweenLightWalks;
+
+						const NI::Node* const objRoot  = dh->worldObjectRoot;
+						const NI::Node* const pickRoot = dh->worldPickObjectRoot;
+						const unsigned int objCount  = objRoot
+							? objRoot->children.endIndex : 0;
+						const unsigned int pickCount = pickRoot
+							? pickRoot->children.endIndex : 0;
+						const bool cellChanged = (dh->currentCell != g_lastCell);
+						const bool rootChanged = (objCount != s_lastObjectRootCount)
+							|| (pickCount != s_lastPickRootCount);
+						const bool periodicForce =
+							(s_framesSinceLightWalk >= kMaxFramesBetweenLightWalks);
+						const bool walkThisFrame = g_lightExportEffective
+							&& (cellChanged || rootChanged || periodicForce);
+
+						if (walkThisFrame) {
+							ScopedUsAccumulator t(g_lightWalkUs);
+							g_currentFrameLights.clear();
+							g_lightCapturedToSnapshot = 0;
+							struct {
+								void operator()(NI::Node* node) const {
+									if (!node) return;
+									const auto& children = node->children;
+									for (size_t i = 0; i < children.endIndex; ++i) {
+										auto* child = children.storage[i].get();
+										if (!child) continue;
+										if (child->isInstanceOfType(
+												NI::RTTIStaticPtr::NiLight)) {
+											g_currentFrameLights.emplace_back(
+												static_cast<NI::Light*>(child));
+											++g_lightCapturedToSnapshot;
+										} else if (child->isInstanceOfType(
+												NI::RTTIStaticPtr::NiNode)) {
+											(*this)(static_cast<NI::Node*>(child));
+										}
+									}
+								}
+							} walkForLights;
+							walkForLights(const_cast<NI::Node*>(objRoot));
+							walkForLights(const_cast<NI::Node*>(pickRoot));
+							++g_currentFrameLightsRevision;
+							s_lastObjectRootCount = objCount;
+							s_lastPickRootCount   = pickCount;
+							s_framesSinceLightWalk = 0;
+						} else {
+							++s_framesSinceLightWalk;
+							// Snapshot + revision retained from the last walk;
+							// consumer-side cache keys on revision so this
+							// frame is a no-op for them too.
+						}
 						g_tintOccluderEffective              = Configuration::DebugOcclusionTintOccluder;
 						g_tintOccludedEffective              = Configuration::DebugOcclusionTintOccluded;
 						g_tintTestedEffective                = Configuration::DebugOcclusionTintTested;
@@ -2866,6 +3047,11 @@ namespace msoc::patch::occlusion {
 			g_recursiveCalls = 0;
 			g_recursiveAppCulled = 0;
 			g_recursiveFrustumCulled = 0;
+			g_lightObservedTotal = 0;
+			g_lightFrustumCulled = 0;
+			g_lightAppCulled = 0;
+			// g_lightCapturedToSnapshot reset moved into the walk block
+			// above (see the "Walk-owned counters reset here" note).
 			g_rasterizedAsOccluder = 0;
 			g_occluderTriangles = 0;
 			g_skippedInside = 0;
@@ -2959,6 +3145,7 @@ namespace msoc::patch::occlusion {
 			g_drainPhaseTimeUs = 0;
 			g_classifyUs = 0; // _Claude_ phase-1 wall time, comparable across serial/parallel
 			g_drainDisplayUs = 0; // _Claude_ audit
+			// g_lightWalkUs reset moved into the walk block above.
 			g_asyncFlushTimeUs = 0;
 			// _Claude_ Freeze diagnostics: per-frame counters reset here
 			// alongside the rest. Session maxes (g_max*Session) are NOT
@@ -3184,6 +3371,10 @@ namespace msoc::patch::occlusion {
 					<< " recursive=" << g_recursiveCalls
 					<< " appCulled=" << g_recursiveAppCulled
 					<< " frustumCulled=" << g_recursiveFrustumCulled
+					<< " lightObserved=" << g_lightObservedTotal
+					<< " lightCaptured=" << g_lightCapturedToSnapshot
+					<< " lightFrustumCulled=" << g_lightFrustumCulled
+					<< " lightAppCulled=" << g_lightAppCulled
 					<< " insideSkipped=" << g_skippedInside
 					<< " thinSkipped=" << g_skippedThin
 					<< " alphaSkipped=" << g_skippedAlpha
@@ -3220,6 +3411,7 @@ namespace msoc::patch::occlusion {
 					<< " drainUs=" << g_drainPhaseTimeUs
 					<< " classifyUs=" << g_classifyUs // _Claude_ phase-1 wall (serial = work; parallel = barrier)
 					<< " displayUs=" << g_drainDisplayUs // _Claude_ audit
+					<< " lightWalkUs=" << g_lightWalkUs
 					<< " asyncFlushUs=" << g_asyncFlushTimeUs
 					// _Claude_ Hybrid budget diagnostics. *Trip is per-frame (0/1),
 					// *TripsSess is lifetime sum, *Ema is the predictive-skip metric
@@ -4230,6 +4422,121 @@ void __cdecl mwse_unregisterLightObservedCallback(void(__cdecl* cb)(void* niLigh
 	using Typed = msoc::patch::occlusion::LightObservedCallback;
 	msoc::patch::occlusion::unregisterLightObservedCallback(
 		reinterpret_cast<Typed>(cb));
+}
+
+// _Claude_ Many-lights export. Walks the per-frame snapshot of NiLights
+// (populated by cullShowBody when OcclusionLightExport is on) and copies
+// the field-extracted MwseLight records into the consumer's buffer.
+//
+// Field extraction happens here (at query time) rather than during the
+// CullShow walk: the walk just collects NiPointer<NI::Light> entries,
+// and the per-light field reads happen once per frame when a consumer
+// asks. This keeps cullShowBody's hot-path cost to a single
+// isInstanceOfType check + a smart-pointer push when the gate is on.
+//
+// Per-subtype dispatch via isOfType (exact match, no parent walk) so a
+// NiSpotLight isn't mis-classified as NiPointLight. Diffuse and ambient
+// are pre-multiplied by `dimmer` to match the engine's own convention
+// (LightEntry::Update at 0x6BAB00 does the same scaling when filling
+// D3DLIGHT8). Type-irrelevant fields are zero-initialised so consumers
+// can branch purely on `type`.
+extern "C" __declspec(dllexport)
+void __cdecl mwse_getCurrentFrameLights(
+	MwseLight* outArray, unsigned int* outCount, unsigned int maxCount)
+{
+	if (!outCount) return;
+	*outCount = 0;
+	if (!outArray || maxCount == 0) return;
+
+	const auto& snap = msoc::patch::occlusion::g_currentFrameLights;
+	const unsigned int n = std::min<unsigned int>(
+		static_cast<unsigned int>(snap.size()), maxCount);
+
+	unsigned int written = 0;
+	for (unsigned int i = 0; i < n; ++i) {
+		NI::Light* const lt = snap[i].get();
+		if (!lt) continue;
+
+		MwseLight& dst = outArray[written];
+		std::memset(&dst, 0, sizeof(dst));
+
+		const NI::AVObject* const av = lt;
+		const float dimmer = lt->dimmer;
+
+		// _Claude_ Position from worldTransform.translation, NOT
+		// worldBoundOrigin. worldBoundOrigin is the bounding sphere
+		// center — for many NiLights it's left uncomputed (default 0)
+		// because the occlusion cull cache treats degenerate bounds
+		// (worldBoundRadius == 0) as "skip cull, assume visible" and
+		// thus never depends on the bound being correct. For lighting
+		// math we need the actual world position, which the engine reads
+		// from worldTransform.translation (offset 0x64 in NiAVObject;
+		// see Morrowind.exe NiDX8LightManager::LightEntry::Update at
+		// 0x6BAB00, where d3dLight.Position is filled from
+		// *(this+100)/+104/+108).
+		dst.pos[0] = av->worldTransform.translation.x;
+		dst.pos[1] = av->worldTransform.translation.y;
+		dst.pos[2] = av->worldTransform.translation.z;
+
+		// Common: diffuse and ambient color, scaled by dimmer.
+		dst.diffuse[0] = lt->diffuse.r * dimmer;
+		dst.diffuse[1] = lt->diffuse.g * dimmer;
+		dst.diffuse[2] = lt->diffuse.b * dimmer;
+		dst.ambient[0] = lt->ambient.r * dimmer;
+		dst.ambient[1] = lt->ambient.g * dimmer;
+		dst.ambient[2] = lt->ambient.b * dimmer;
+
+		// Per-subtype dispatch via isInstanceOfType (parent-walking). Order
+		// matters: NiSpotLight inherits NiPointLight, so Spot must be
+		// checked before Point or every spot light would be misclassified
+		// as point. Directional and Ambient inherit Light directly so
+		// their order between themselves is irrelevant.
+		if (lt->isInstanceOfType(NI::RTTIStaticPtr::NiSpotLight)) {
+			NI::SpotLight* const sp = static_cast<NI::SpotLight*>(lt);
+			dst.type             = kMwseLightSpot;
+			dst.falloffConstant  = sp->constantAttenuation;
+			dst.falloffLinear    = sp->linearAttenuation;
+			dst.falloffQuadratic = sp->quadraticAttenuation;
+			dst.direction[0]     = sp->direction.x;
+			dst.direction[1]     = sp->direction.y;
+			dst.direction[2]     = sp->direction.z;
+			dst.spotAngle        = sp->spotAngle;
+			dst.spotExponent     = sp->spotExponent;
+			// _Claude_ Engine "useful range" — see header comment on the
+			// MwseLight `radius` field. NI::Light stores it in specular.r
+			// (Bethesda's "for some reason"); applies to both point and
+			// spot since SpotLight inherits Light through PointLight.
+			dst.radius           = lt->specular.r;
+		} else if (lt->isInstanceOfType(NI::RTTIStaticPtr::NiPointLight)) {
+			NI::PointLight* const pl = static_cast<NI::PointLight*>(lt);
+			dst.type             = kMwseLightPoint;
+			dst.falloffConstant  = pl->constantAttenuation;
+			dst.falloffLinear    = pl->linearAttenuation;
+			dst.falloffQuadratic = pl->quadraticAttenuation;
+			dst.radius           = lt->specular.r; // see Spot branch
+		} else if (lt->isInstanceOfType(NI::RTTIStaticPtr::NiDirectionalLight)) {
+			NI::DirectionalLight* const dl = static_cast<NI::DirectionalLight*>(lt);
+			dst.type         = kMwseLightDirectional;
+			dst.direction[0] = dl->direction.x;
+			dst.direction[1] = dl->direction.y;
+			dst.direction[2] = dl->direction.z;
+		} else if (lt->isInstanceOfType(NI::RTTIStaticPtr::NiAmbientLight)) {
+			dst.type = kMwseLightAmbient;
+		} else {
+			// Unrecognised NiLight subclass — emit with type=0 so the
+			// consumer can choose to skip or log.
+			dst.type = kMwseLightUnknown;
+		}
+
+		++written;
+	}
+
+	*outCount = written;
+}
+
+extern "C" __declspec(dllexport)
+unsigned int __cdecl mwse_getCurrentFrameLightsRevision() {
+	return msoc::patch::occlusion::g_currentFrameLightsRevision;
 }
 
 // _Claude_ Mask query exports. Return values are the MWSE_OCC_* codes

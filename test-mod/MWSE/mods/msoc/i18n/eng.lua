@@ -92,6 +92,15 @@ return {
         .. "verdicts unlatch immediately, so this only tunes the off-transition. 3 ~ 50 ms "
         .. "at 60 FPS; 10 ~ 170 ms.",
 
+    ["OcclusionLightExport.label"] = "Export lights to consumers",
+    ["OcclusionLightExport.description"] = "Snapshot every NiLight (Point/Spot/Directional/"
+        .. "Ambient) that survives frustum culling each frame and expose the list to "
+        .. "external shaders (MGE-XE per-pixel lighting, etc.) via msoc's C-ABI export. "
+        .. "Lets consumers drive their own per-pixel light loop with the full scene-graph "
+        .. "set instead of the engine's per-object selection (which clamps at 7 lights "
+        .. "per local effect list and silently drops dense-interior lights). Default off "
+        .. "until a consumer is installed; the export is a no-op when nothing reads it.",
+
     ["OcclusionTemporalCoherenceFrames.label"] = "Temporal coherence frames",
     ["OcclusionTemporalCoherenceFrames.description"] = "Frames to reuse a deferred shape's "
         .. "visibility verdict before re-querying. 0 disables the cache; higher values skip "

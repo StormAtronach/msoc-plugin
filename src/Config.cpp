@@ -49,6 +49,11 @@ namespace msoc {
     bool Configuration::OcclusionCullLights                  = true;
     unsigned int Configuration::OcclusionLightCullHysteresisFrames = 3;
 
+    // _Claude_ Default off — opt-in feature for consumers (MGE-XE) that
+    // want the many-lights snapshot. When no consumer is present, the
+    // cullShow walk's NiLight branch is skipped entirely (one bool check).
+    bool Configuration::OcclusionLightExport                 = false;
+
     bool Configuration::OcclusionAsyncOccluders             = true;
     unsigned int Configuration::OcclusionThreadpoolThreadCount   = 0;
     unsigned int Configuration::OcclusionThreadpoolBinsW         = 4;
@@ -265,6 +270,7 @@ int configure(lua_State* L) {
 
     readBool (L, 1, "OcclusionCullLights",                 Configuration::OcclusionCullLights);
     readUInt (L, 1, "OcclusionLightCullHysteresisFrames",  Configuration::OcclusionLightCullHysteresisFrames);
+    readBool (L, 1, "OcclusionLightExport",                Configuration::OcclusionLightExport);
 
     readBool (L, 1, "OcclusionAsyncOccluders",             Configuration::OcclusionAsyncOccluders);
     readUInt (L, 1, "OcclusionThreadpoolThreadCount",      Configuration::OcclusionThreadpoolThreadCount);

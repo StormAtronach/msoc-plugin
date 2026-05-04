@@ -57,6 +57,21 @@ namespace msoc {
         static bool OcclusionCullLights;
         static unsigned int OcclusionLightCullHysteresisFrames;
 
+        // _Claude_ Many-lights export. When true, the cullShow walk
+        // additionally enumerates NiPointLight nodes that pass frustum
+        // culling and exposes them via the mwse_getCurrentFrameLights
+        // export, for consumers like MGE-XE that want a per-frame
+        // snapshot of the visible point-light set independent of the
+        // engine's per-object NiDynamicEffectState selection (which
+        // caps at 7 lights per local effect list, often clamping
+        // dense interiors). Independent of OcclusionCullLights — the
+        // two features compose: cull fires per-engine-iteration light,
+        // export fires per-scene-graph light. Currently piggybacks on
+        // the existing isTopLevel flow, so requires EnableMSOC and the
+        // matching scene-type gate (interior/exterior) to be on.
+        // Default off until the consumer side ships.
+        static bool OcclusionLightExport;
+
         static bool OcclusionAsyncOccluders;
         static unsigned int OcclusionThreadpoolThreadCount;
         static unsigned int OcclusionThreadpoolBinsW;

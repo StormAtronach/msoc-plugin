@@ -152,6 +152,13 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
+    main:createOnOffButton({
+        label       = i18n("OcclusionLightExport.label"),
+        description = i18n("OcclusionLightExport.description"),
+        configKey   = "OcclusionLightExport",
+        callback    = applyChange,
+    })
+
     main:createSlider({
         label       = i18n("OcclusionTemporalCoherenceFrames.label"),
         description = i18n("OcclusionTemporalCoherenceFrames.description"),

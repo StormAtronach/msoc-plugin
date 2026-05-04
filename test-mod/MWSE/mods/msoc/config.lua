@@ -33,6 +33,13 @@ local default_config = {
     OcclusionCullLights                 = true,
     OcclusionLightCullHysteresisFrames  = 3,
 
+    -- _Claude_ Many-lights export. Off by default — opt-in feature for
+    -- consumers (MGE-XE per-pixel lighting). When on, msoc enumerates
+    -- every NiLight that survives frustum culling and publishes the
+    -- list via mwse_getCurrentFrameLights. See OcclusionLightExport in
+    -- Config.cpp for the full contract.
+    OcclusionLightExport                = false,
+
     -- Occluder selection (split per scene: interiors favour smaller
     -- occluders; exteriors raise the bar to skip clutter).
     OcclusionOccluderRadiusMinInterior    = 128.0,

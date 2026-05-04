@@ -168,6 +168,111 @@ void __cdecl mwse_registerLightObservedCallback(void(__cdecl* cb)(void* niLight)
 extern "C" __declspec(dllexport)
 void __cdecl mwse_unregisterLightObservedCallback(void(__cdecl* cb)(void* niLight));
 
+// _Claude_ Per-frame snapshot of NiLight nodes (Point/Spot/Directional/
+// Ambient) that survived frustum culling during this frame's main-camera
+// CullShow walk. Independent of the engine's per-object
+// NiDynamicEffectState selection — gives consumers (MGE-XE and other
+// shader pipelines) the unfiltered scene-graph light set so they can
+// drive their own per-pixel light loop past the engine's
+// 7-lights-per-local-effect-list cap.
+//
+// Wire format (frozen ABI):
+//
+//   struct MwseLight {
+//       uint32_t type;             // see kMwseLight* constants below
+//       float    pos[3];           // world-space, from worldBoundOrigin
+//       float    direction[3];     // world-space; spot/directional only
+//       float    diffuse[3];       // light.diffuse * dimmer
+//       float    ambient[3];       // light.ambient * dimmer
+//       float    falloffConstant;  // point/spot: 1 / (k0 + k1*d + k2*d²)
+//       float    falloffLinear;
+//       float    falloffQuadratic;
+//       float    spotAngle;        // spot only, in degrees (engine convention)
+//       float    spotExponent;     // spot only
+//       float    radius;           // engine "useful range"; point/spot only
+//   };
+//   // 1 uint32 + 18 floats = 76 bytes
+//
+// Per-type field validity:
+//
+//   type=1 (Point):       pos, diffuse, ambient, falloff{Constant,Linear,Quadratic}, radius
+//   type=2 (Spot):        same as Point + direction, spotAngle, spotExponent
+//   type=3 (Directional): direction, diffuse, ambient
+//   type=4 (Ambient):     ambient (pos optionally meaningful)
+//
+// `radius` is the engine's "useful range" for the light, read from
+// NI::Light::specular.r — Bethesda hijacked the unused specular slot to
+// stash the modder-set radius (see MWSE NIPointLight.cpp, comment "for
+// some reason"). Consumers can use it as a sphere radius for spatial
+// selection without re-deriving from C/L/Q (which loses the linear
+// term and has a hard-coded 1% threshold). 0 for non-point/spot.
+//
+// Fields irrelevant to a given type are zero-filled. type=0 indicates
+// an unrecognised NiLight subclass and the entire record should be
+// ignored by the consumer.
+//
+// The producer (msoc) extracts these from the NI::*Light wrapper
+// classes' known offsets; consumers read the struct and never touch
+// engine internals. This decouples MGE-XE from Morrowind binary version.
+//
+// Population gate: requires Configuration::OcclusionLightExport AND the
+// existing isTopLevel preconditions (EnableMSOC + matching scene-type
+// gate). When the gate is off, getCurrentFrameLights returns count=0
+// and consumers should fall back to the engine's per-object set.
+//
+// Lifetime: snapshot is rebuilt every frame's main-camera CullShow.
+// Pointers in the producer's internal storage are NiPointer-held so
+// the engine can't free a light mid-frame; the copy returned to the
+// consumer is by-value and has no lifetime concerns.
+enum {
+    kMwseLightUnknown     = 0,
+    kMwseLightPoint       = 1,
+    kMwseLightSpot        = 2,
+    kMwseLightDirectional = 3,
+    kMwseLightAmbient     = 4,
+};
+
+struct MwseLight {
+    unsigned int type;
+    float    pos[3];
+    float    direction[3];
+    float    diffuse[3];
+    float    ambient[3];
+    float    falloffConstant;
+    float    falloffLinear;
+    float    falloffQuadratic;
+    float    spotAngle;
+    float    spotExponent;
+    float    radius;
+};
+static_assert(sizeof(MwseLight) == 76, "MwseLight ABI size mismatch");
+
+// Copy up to `maxCount` MwseLight entries into `outArray`. `outCount`
+// receives the number actually written (≤ maxCount, ≤ snapshot size).
+// If the export gate is off or no lights are visible this frame,
+// `*outCount` is set to 0 and `outArray` is untouched.
+//
+// Safe to call from the render thread (single-threaded contract; the
+// producer populates during CullShow, the consumer queries during the
+// subsequent draw calls; both run on the same thread).
+extern "C" __declspec(dllexport)
+void __cdecl mwse_getCurrentFrameLights(
+    MwseLight* outArray, unsigned int* outCount, unsigned int maxCount);
+
+// _Claude_ Revision counter for the current-frame lights snapshot.
+// Increments every time the snapshot is rebuilt (top-of-frame in
+// CullShow_detour, gated by Configuration::OcclusionLightExport).
+//
+// Consumers (e.g. MGE-XE's texture-light path) cache the value
+// returned here and only re-upload their GPU representation when it
+// changes — once-per-frame instead of once-per-draw. Returns 0 if the
+// gate is off or msoc isn't producing a snapshot.
+//
+// Wraps at UINT_MAX. Consumers should compare for inequality, not
+// strict ordering, so wrap-around is harmless.
+extern "C" __declspec(dllexport)
+unsigned int __cdecl mwse_getCurrentFrameLightsRevision();
+
 // _Claude_ MSOC mask query exports. Return values are the stable
 // MWSE_OCC_* codes (match msoc::patch::occlusion::MaskQueryResult):
 //   0 = Visible     (draw it)
