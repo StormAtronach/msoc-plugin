@@ -1,6 +1,5 @@
-// HorizonOccluder.cpp — adapted from MGE-XE's terrain_horizon_occluder.c
-// (same author). See HorizonOccluder.h for the API and the layer-A handoff
-// doc for the design rationale.
+// Adapted from MGE-XE's terrain_horizon_occluder.c. See HorizonOccluder.h
+// for the API and design notes.
 
 #include "HorizonOccluder.h"
 
@@ -19,10 +18,9 @@ inline float colToNdc(int c, int resolution) {
                        / static_cast<float>(resolution - 1);
 }
 
-// One interval in the simplifier's max-heap. err is the maximum normalized
-// error of any interior column from the linear interpolant; split is the
-// column at which that error occurred (or -1 if the interval is too short
-// to split).
+// One interval in the simplifier's max-heap. err is the maximum
+// normalized error from the linear interpolant; split is the column at
+// which it occurred (-1 if too short to split).
 struct HeapItem {
     int   a;
     int   b;
@@ -30,8 +28,6 @@ struct HeapItem {
     float err;
 };
 
-// Sift-up / sift-down for the binary max-heap. Inline to keep them tight;
-// they execute O(samples) times per frame.
 inline void heapSiftUp(HeapItem* items, int i) {
     while (i > 0) {
         const int parent = (i - 1) >> 1;
@@ -54,11 +50,8 @@ inline void heapSiftDown(HeapItem* items, int size, int i) {
     }
 }
 
-// Find the interior column of (a, b) with the largest normalized error
-// from the linear interpolant. eps_h <= 0 disables that axis (treats its
-// contribution as zero); same for eps_d. The simplifier uses this to
-// either pick the next split or determine that the interval is below
-// threshold.
+// Find interior column of (a, b) with largest normalized error from the
+// linear interpolant. eps_h <= 0 (or eps_d) disables that axis.
 HeapItem computeWorst(const std::vector<float>& h, const std::vector<float>& d,
                       int a, int b, float epsH, float epsD) {
     HeapItem item{a, b, -1, 0.0f};
@@ -108,7 +101,7 @@ HorizonOccluder& HorizonOccluder::getInstance() {
 bool HorizonOccluder::init(int resolution, int maxSamples) {
     if (resolution < 2 || maxSamples < 2) return false;
     if (resolution == m_resolution && maxSamples == m_maxSamples) {
-        return true;  // idempotent — already sized correctly
+        return true;
     }
 
     m_resolution = resolution;
@@ -117,9 +110,9 @@ bool HorizonOccluder::init(int resolution, int maxSamples) {
     m_h.assign(static_cast<size_t>(resolution), kYBelow);
     m_d.assign(static_cast<size_t>(resolution), 0.0f);
 
-    // Workspace layout: keep[resolution] (one byte per column) followed by
-    // a heap of HeapItem. Heap capacity 2 * maxSamples is the worst-case
-    // bound — every split adds at most two new intervals.
+    // Workspace: keep[resolution] (one byte per column) followed by a
+    // heap of HeapItem. 2*maxSamples is the worst-case bound — every
+    // split adds at most two new intervals.
     const size_t keepBytes = (static_cast<size_t>(resolution) + 15u) & ~size_t{15u};
     const size_t heapBytes = static_cast<size_t>(2 * maxSamples) * sizeof(HeapItem);
     m_workspace.assign(keepBytes + heapBytes, 0);
@@ -134,9 +127,8 @@ void HorizonOccluder::reset() {
 }
 
 void HorizonOccluder::update(int c, float yUpper, float farDepth) {
-    // D3: write d[c] only when y_upper STRICTLY exceeds h[c]. Order-
-    // independent — multiple contributors at the same column converge to
-    // (h, d) pair where h = max(yUpper) and d = depth-of-the-winner.
+    // Strict > so multiple contributors at one column converge to (h, d)
+    // where h = max(yUpper) and d = depth-of-the-winner.
     if (yUpper > m_h[static_cast<size_t>(c)]) {
         m_h[static_cast<size_t>(c)] = yUpper;
         m_d[static_cast<size_t>(c)] = farDepth;
@@ -152,9 +144,8 @@ void HorizonOccluder::updateRange(int c0, int c1, float yUpper, float farDepth) 
 }
 
 float HorizonOccluder::computeAdaptiveEpsD(float fraction, float floor_) const {
-    // Per D12: scan only non-sentinel columns. m_d is meaningful only where
-    // m_h has been set (D3's coupling rule), so the same predicate covers
-    // both arrays.
+    // m_d is meaningful only where m_h has been set, so the same predicate
+    // covers both arrays.
     float minD = std::numeric_limits<float>::infinity();
     float maxD = -std::numeric_limits<float>::infinity();
     int   activeCols = 0;
@@ -169,10 +160,7 @@ float HorizonOccluder::computeAdaptiveEpsD(float fraction, float floor_) const {
     }
 
     if (activeCols < 2) {
-        // No meaningful depth structure; tell the simplifier to ignore the
-        // depth term entirely. Simplifier treats epsD <= 0 as "disable,"
-        // but +infinity matches MGE-XE's 1e30 convention more naturally
-        // and avoids surprising the user with a sign-dependent code path.
+        // No meaningful depth structure — disable the depth term.
         return std::numeric_limits<float>::infinity();
     }
 
@@ -186,8 +174,7 @@ int HorizonOccluder::simplify(Sample* out, int maxSamples,
     if (!out || maxSamples < 2) return 0;
     if (m_resolution < 2) return 0;
     if (maxSamples > m_maxSamples) {
-        // Workspace was sized for m_maxSamples; can't honor a larger
-        // request without reallocation. Cap and proceed.
+        // Workspace is sized for m_maxSamples. Cap and proceed.
         maxSamples = m_maxSamples;
     }
 
@@ -198,34 +185,30 @@ int HorizonOccluder::simplify(Sample* out, int maxSamples,
     int heapSize = 0;
     const int heapCap = 2 * m_maxSamples;
 
-    // Reset keep[] to "endpoints only."
     std::memset(keep, 0, static_cast<size_t>(R));
     keep[0] = 1;
     keep[R - 1] = 1;
     int kept = 2;
 
-    // Seed: the whole [0, R-1] interval. If its worst error already exceeds
-    // the threshold, push for splitting.
     HeapItem seed = computeWorst(m_h, m_d, 0, R - 1, epsH, epsD);
     if (seed.split >= 0 && seed.err > 1.0f && heapSize < heapCap) {
         heapItems[heapSize++] = seed;
         heapSiftUp(heapItems, heapSize - 1);
     }
 
-    // Main DP loop: pop the worst interval, split at its max-error column,
-    // push the two halves if they exceed threshold. Stop when budget fills
-    // or no interval has err > 1.
+    // DP loop: pop worst interval, split at max-error column, push the
+    // halves if they exceed threshold. Stop at budget or when no
+    // interval has err > 1.
     while (kept < maxSamples) {
         if (heapSize == 0) break;
         HeapItem top = heapItems[0];
-        // Pop
         --heapSize;
         if (heapSize > 0) {
             heapItems[0] = heapItems[heapSize];
             heapSiftDown(heapItems, heapSize, 0);
         }
 
-        if (top.err <= 1.0f) break;  // below threshold — done
+        if (top.err <= 1.0f) break;
         if (top.split <= top.a || top.split >= top.b) continue;
 
         keep[top.split] = 1;
@@ -243,9 +226,8 @@ int HorizonOccluder::simplify(Sample* out, int maxSamples,
         }
     }
 
-    // Optional tile alignment: snap non-endpoint columns to the nearest
-    // multiple of tileAlign. Up to half-a-tile movement; absorbed
-    // harmlessly by the curtain's per-segment conservative values.
+    // Snap non-endpoints to the nearest tileAlign multiple. Up to
+    // half-a-tile movement; absorbed by per-segment conservative values.
     if (tileAlign > 1) {
         for (int c = 1; c < R - 1; ++c) {
             if (!keep[c]) continue;
@@ -259,7 +241,6 @@ int HorizonOccluder::simplify(Sample* out, int maxSamples,
         }
     }
 
-    // Gather kept columns into the output.
     int n = 0;
     for (int c = 0; c < R && n < maxSamples; ++c) {
         if (!keep[c]) continue;
@@ -270,7 +251,7 @@ int HorizonOccluder::simplify(Sample* out, int maxSamples,
         ++n;
     }
 
-    // Pathological R: force endpoints if simplify somehow returned <2.
+    // Force endpoints if simplify somehow returned < 2.
     if (n < 2) {
         out[0].col  = 0;
         out[0].ndcX = -1.0f;
@@ -297,15 +278,13 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
         const Sample& s0 = samples[i];
         const Sample& s1 = samples[i + 1];
 
-        // Conservative emit per segment:
-        //   y_top stays below true silhouette (min)
-        //   z stays at/behind terrain (max — farther depth in clip-w convention)
+        // Conservative: y_top below silhouette (min), z at/behind
+        // terrain (max — farther depth in clip-w convention).
         const float yTop = (s0.h < s1.h) ? s0.h : s1.h;
         const float z    = (s0.d > s1.d) ? s0.d : s1.d;
 
-        // Skip segments where neither endpoint has been touched. Without
-        // this, the kYBelow sentinel would project to garbage curtain quads
-        // far below the screen.
+        // Skip segments where neither endpoint has been touched —
+        // otherwise the kYBelow sentinel projects to garbage quads.
         if (yTop <= kYBelow * 0.5f) continue;
 
         const CurtainVertex TL = makeNDCVert(s0.ndcX, yTop,        z);
@@ -313,8 +292,7 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
         const CurtainVertex BL = makeNDCVert(s0.ndcX, ndcYBottom,  z);
         const CurtainVertex BR = makeNDCVert(s1.ndcX, ndcYBottom,  z);
 
-        // CCW winding for y-up. MOC accepts BACKFACE_NONE so winding is
-        // mostly cosmetic, but we match the reference impl for parity.
+        // CCW winding for y-up; MOC accepts BACKFACE_NONE so it's cosmetic.
         outVerts[w++] = TL;
         outVerts[w++] = BL;
         outVerts[w++] = BR;
@@ -326,14 +304,8 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
 }
 
 void HorizonOccluder::fixupForMOC(CurtainVertex* verts, int vertCount) {
-    // NDC layout in: (x, y, z=depth, w=1)
-    // MOC layout out: (x*d, y*d, _, w=d)
-    //
-    // The pre-multiplied form is what RenderTriangles expects when
-    // modelToClip is nullptr — verts are already in clip space, MOC just
-    // does the perspective divide internally. Stride=16, offY=4, offW=12
-    // are the matching VertexLayout args. The z slot is unused after
-    // fixup; MOC reads only x, y, w from the layout descriptor.
+    // (x, y, z=depth, w=1) → (x*d, y*d, _, w=d). MOC's RenderTriangles
+    // expects this layout when modelToClip is nullptr.
     for (int i = 0; i < vertCount; ++i) {
         const float d = verts[i].z;
         verts[i].x *= d;

@@ -1,20 +1,12 @@
-// _Claude_ Engine-method shim.
+// Engine-method shim. MWSE's NI*.h / TES3*.h declare methods whose bodies
+// live in MWSE .cpp files that drag in the Lua binding layer. Local
+// definitions here do what upstream does, minus the Lua tangle. Mirrors
+// UI Expansion's plugin_source/MWSEImports.cpp.
 //
-// MWSE's NI*.h / TES3*.h declare a lot of methods whose bodies live in
-// MWSE's own .cpp files. Most of those .cpp files drag in MWSE's Lua
-// binding layer (sol bindings, getOrCreateLuaObject, LuaManager) — we
-// can't compile them without restoring all the MWSE runtime we just
-// tore out. The portable alternative: local definitions here that do
-// what upstream does, minus the Lua tangle. Mirrors UI Expansion's
-// plugin_source/MWSEImports.cpp.
-//
-// Scope: ONLY the methods PatchOcclusionCulling.cpp references. If a
-// future addition hits "unresolved external symbol", add the forwarder
-// here. Do not pre-emptively stub methods we don't call.
-//
-// Every reinterpret_cast<sig>(0xADDR) is copy-paste from the matching
-// upstream .cpp in deps/mwse-upstream/MWSE/. Keep the address + sig in
-// sync with upstream if bumping the submodule.
+// Scope: only methods PatchOcclusionCulling.cpp references. Every
+// reinterpret_cast<sig>(0xADDR) is copy-paste from the matching upstream
+// .cpp in deps/mwse-upstream/MWSE/. Keep address + sig in sync if bumping
+// the submodule.
 
 #include "stdafx.h"
 
@@ -23,7 +15,7 @@
 #include "NIAVObject.h"
 #include "NIGeometryData.h"
 #include "NIObject.h"
-#include "NIProperty.h"           // declares both Property and MaterialProperty
+#include "NIProperty.h"
 #include "NIRTTI.h"
 #include "NiTriBasedGeometryData.h"
 #include "NITriShape.h"
@@ -38,13 +30,11 @@
 
 namespace NI {
 
-    // Heap — engine global allocator, surfaced via MWSE's MemoryUtil wrappers.
     void* Object::operator new(size_t size) { return mwse::tes3::_new(size); }
     void Object::operator delete(void* address) { mwse::tes3::_delete(address); }
 
-    // Base ctor/dtor — needed because Property::Property() in this TU
-    // generates an implicit call to the Object base subobject. Upstream
-    // addresses: 0x6E98A0 (ctor), 0x6E98F0 (dtor).
+    // Property::Property() in this TU generates an implicit call to the
+    // Object base ctor, so this needs to be linkable.
     Object::Object() {
         reinterpret_cast<Object*(__thiscall*)(Object*)>(0x6E98A0)(this);
     }
@@ -56,8 +46,6 @@ namespace NI {
         return reinterpret_cast<Object*(__thiscall*)(Object*)>(0x6E9910)(this);
     }
 
-    // RTTI chain walk — all pure member access through the vtable, no
-    // external symbols. Upstream body copied verbatim from NIObject.cpp.
     bool Object::isInstanceOfType(const RTTI* type) const {
         for (const RTTI* rtti = vTable.asObject->getRTTI(this); rtti; rtti = rtti->baseRTTI) {
             if (rtti == type) {
@@ -71,9 +59,6 @@ namespace NI {
         reinterpret_cast<Property*(__thiscall*)(Property*)>(0x405990)(this);
     }
 
-    // Dtor pair — visible to the linker as soon as Property::Property
-    // is referenced. Without LTO the linker silently dropped this; with
-    // LTO it has to resolve. Upstream address from NIProperty.cpp.
     Property::~Property() {
         reinterpret_cast<void(__thiscall*)(Property*)>(0x405B40)(this);
     }
@@ -95,9 +80,7 @@ namespace NI {
     }
 
     void AVObject::attachProperty(Property* property) {
-        // Upstream wraps this through NI_PropertyList_addHead at 0x405840,
-        // taking the raw Property* as a Pointer<Property> (implicit ctor
-        // increments refCount).
+        // Wraps NI_PropertyList_addHead — Pointer<Property> ctor increments refCount.
         reinterpret_cast<void(__thiscall*)(PropertyLinkedList*, Pointer<Property>)>(0x405840)(
             &propertyNode, Pointer<Property>(property));
     }
@@ -129,18 +112,15 @@ namespace NI {
 
 namespace TES3 {
 
-    // Single ctor overload — patch only constructs Vector3(x,y,z). Other
-    // overloads (Color&, sol::table, sol::object) are not linked in.
+    // Patch only constructs Vector3(x,y,z); other overloads (Color&,
+    // sol::table, sol::object) are intentionally not linked in.
     Vector3::Vector3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
 
-    // Inline getCellFlag's body here rather than defining getCellFlag
-    // separately — patch only calls getIsInterior, and adding
-    // getCellFlag would introduce another unresolved symbol to link.
+    // Inlined rather than introducing getCellFlag — patch only calls this.
     bool Cell::getIsInterior() const {
         return (cellFlags & TES3::CellFlag::Interior) != 0;
     }
 
-    // Engine globals — singleton pointers the game writes at init.
     DataHandler* DataHandler::get() {
         return *reinterpret_cast<TES3::DataHandler**>(0x7C67E0);
     }

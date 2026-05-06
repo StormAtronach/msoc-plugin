@@ -1,14 +1,12 @@
 #pragma once
 
-// Plugin-local logger. API surface mirrors MWSE's Log.h so the patch's
-// existing `log::getLog() << ...` call sites carry over with at most a
-// namespace-alias line. Output goes to MSOC.log next to Morrowind.exe
-// (separate file from MWSE.log to avoid contention).
+// Plugin-local logger. Output goes to MSOC.log next to Morrowind.exe
+// (separate file from MWSE.log to avoid contention). API mirrors MWSE's
+// Log.h so existing `log::getLog() << ...` call sites carry over.
 //
-// Implementation lives in src/Log.cpp. The std::ostream& return uses a
-// custom std::filebuf with a 64KB internal buffer and a no-op sync(),
-// so std::endl does not force a flush; callers can call msoc::log::flush()
-// at safe sync points (or rely on the atexit handler at clean exit).
+// std::endl does not force a flush — the underlying filebuf has a 64KB
+// buffer and a no-op sync(). Call msoc::log::flush() at safe sync points
+// or rely on atexit for clean exit.
 
 #include <iosfwd>
 
@@ -17,11 +15,8 @@ namespace msoc::log {
 	void CloseLog();
 
 	std::ostream& getLog();
-	std::ostream& getDebug(); // alias for getLog; OutputDebugString routing not implemented
+	std::ostream& getDebug(); // alias for getLog
 
-	// Force the deferred buffer to disk. Useful before known-risky
-	// operations or for live tail-following. atexit covers clean exit;
-	// this is for crash-resilience of specific log lines.
 	void flush();
 
 	void prettyDump(const void* data, const size_t length);

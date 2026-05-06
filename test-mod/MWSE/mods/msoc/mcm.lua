@@ -347,6 +347,17 @@ local function registerModConfig()
         configKey   = "OcclusionLogAggregate",
         callback    = applyChange,
     })
+
+    -- Restart-only diagnostic. The native side reads this once during
+    -- installPatches() (which runs before msoc.configure() is ever
+    -- called), so the toggle below only takes effect on the next launch.
+    -- The description spells that out for the user.
+    logging:createOnOffButton({
+        label       = i18n("OcclusionForensicsWatchdog.label"),
+        description = i18n("OcclusionForensicsWatchdog.description"),
+        configKey   = "OcclusionForensicsWatchdog",
+        callback    = applyChange,
+    })
 end
 
 event.register("modConfigReady", registerModConfig)

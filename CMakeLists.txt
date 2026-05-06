@@ -30,10 +30,12 @@ if(NOT EXISTS "${MWSE_ROOT}/deps/LuaJIT/src/lua51.lib")
         "or copy the prebuilt lua51.lib from a working MWSE checkout.")
 endif()
 
-if(NOT EXISTS "${MWSE_ROOT}/MWSE/NIAVObject.h")
+if(NOT EXISTS "${MWSE_ROOT}/MWSE/NIAVObject.h"
+    AND NOT EXISTS "${MWSE_ROOT}/SharedSE/NIAVObject.h")
     message(FATAL_ERROR
-        "Couldn't find MWSE engine headers at ${MWSE_ROOT}/MWSE/. "
-        "If using the submodule, run: git submodule update --init --recursive")
+        "Couldn't find MWSE engine headers at ${MWSE_ROOT}/MWSE/ or "
+        "${MWSE_ROOT}/SharedSE/. If using the submodule, run: "
+        "git submodule update --init --recursive")
 endif()
 
 # Intel MOC sources — vendored locally in deps/msoc/. The threadpool
@@ -55,6 +57,10 @@ add_library(msoc SHARED
     # rasterizeAggregateTerrain. Adapted from MGE-XE's distant-land
     # equivalent; see src/HorizonOccluder.h for the rationale.
     src/HorizonOccluder.cpp
+    # Detached watchdog thread that dumps MSOC.forensics.txt every
+    # ~250 ms while the gate is on. Reads hot-path checkpoints via
+    # forensics::captureSnapshot() defined in PatchOcclusionCulling.cpp.
+    src/PatchForensicsWatchdog.cpp
     src/PatchOcclusionCulling.cpp
     # Local forwarders for the NI/TES3 engine methods the patch calls.
     # UIE-style: each body is a one-liner reinterpret_cast to a fixed
@@ -104,6 +110,11 @@ set_source_files_properties(
 # LuaManager shim because the plugin doesn't bind a sol usertype.
 target_include_directories(msoc PRIVATE
     "${MWSE_ROOT}/MWSE"
+    # SharedSE/ holds NIRTTIDefines.Morrowind.h on the sharedse-ni-unification
+    # branch (and any later branches that adopt the SharedSE split). Harmless
+    # on older branches that don't have a SharedSE/ — the path just doesn't
+    # contribute any headers.
+    "${MWSE_ROOT}/SharedSE"
     "${CMAKE_SOURCE_DIR}/deps/msoc"
     "${MWSE_ROOT}/deps/sol/include"
     "${MWSE_ROOT}/deps/span-lite"

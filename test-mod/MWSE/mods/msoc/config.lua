@@ -86,6 +86,12 @@ local default_config = {
     OcclusionLogPerFrame                = false,
     OcclusionLogAggregate               = false,
 
+    -- Freeze-forensics watchdog. Restart-only — the native side reads
+    -- this at installPatches() time, which runs before this config
+    -- table is pushed across the FFI. MCM edits round-trip into
+    -- msoc.json but only take effect on the next launch.
+    OcclusionForensicsWatchdog          = false,
+
     -- Debug tints.
     DebugOcclusionTintOccluded          = false,
     DebugOcclusionTintTested            = false,

@@ -1,17 +1,6 @@
-// msoc plugin — luaopen_msoc entry point.
-//
-// Loaded by MWSE's `include("msoc")`, which calls LoadLibrary on
-// MWSE/lib/msoc.dll then GetProcAddress("luaopen_msoc"). Whatever this
-// function returns becomes the value `include()` returns to Lua.
-//
-// Returned table:
-//   .version    string  — bookkeeping
-//   .mocLink    string  — MOC link probe result, "ok (AVX2)" / etc.
-//   .configure  cfn     — configure(tbl): push Lua config into native statics
-//
-// No usertypes, no sol2, no LuaManager shim. Config flows in by value
-// when the Lua side calls msoc.configure(cfg.config) — same shape UI
-// Expansion uses for its native plugin.
+// msoc plugin — luaopen_msoc entry point. Loaded by MWSE's
+// `include("msoc")`; whatever this returns becomes the Lua-side `msoc`
+// table.
 
 #include <Windows.h>
 
@@ -46,17 +35,13 @@ void setCFunctionField(lua_State* L, const char* key, lua_CFunction fn) {
     lua_settable(L, -3);
 }
 
-// _Claude_ Probe result. linkText is the human-readable link verdict
-// shown in MWSE.log; impl is the raw MaskedOcclusionCulling::Implementation
-// integer value (or -1 on probe failure) for HardwareTier classification.
 struct ProbeResult {
     const char* linkText;
-    int         impl;
+    int         impl;  // MaskedOcclusionCulling::Implementation, or -1
 };
 
-// Probe the MOC link by creating an instance, exercising one method,
-// destroying it. Catches AVX2/AVX512 specialisation link failures at
-// load rather than waiting for the patch to actually use MOC.
+// Create + exercise + destroy. Catches AVX2/AVX512 link failures at load
+// instead of at first patch use.
 ProbeResult probeMocLink() {
     auto* moc = MaskedOcclusionCulling::Create();
     if (!moc) return { "Create() returned null", -1 };
@@ -82,9 +67,6 @@ ProbeResult probeMocLink() {
     }
 }
 
-// _Claude_ Map the MOC implementation enum to a stable short string for
-// the Lua side. Kept separate from probeMocLink's "ok (XXX)" so the Lua
-// MCM can switch on simdLevel cleanly without parsing the link verdict.
 const char* simdLevelName(int impl) {
     switch (impl) {
         case MaskedOcclusionCulling::SSE2:    return "SSE2";
@@ -101,18 +83,11 @@ extern "C" __declspec(dllexport)
 int luaopen_msoc(lua_State* L) {
     lua_newtable(L);
 
-    // _Claude_ Probe MOC + classify hardware BEFORE installPatches() so
-    // the Configuration::* statics that the threadpool reads at first
-    // createMSOCResources() (called from inside installPatches when
-    // EnableMSOC starts true) reflect the tier picks rather than the
-    // module-init defaults from Config.cpp.
-    //
-    // Lua's later cfg.syncToNative(msoc) → plugin.configure(table) call
-    // can still overwrite these, so the Lua-side default_config in
-    // test-mod/.../config.lua reads msoc.hardwareTier and applies the
-    // matching overrides for first-run users (no msoc.json yet). Saved
-    // user values in msoc.json take precedence over both, which is
-    // intentional — explicit user choices are sticky.
+    // Probe + classify before installPatches() so the threadpool's first
+    // createMSOCResources() reads tier-adjusted Configuration:: values
+    // rather than the module-init defaults. The Lua side's
+    // cfg.syncToNative(msoc) call later overwrites these from msoc.json
+    // if present (saved user values are sticky).
     const auto probe = probeMocLink();
     const unsigned hwConcurrency = std::thread::hardware_concurrency();
     const auto tier = msoc::classifyHardwareTier(probe.impl, hwConcurrency);
@@ -126,15 +101,11 @@ int luaopen_msoc(lua_State* L) {
     setCFunctionField(L, "configure", &msoc::configure);
 
     // Install the occlusion patches exactly once. MWSE's include() can
-    // in theory load the same DLL twice (different Lua states during
-    // hot-reload); guard with a function-local static so hooks are only
-    // written into the Morrowind.exe code segment on first call.
+    // load the same DLL twice across Lua states; guard with a static.
     //
-    // IMPORTANT: this assumes MWSE's own in-tree MSOC patch is NOT
-    // compiled into MWSE.dll. If it is, both patchers fight for the
-    // same addresses (0x6EB480 CullShow detour, 0x41C08E/0x42E655/
-    // 0x4B50FF renderMainScene call sites, 0x6bb7d4 light cull). Use
-    // the plugin with a vanilla MWSE.dll during bring-up.
+    // IMPORTANT: assumes MWSE's own MSOC patch is NOT compiled into
+    // MWSE.dll. If it is, both patchers collide on the same Morrowind.exe
+    // addresses (0x6EB480, 0x41C08E, 0x42E655, 0x4B50FF, 0x6BB7D4).
     static bool s_installed = false;
     if (!s_installed) {
         s_installed = true;

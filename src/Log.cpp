@@ -1,24 +1,8 @@
-// Plugin-local logger. Mirrors the API surface of MWSE's Log.h (only the
-// pieces PatchOcclusionCulling.cpp uses) but writes to its own file so
-// there's no contention with MWSE.log. The patch's existing
-// `mwse::log::getLog() << ...` call sites carry over without edits.
-//
-// File: <MorrowindRoot>/MSOC.log, truncated each launch (matches
-// MSOC.forensics.txt and MSOC.flushdump.txt convention).
-//
-// Buffering:
-//   The patch logs heavily, including per-frame stat lines. With a
-//   default ofstream, every `<< std::endl` would synchronously flush
-//   to disk - one fsync per frame. We use a custom std::filebuf that
-//   (a) maintains a large internal buffer (kBufferSize), and
-//   (b) overrides sync() to be a no-op, so std::endl writes the '\n'
-//       but does not flush.
-//   The buffer flushes naturally when full (filebuf::overflow), and
-//   explicitly via mwse::log::flush() / atexit / CloseLog.
-//
-//   Tradeoff: a hard process kill (not a clean exit) can lose up to
-//   kBufferSize of trailing log data. Diagnostic dumps that need to
-//   be on disk before a known-risky op should call flush() first.
+// Plugin-local logger. Writes to <MorrowindRoot>/MSOC.log, truncated
+// each launch. Uses a 64KB buffer with a no-op sync() so std::endl
+// writes '\n' but does not fsync — flush is explicit (or atexit on
+// clean exit). A hard process kill loses up to kBufferSize trailing
+// bytes; call flush() before known-risky ops.
 
 #include "Log.h"
 
@@ -37,26 +21,20 @@ namespace {
 
 constexpr std::size_t kBufferSize = 64 * 1024;
 
-// std::filebuf with a large internal buffer and a no-op sync(). std::endl
-// triggers sync() in the standard pipeline; making it a no-op is what
-// turns std::endl from "flush every line" into "just write \n".
 class DeferredFilebuf : public std::filebuf {
 public:
     DeferredFilebuf() {
-        // Hand the filebuf a writable buffer it'll use for batching.
-        // Must outlive any open() call - hence storing as a member.
         setbuf(buffer_, sizeof(buffer_));
     }
 
-    // Force a real flush. Bypasses the sync() override.
     int forceSync() {
         return std::filebuf::sync();
     }
 
 protected:
+    // Swallow the implicit flush from std::endl / std::flush; overflow()
+    // drains the buffer when it fills.
     int sync() override {
-        // Swallow the implicit flush from std::endl / std::flush.
-        // Buffer fills naturally; overflow() drains it when full.
         return 0;
     }
 
@@ -64,23 +42,17 @@ private:
     char buffer_[kBufferSize];
 };
 
-// Single sink used by getLog/getDebug. Lazy init under g_initMutex so
-// the first call from any thread sets it up exactly once.
 std::mutex g_initMutex;
 bool g_initAttempted = false;
 DeferredFilebuf g_filebuf;
 std::ostream g_logStream(&g_filebuf);
-// Fallback used when the file open failed (read-only Morrowind dir,
-// etc.) so getLog never returns a dangling reference.
+// Used when the file open fails so getLog never returns a dangling ref.
 std::ostringstream g_fallback;
 
 void registerAtExitFlushOnce() {
     static bool registered = false;
     if (registered) return;
     registered = true;
-    // Best-effort flush at normal process exit. Won't fire on crash;
-    // for those, callers should call mwse::log::flush() at known-risky
-    // points (forensics watchdog already does this for its own files).
     std::atexit([]() {
         std::lock_guard<std::mutex> lk(g_initMutex);
         if (g_filebuf.is_open()) g_filebuf.forceSync();
@@ -106,7 +78,6 @@ std::ostream& openOnce() {
 namespace msoc::log {
 
 void OpenLog(const char* /*path*/) {
-    // Path ignored; we always write to MSOC.log next to Morrowind.exe.
     (void)openOnce();
 }
 
@@ -123,8 +94,6 @@ std::ostream& getLog() {
 }
 
 std::ostream& getDebug() {
-    // OutputDebugString routing is not worth the per-line cost;
-    // route to the same sink as getLog so calls don't disappear.
     return openOnce();
 }
 
@@ -137,11 +106,8 @@ void prettyDump(const void* data, const size_t length) {
     prettyDump(data, length, openOnce());
 }
 
+// Compact hex dump: 16 bytes per line, offset prefix, ASCII gutter.
 void prettyDump(const void* data, const size_t length, std::ostream& output) {
-    // Compact hex dump: 16 bytes per line, offset prefix, ASCII gutter.
-    // Doesn't try to mirror MWSE's prettyDump byte-for-byte; the patch
-    // only uses this for forensic dumps where exact format parity isn't
-    // needed.
     const auto* bytes = static_cast<const unsigned char*>(data);
     const auto oldFlags = output.flags();
     const auto oldFill = output.fill();
@@ -166,13 +132,9 @@ void prettyDump(const void* data, const size_t length, std::ostream& output) {
 
 } // namespace msoc::log
 
-// MWSE's upstream MemoryUtil.cpp (compiled directly into the plugin)
-// calls `log::getLog()` from inside namespace mwse, which resolves to
-// mwse::log::getLog(). MWSE's Log.h declares that symbol; MWSE's Log.cpp
-// defines it — but that file depends on more MWSE internals than we
-// want to pull in. Provide the subset MemoryUtil.cpp actually references
-// (only getLog) as forwarders to our msoc::log sink, so everything
-// MWSE proper would have written to MWSE.log ends up in MSOC.log here.
+// MWSE's upstream MemoryUtil.cpp (compiled into the plugin) calls
+// mwse::log::getLog(). Forward to our msoc::log sink so everything ends
+// up in MSOC.log.
 namespace mwse::log {
     std::ostream& getLog() { return ::msoc::log::getLog(); }
 }

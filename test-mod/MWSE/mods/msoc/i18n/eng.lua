@@ -212,4 +212,13 @@ return {
     ["OcclusionLogAggregate.description"] = "Writes one MSOC.log line every 300 frames with "
         .. "cumulative culler counters (rasterised, occluded/tested, view-culled, drain "
         .. "timings). For steady-state profiling.",
+
+    ["OcclusionForensicsWatchdog.label"] = "Freeze-forensics watchdog",
+    ["OcclusionForensicsWatchdog.description"] = "Spawns a background thread that polls the "
+        .. "MSOC pipeline's checkpoints every 250 ms and overwrites MSOC.forensics.txt next to "
+        .. "MWSE.log. If the game hard-freezes and Windows kills it, the file shows which "
+        .. "stage the main thread was stuck in, the recursion depth, and the time since the "
+        .. "last clean frame. Diagnostic-only — leave off unless you are reproducing a freeze. "
+        .. "RESTART REQUIRED: this toggle is read once when the plugin loads; changes here are "
+        .. "saved to msoc.json but only take effect on the next launch.",
 }
