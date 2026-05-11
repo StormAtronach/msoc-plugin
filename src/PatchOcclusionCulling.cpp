@@ -150,11 +150,6 @@ namespace msoc::patch::occlusion {
 	// CullShow_detour entry.
 	static float g_worldToClip[16];
 
-	// Reusable rasterizeTriShape buffers, grown on demand, never shrunk.
-	// MSOC is single-threaded from the worldCamera pass.
-	static std::vector<float> g_occluderVerts;
-	static std::vector<unsigned int> g_occluderIndices;
-
 	// Per-frame matrix metrics for testSphereVisible:
 	//   g_ndcRadiusX/Y: L2 norm of clip.x/y coefficients. NDC half-extent
 	//                   of a sphere of radius r at clip-w cw is r*X/cw.
@@ -336,6 +331,62 @@ namespace msoc::patch::occlusion {
 	static uint64_t g_terrainMembershipHits   = 0;
 	static uint64_t g_terrainMembershipMisses = 0;
 
+	// Per-instance occluder eligibility cache. Combines (a) ancestor-walked
+	// alpha/stencil classification and (b) world-space vertex/index buffers
+	// + AABB, keyed on NI::AVObject*. For static cell meshes both are
+	// invariant between frames. Profile data on user's machine: vertex-loop
+	// peak ~1.8 ms/frame, classify peak ~260 µs/frame — both well above the
+	// 50 µs/frame caching threshold from MSOC_CACHE_AUDIT.md.
+	//
+	// Invalidation:
+	//   - Cell change wipes the whole map (same hook as g_drainCache).
+	//   - Geometry slot refreshes whenever the worldTransform memcmp differs
+	//     (catches moved pickables, scripted moves; ~no-op for cell statics).
+	//
+	// Profile probes kept in place so the cache's own hit rate and any
+	// residual miss-path cost stay visible in MSOC.log.
+	struct OccluderCacheEntry {
+		NI::Pointer<NI::AVObject> objPtr;
+
+		bool propsResolved = false;
+		bool alpha = false;
+		bool stencil = false;
+
+		bool geomResolved = false;
+		std::vector<float> worldVerts;
+		std::vector<unsigned int> indices;
+		unsigned int outTriCount = 0;
+		unsigned short vertexCount = 0;
+		float minX = 0, minY = 0, minZ = 0;
+		float maxX = 0, maxY = 0, maxZ = 0;
+
+		// 13 floats = sizeof(TES3::Transform). Storing the bytes verbatim
+		// (rotation + translation + scale) lets a single memcmp catch any
+		// kind of motion without writing a per-field comparator.
+		float xfData[13] = {};
+	};
+	static std::unordered_map<NI::AVObject*, OccluderCacheEntry> g_occluderCache;
+	static uint64_t g_occluderCacheHits = 0;
+	static uint64_t g_occluderCacheMisses = 0;
+
+	// Miss-path workload probes: count walked ancestor steps and transformed
+	// verts on the cache-miss path. Together with hit/miss above these
+	// confirm the cache is amortising the work it's supposed to.
+	static uint64_t g_classifyOccluderCalls = 0;
+	static uint64_t g_classifyOccluderSteps = 0;
+	static uint64_t g_occluderVertexCalls   = 0;
+	static uint64_t g_occluderVertexVerts   = 0;
+
+	static OccluderCacheEntry& getOccluderCacheEntry(NI::AVObject* obj) {
+		auto it = g_occluderCache.find(obj);
+		if (it != g_occluderCache.end()) {
+			return it->second;
+		}
+		auto& e = g_occluderCache[obj];
+		e.objPtr = NI::Pointer<NI::AVObject>(obj);
+		return e;
+	}
+
 	// Per-light occlusion cache for updateLights (gated by
 	// OcclusionCullLights). Tracks last query frame, last verdict,
 	// consecutive-occluded count for hysteresis, and worldBound snapshot
@@ -472,16 +523,13 @@ namespace msoc::patch::occlusion {
 	// g_asyncThisFrame latches the flag at top-level entry so mid-frame
 	// MCM edits don't mix sync/async submissions within one traversal.
 	//
-	// Arena vectors own per-submission triangle data until Flush() retires
-	// the job. CullingThreadpool requires caller-owned buffers to stay
-	// stable between submission and completion; the rasterize path moves
-	// g_occluderVerts/Indices into the arena and allocates fresh ones for
-	// the next call. Cleared at top-level entry after ClearBuffer's
-	// implicit Flush.
+	// Buffer stability for async submission: occluder cache entries live in
+	// unordered_map nodes whose addresses are stable across insertions, and
+	// the entries themselves persist until cell-change wipe. So the buffer
+	// pointers handed to the threadpool stay valid until Flush() — no
+	// per-submission arena copy needed.
 	static ::CullingThreadpool* g_threadpool = nullptr;
 	static bool g_asyncThisFrame = false;
-	static std::vector<std::vector<float>> g_asyncOccluderVerts;
-	static std::vector<std::vector<unsigned int>> g_asyncOccluderIndices;
 
 	// Scene-type-resolved occluder thresholds. Written once per top-level
 	// entry after isInterior is known; collapses interior/exterior pair-
@@ -695,10 +743,17 @@ namespace msoc::patch::occlusion {
 		bool stencil;
 	};
 	static OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj) {
+		// Probes gated on g_logEnabledEffective — same contract as
+		// ScopedUsAccumulator. Off-path: predicted-not-taken branch + no
+		// counter store; on-path: 4 atomic-free uint64 inc per frame's
+		// miss-set.
+		const bool logOn = g_logEnabledEffective;
+		if (logOn) ++g_classifyOccluderCalls;
 		OccluderPropertyFlags out = { false, false };
 		bool alphaResolved = false;
 		bool stencilResolved = false;
 		for (NI::AVObject* cur = obj; cur; cur = cur->parentNode) {
+			if (logOn) ++g_classifyOccluderSteps;
 			for (auto* node = &cur->propertyNode; node && node->data; node = node->next) {
 				const auto type = node->data->getType();
 				if (!alphaResolved && type == NI::PropertyType::Alpha) {
@@ -1072,9 +1127,11 @@ namespace msoc::patch::occlusion {
 	// Rasterise a shape's real triangles (world-space) as an occluder.
 	// Using real triangles instead of the AABB prevents "sign on wall
 	// falsely occluded because it lives inside the wall's AABB."
+	// World-space verts + indices + AABB live in the supplied cache entry
+	// (g_occluderCache); only re-derived when worldTransform changes.
 	// Returns true on rasterise, false on skip (no data, thin axis,
-	// camera inside tight AABB, or budget gate).
-	static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const TES3::Vector3& eye) {
+	// inside-guard if enabled, or budget gate).
+	static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const TES3::Vector3& eye, OccluderCacheEntry& cache) {
 		// Phase budget gate. Compares against g_rasterizeTimeUs (sum
 		// of completed RenderTriangles SIMD time), NOT wall-clock-since-
 		// frame-start. The latter would include cullShowBody traversal
@@ -1121,43 +1178,81 @@ namespace msoc::patch::occlusion {
 		}
 
 		const auto& xf = shape->worldTransform;
-		const auto& R = xf.rotation;
-		const auto& T = xf.translation;
-		const float s = xf.scale;
 
-		// Transform every vertex into the reusable world-space buffer
-		// once and accumulate the tight AABB for the inside/thin-axis
-		// gates. Not cached across frames — TriShapeData pointers
-		// can be freed and reused.
-		g_occluderVerts.resize(static_cast<size_t>(vertexCount) * 3);
-		float* out = g_occluderVerts.data();
-		float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
-		float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
-		for (unsigned short i = 0; i < vertexCount; ++i) {
-			const auto& v = data->vertex[i];
-			const float rx = R.m0.x * v.x + R.m0.y * v.y + R.m0.z * v.z;
-			const float ry = R.m1.x * v.x + R.m1.y * v.y + R.m1.z * v.z;
-			const float rz = R.m2.x * v.x + R.m2.y * v.y + R.m2.z * v.z;
-			const float wx = rx * s + T.x;
-			const float wy = ry * s + T.y;
-			const float wz = rz * s + T.z;
-			out[i * 3 + 0] = wx;
-			out[i * 3 + 1] = wy;
-			out[i * 3 + 2] = wz;
-			if (wx < minX) minX = wx;
-			if (wx > maxX) maxX = wx;
-			if (wy < minY) minY = wy;
-			if (wy > maxY) maxY = wy;
-			if (wz < minZ) minZ = wz;
-			if (wz > maxZ) maxZ = wz;
+		// Geom cache: world-space verts + indices + AABB are invariant
+		// across frames for static cell meshes. Recompute only when
+		// worldTransform changes (catches moved pickables) or on first
+		// touch. Cache entries live until cell-change wipe.
+		// unordered_map node addresses are stable across insertions, so
+		// the buffer data pointers we pass to threadpool/g_msoc remain
+		// valid until cell change — no per-frame arena copy needed.
+		const bool xfStale = !cache.geomResolved
+			|| std::memcmp(cache.xfData, &xf, sizeof(cache.xfData)) != 0;
+		if (xfStale) {
+			const auto& R = xf.rotation;
+			const auto& T = xf.translation;
+			const float s = xf.scale;
+
+			if (g_logEnabledEffective) {
+				++g_occluderVertexCalls;
+				g_occluderVertexVerts += vertexCount;
+			}
+			cache.worldVerts.resize(static_cast<size_t>(vertexCount) * 3);
+			float* out = cache.worldVerts.data();
+			float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
+			float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
+			for (unsigned short i = 0; i < vertexCount; ++i) {
+				const auto& v = data->vertex[i];
+				const float rx = R.m0.x * v.x + R.m0.y * v.y + R.m0.z * v.z;
+				const float ry = R.m1.x * v.x + R.m1.y * v.y + R.m1.z * v.z;
+				const float rz = R.m2.x * v.x + R.m2.y * v.y + R.m2.z * v.z;
+				const float wx = rx * s + T.x;
+				const float wy = ry * s + T.y;
+				const float wz = rz * s + T.z;
+				out[i * 3 + 0] = wx;
+				out[i * 3 + 1] = wy;
+				out[i * 3 + 2] = wz;
+				if (wx < minX) minX = wx;
+				if (wx > maxX) maxX = wx;
+				if (wy < minY) minY = wy;
+				if (wy > maxY) maxY = wy;
+				if (wz < minZ) minZ = wz;
+				if (wz > maxZ) maxZ = wz;
+			}
+			cache.minX = minX; cache.minY = minY; cache.minZ = minZ;
+			cache.maxX = maxX; cache.maxY = maxY; cache.maxZ = maxZ;
+			cache.vertexCount = vertexCount;
+
+			// Expand 16-bit indices into MSOC's 32-bit list and drop any
+			// out-of-bounds entries (Intel's gather would crash).
+			cache.indices.resize(static_cast<size_t>(triCount) * 3);
+			unsigned int* idx = cache.indices.data();
+			unsigned int outTri = 0;
+			for (unsigned short i = 0; i < triCount; ++i) {
+				const unsigned short a = tris[i].vertices[0];
+				const unsigned short b = tris[i].vertices[1];
+				const unsigned short c = tris[i].vertices[2];
+				if (a >= vertexCount || b >= vertexCount || c >= vertexCount) {
+					continue;
+				}
+				idx[outTri * 3 + 0] = a;
+				idx[outTri * 3 + 1] = b;
+				idx[outTri * 3 + 2] = c;
+				++outTri;
+			}
+			cache.indices.resize(static_cast<size_t>(outTri) * 3);
+			cache.outTriCount = outTri;
+
+			cache.geomResolved = true;
+			std::memcpy(cache.xfData, &xf, sizeof(cache.xfData));
 		}
 
 		// Reject pencil shapes — tiny silhouette area, near-zero
 		// occlusion. Walls/floors (single thin axis) still qualify.
 		const float minDim = g_occluderMinDimensionEffective;
-		const float dx = maxX - minX;
-		const float dy = maxY - minY;
-		const float dz = maxZ - minZ;
+		const float dx = cache.maxX - cache.minX;
+		const float dy = cache.maxY - cache.minY;
+		const float dz = cache.maxZ - cache.minZ;
 		const int thinAxes = (dx < minDim ? 1 : 0)
 			+ (dy < minDim ? 1 : 0)
 			+ (dz < minDim ? 1 : 0);
@@ -1177,61 +1272,36 @@ namespace msoc::patch::occlusion {
 		// msoc.json to restore the old rejection.
 		if (g_insideOccluderGuardEffective) {
 			const float m = g_insideOccluderMarginEffective;
-			if (eye.x >= minX - m && eye.x <= maxX + m &&
-				eye.y >= minY - m && eye.y <= maxY + m &&
-				eye.z >= minZ - m && eye.z <= maxZ + m) {
+			if (eye.x >= cache.minX - m && eye.x <= cache.maxX + m &&
+				eye.y >= cache.minY - m && eye.y <= cache.maxY + m &&
+				eye.z >= cache.minZ - m && eye.z <= cache.maxZ + m) {
 				++g_skippedInside;
 				return false;
 			}
 		}
 
-		// Expand 16-bit indices into MSOC's 32-bit list and drop any
-		// out-of-bounds entries (Intel's gather would crash).
-		g_occluderIndices.resize(static_cast<size_t>(triCount) * 3);
-		unsigned int* idx = g_occluderIndices.data();
-		unsigned int outTri = 0;
-		for (unsigned short i = 0; i < triCount; ++i) {
-			const unsigned short a = tris[i].vertices[0];
-			const unsigned short b = tris[i].vertices[1];
-			const unsigned short c = tris[i].vertices[2];
-			if (a >= vertexCount || b >= vertexCount || c >= vertexCount) {
-				continue;
-			}
-			idx[outTri * 3 + 0] = a;
-			idx[outTri * 3 + 1] = b;
-			idx[outTri * 3 + 2] = c;
-			++outTri;
-		}
-		if (outTri == 0) {
+		if (cache.outTriCount == 0) {
 			return false;
 		}
 
 		// VertexLayout(12, 4, 8): stride 12, y@4, z@8 — packed float[3].
 		// BACKFACE_NONE: NIF winding isn't guaranteed consistent.
 		if (g_asyncThisFrame) {
-			// Move owning buffers into the per-frame arena so workers
-			// have stable pointers until Flush() retires the job.
-			// Inner vectors keep their data pointer through outer-vector
-			// relocations (move ctor steals).
-			g_asyncOccluderVerts.emplace_back(std::move(g_occluderVerts));
-			g_asyncOccluderIndices.emplace_back(std::move(g_occluderIndices));
-			const auto& vtx = g_asyncOccluderVerts.back();
-			const auto& tri = g_asyncOccluderIndices.back();
 			ScopedUsAccumulator t(g_rasterizeTimeUs);
-			g_threadpool->RenderTriangles(vtx.data(), tri.data(),
-				static_cast<int>(outTri),
+			g_threadpool->RenderTriangles(cache.worldVerts.data(), cache.indices.data(),
+				static_cast<int>(cache.outTriCount),
 				::MaskedOcclusionCulling::BACKFACE_NONE,
 				::MaskedOcclusionCulling::CLIP_PLANE_ALL);
 		}
 		else {
 			ScopedUsAccumulator t(g_rasterizeTimeUs);
-			g_msoc->RenderTriangles(g_occluderVerts.data(), idx,
-				static_cast<int>(outTri), g_worldToClip,
+			g_msoc->RenderTriangles(cache.worldVerts.data(), cache.indices.data(),
+				static_cast<int>(cache.outTriCount), g_worldToClip,
 				::MaskedOcclusionCulling::BACKFACE_NONE,
 				::MaskedOcclusionCulling::CLIP_PLANE_ALL,
 				::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
 		}
-		g_occluderTriangles += outTri;
+		g_occluderTriangles += cache.outTriCount;
 		return true;
 	}
 
@@ -1824,16 +1894,25 @@ namespace msoc::patch::occlusion {
 				if (!skipAsAggregated
 					&& boundRadius >= g_occluderRadiusMinEffective
 					&& boundRadius <= g_occluderRadiusMaxEffective) {
-					const auto p = classifyOccluderProperties(self);
-					if (p.alpha) {
+					auto& cacheEntry = getOccluderCacheEntry(self);
+					if (!cacheEntry.propsResolved) {
+						if (g_logEnabledEffective) ++g_occluderCacheMisses;
+						const auto p = classifyOccluderProperties(self);
+						cacheEntry.alpha = p.alpha;
+						cacheEntry.stencil = p.stencil;
+						cacheEntry.propsResolved = true;
+					} else {
+						if (g_logEnabledEffective) ++g_occluderCacheHits;
+					}
+					if (cacheEntry.alpha) {
 						++g_skippedAlpha;
 					}
-					else if (p.stencil) {
+					else if (cacheEntry.stencil) {
 						++g_skippedStencil;
 					}
 					else {
 						const auto& eye = camera->worldTransform.translation;
-						if (rasterizeTriShape(static_cast<NI::TriBasedGeometry*>(self), eye)) {
+						if (rasterizeTriShape(static_cast<NI::TriBasedGeometry*>(self), eye, cacheEntry)) {
 							++g_rasterizedAsOccluder;
 							didRasterise = true;
 							if (g_tintOccluderEffective) {
@@ -2247,7 +2326,7 @@ namespace msoc::patch::occlusion {
 			if (g_asyncThisFrame) {
 				// Wake workers ~100µs before the first RenderTriangles.
 				// ClearBuffer's implicit Flush retires last frame's
-				// stragglers, so it's safe to clear the arena after.
+				// stragglers.
 				g_lastStage = 2;
 				{
 					ScopedUsAccumulator t(g_wakeThreadsTimeUs);
@@ -2255,8 +2334,6 @@ namespace msoc::patch::occlusion {
 				}
 				g_lastStage = 3;
 				g_threadpool->ClearBuffer();
-				g_asyncOccluderVerts.clear();
-				g_asyncOccluderIndices.clear();
 			}
 			else {
 				g_lastStage = 3;
@@ -2273,6 +2350,7 @@ namespace msoc::patch::occlusion {
 				g_drainCache.clear();
 				g_lightCullCache.clear();
 				g_terrainMembership.clear();
+				g_occluderCache.clear();
 				// Releases our NI::Pointer refs on outgoing-cell shapes
 				// so they can actually be freed. Surviving shapes
 				// (player, inventory) re-enter on next tint.
@@ -2312,6 +2390,12 @@ namespace msoc::patch::occlusion {
 			g_horizonAdaptiveEpsD   = 0.0f;
 			g_terrainMembershipHits   = 0;
 			g_terrainMembershipMisses = 0;
+			g_classifyOccluderCalls   = 0;
+			g_classifyOccluderSteps   = 0;
+			g_occluderVertexCalls     = 0;
+			g_occluderVertexVerts     = 0;
+			g_occluderCacheHits       = 0;
+			g_occluderCacheMisses     = 0;
 			g_landCacheHits = 0;
 			g_landCacheMisses = 0;
 			g_landCacheEvictions = 0;
@@ -2558,6 +2642,13 @@ namespace msoc::patch::occlusion {
 					<< " landMembershipHit=" << g_terrainMembershipHits
 					<< " landMembershipMiss=" << g_terrainMembershipMisses
 					<< " landMembershipSize=" << g_terrainMembership.size()
+					<< " classOccCalls=" << g_classifyOccluderCalls
+					<< " classOccSteps=" << g_classifyOccluderSteps
+					<< " occVertCalls=" << g_occluderVertexCalls
+					<< " occVertVerts=" << g_occluderVertexVerts
+					<< " occCacheHit=" << g_occluderCacheHits
+					<< " occCacheMiss=" << g_occluderCacheMisses
+					<< " occCacheSize=" << g_occluderCache.size()
 					<< " landCacheHit=" << g_landCacheHits
 					<< " landCacheMiss=" << g_landCacheMisses
 					<< " landCacheEvict=" << g_landCacheEvictions
@@ -2787,7 +2878,7 @@ namespace msoc::patch::occlusion {
 		return true;
 	}
 
-	// Free g_msoc + g_threadpool and clear the async arenas. Caller must
+	// Free g_msoc + g_threadpool and release cached state. Caller must
 	// ensure no async work is in flight (between frames, g_msocActive
 	// false). Threadpool dtor joins all workers — bounded but blocking,
 	// up to a few ms.
@@ -2807,10 +2898,9 @@ namespace msoc::patch::occlusion {
 			g_msoc_prev = nullptr;
 		}
 		g_snapshotTickMs = 0;
-		g_asyncOccluderVerts.clear();
-		g_asyncOccluderVerts.shrink_to_fit();
-		g_asyncOccluderIndices.clear();
-		g_asyncOccluderIndices.shrink_to_fit();
+		// Release NI::Pointer refcounts on every cached static, drop the
+		// world-vert/index buffers; re-enable rebuilds from scratch.
+		g_occluderCache.clear();
 		// External occluder queue: drop pending submissions so re-enable
 		// doesn't replay stale ones against the fresh mask.
 		{
