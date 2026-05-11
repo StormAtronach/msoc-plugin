@@ -108,6 +108,10 @@ namespace NI {
         return static_cast<TriShapeData*>(modelData.get());
     }
 
+    Pointer<TriBasedGeometryData> TriBasedGeometry::getModelData() const {
+        return static_cast<TriBasedGeometryData*>(modelData.get());
+    }
+
 }
 
 namespace TES3 {

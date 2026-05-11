@@ -1073,7 +1073,7 @@ namespace msoc::patch::occlusion {
 	// falsely occluded because it lives inside the wall's AABB."
 	// Returns true on rasterise, false on skip (no data, thin axis,
 	// camera inside tight AABB, or budget gate).
-	static bool rasterizeTriShape(NI::TriShape* shape, const TES3::Vector3& eye) {
+	static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const TES3::Vector3& eye) {
 		// Phase budget gate. Compares against g_rasterizeTimeUs (sum
 		// of completed RenderTriangles SIMD time), NOT wall-clock-since-
 		// frame-start. The latter would include cullShowBody traversal
@@ -1815,8 +1815,7 @@ namespace msoc::patch::occlusion {
 					&& isLandscapeDescendant(self, g_worldLandscapeRoot);
 				if (!skipAsAggregated
 					&& boundRadius >= g_occluderRadiusMinEffective
-					&& boundRadius <= g_occluderRadiusMaxEffective
-					&& self->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) {
+					&& boundRadius <= g_occluderRadiusMaxEffective) {
 					const auto p = classifyOccluderProperties(self);
 					if (p.alpha) {
 						++g_skippedAlpha;
@@ -1826,7 +1825,7 @@ namespace msoc::patch::occlusion {
 					}
 					else {
 						const auto& eye = camera->worldTransform.translation;
-						if (rasterizeTriShape(static_cast<NI::TriShape*>(self), eye)) {
+						if (rasterizeTriShape(static_cast<NI::TriBasedGeometry*>(self), eye)) {
 							++g_rasterizedAsOccluder;
 							didRasterise = true;
 							if (g_tintOccluderEffective) {
