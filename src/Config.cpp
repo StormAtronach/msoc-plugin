@@ -21,6 +21,7 @@ namespace msoc {
     float Configuration::OcclusionOccluderMinDimensionExterior = 128.0f;
     float Configuration::OcclusionInsideOccluderMarginInterior =  64.0f;
     float Configuration::OcclusionInsideOccluderMarginExterior =  64.0f;
+    bool  Configuration::OcclusionInsideOccluderGuard          = false;
 
     float Configuration::OcclusionDepthSlackWorldUnits = 128.0f;
     unsigned int Configuration::OcclusionOccluderMaxTriangles = 4096;
@@ -193,6 +194,7 @@ int configure(lua_State* L) {
     readFloat(L, 1, "OcclusionOccluderMinDimensionExterior", Configuration::OcclusionOccluderMinDimensionExterior);
     readFloat(L, 1, "OcclusionInsideOccluderMarginInterior", Configuration::OcclusionInsideOccluderMarginInterior);
     readFloat(L, 1, "OcclusionInsideOccluderMarginExterior", Configuration::OcclusionInsideOccluderMarginExterior);
+    readBool (L, 1, "OcclusionInsideOccluderGuard",          Configuration::OcclusionInsideOccluderGuard);
     readFloat(L, 1, "OcclusionDepthSlackWorldUnits",       Configuration::OcclusionDepthSlackWorldUnits);
     readUInt (L, 1, "OcclusionOccluderMaxTriangles",       Configuration::OcclusionOccluderMaxTriangles);
     readUInt (L, 1, "OcclusionOccludeeMinRadius",          Configuration::OcclusionOccludeeMinRadius);

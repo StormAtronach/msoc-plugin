@@ -490,6 +490,7 @@ namespace msoc::patch::occlusion {
 	static float g_occluderRadiusMaxEffective     = 0.0f;
 	static float g_occluderMinDimensionEffective  = 0.0f;
 	static float g_insideOccluderMarginEffective  = 0.0f;
+	static bool  g_insideOccluderGuardEffective   = false;
 
 	// Per-frame cache of loop-invariant Configuration reads. Configuration
 	// statics have external linkage; the optimizer must reload them after
@@ -1165,16 +1166,23 @@ namespace msoc::patch::occlusion {
 			return false;
 		}
 
-		// Inside-guard: a camera inside the mesh would cover the screen
-		// with near-face depths and falsely occlude everything behind
-		// the far face. Tight AABB + margin suffices since the real
-		// triangles are strictly inside it.
-		const float m = g_insideOccluderMarginEffective;
-		if (eye.x >= minX - m && eye.x <= maxX + m &&
-			eye.y >= minY - m && eye.y <= maxY + m &&
-			eye.z >= minZ - m && eye.z <= maxZ + m) {
-			++g_skippedInside;
-			return false;
+		// Inside-guard: opt-in via OcclusionInsideOccluderGuard. The
+		// original rationale (eye-inside mesh writes near-face depths
+		// that falsely occlude things behind the far face) did not hold
+		// up empirically — with BACKFACE_NONE rasterising both sides,
+		// MOC's tile semantics handle the concave-shell case fine, and
+		// the AABB+margin gate was eating close-up walls (the wall's
+		// AABB+64 wu contains the player whenever they're near it).
+		// Default off; flip OcclusionInsideOccluderGuard=true in
+		// msoc.json to restore the old rejection.
+		if (g_insideOccluderGuardEffective) {
+			const float m = g_insideOccluderMarginEffective;
+			if (eye.x >= minX - m && eye.x <= maxX + m &&
+				eye.y >= minY - m && eye.y <= maxY + m &&
+				eye.z >= minZ - m && eye.z <= maxZ + m) {
+				++g_skippedInside;
+				return false;
+			}
 		}
 
 		// Expand 16-bit indices into MSOC's 32-bit list and drop any
@@ -2210,6 +2218,7 @@ namespace msoc::patch::occlusion {
 						g_tintOccluderEffective              = Configuration::DebugOcclusionTintOccluder;
 						g_tintOccludedEffective              = Configuration::DebugOcclusionTintOccluded;
 						g_tintTestedEffective                = Configuration::DebugOcclusionTintTested;
+						g_insideOccluderGuardEffective       = Configuration::OcclusionInsideOccluderGuard;
 						g_logEnabledEffective                = Configuration::OcclusionLogPerFrame
 						                                    || Configuration::OcclusionLogAggregate;
 						g_worldLandscapeRoot = dh->worldLandscapeRoot;

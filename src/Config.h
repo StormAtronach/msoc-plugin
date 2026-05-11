@@ -25,6 +25,12 @@ namespace msoc {
         static float OcclusionOccluderMinDimensionExterior;
         static float OcclusionInsideOccluderMarginInterior;
         static float OcclusionInsideOccluderMarginExterior;
+        // Gate for the inside-AABB occluder rejection. When false, the
+        // rejection is skipped — meshes whose tight AABB+margin contains
+        // the eye are still rasterised. Empirically the guard was over-
+        // eager (rejected close-up walls; didn't protect against the
+        // concave-shell failure mode it was written for). Default off.
+        static bool OcclusionInsideOccluderGuard;
 
         static float OcclusionDepthSlackWorldUnits;
         static unsigned int OcclusionOccluderMaxTriangles;
