@@ -37,7 +37,13 @@ namespace msoc {
     // 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). See currentTerrainStep().
     unsigned int Configuration::OcclusionTerrainResolution = 1;
 
-    bool Configuration::OcclusionCullLights                  = true;
+    // Default off in 1.1.0: A/B in a Vivec canton at night showed the
+    // feature is net-negative (~12% FPS regression). Bracketed savings
+    // were real (~480 us/frame less drain/display) but engine-side
+    // relighting churn cost more elsewhere. The C++ knob stays so a
+    // user can flip it via msoc.json if they want to retest on their
+    // hardware; the MCM toggle and hysteresis slider are hidden.
+    bool Configuration::OcclusionCullLights                  = false;
     unsigned int Configuration::OcclusionLightCullHysteresisFrames = 3;
 
     bool Configuration::OcclusionAsyncOccluders             = true;
@@ -130,8 +136,14 @@ const char* hardwareTierName(HardwareTier tier) {
 }
 
 void applyHardwareTierDefaults(HardwareTier tier) {
-    // Only threadpool / async / mask knobs are tier-sensitive. Occluder
-    // selection thresholds are scene-shape-sensitive, not CPU-sensitive.
+    // Threadpool / async / mask knobs are tier-sensitive. So is
+    // OcclusionSkipTerrainOccludees: A/B in a dense Vivec exterior showed
+    // ~1.9 ms/frame `displayUs` saved by letting terrain leaves flow
+    // through TestRect on mid/high tiers (denser mask means a meaningful
+    // fraction of terrain reads OCCLUDED and skips display()). On low
+    // tier the extra TestRect work eats the classifyBudget, so the
+    // bypass stays on. Occluder *selection* thresholds (radius/dim/etc.)
+    // remain scene-shape-sensitive only.
     switch (tier) {
         case HardwareTier::Low:
             // SSE4.1 or ≤4 threads: fixed per-frame threadpool tax
@@ -148,6 +160,9 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionMaskHeight     = 128;
             Configuration::OcclusionRasterizeBudgetUs = 1500;
             Configuration::OcclusionClassifyBudgetUs  = 1500;
+            // Keep the bypass on — classifyUs headroom is tight here
+            // and the displayUs win is smaller (the mask is also smaller).
+            Configuration::OcclusionSkipTerrainOccludees = true;
             break;
 
         case HardwareTier::Mid:
@@ -162,6 +177,7 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionMaskHeight     = 192;
             Configuration::OcclusionRasterizeBudgetUs = 3000;
             Configuration::OcclusionClassifyBudgetUs  = 3000;
+            Configuration::OcclusionSkipTerrainOccludees = false;
             break;
 
         case HardwareTier::High:
@@ -173,6 +189,7 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionMaskHeight     = 256;
             Configuration::OcclusionRasterizeBudgetUs = 0;
             Configuration::OcclusionClassifyBudgetUs  = 0;
+            Configuration::OcclusionSkipTerrainOccludees = false;
             break;
     }
 }

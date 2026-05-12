@@ -29,8 +29,10 @@ local default_config = {
     OcclusionAggregateTerrain           = 1,
     OcclusionTerrainResolution          = 1,
 
-    -- Light culling.
-    OcclusionCullLights                 = true,
+    -- Light culling. Default off in 1.1.0; A/B showed the feature is
+    -- net-negative on the tested hardware. Hidden from the MCM; native
+    -- key still respected if a user sets it to true via msoc.json.
+    OcclusionCullLights                 = false,
     OcclusionLightCullHysteresisFrames  = 3,
 
     -- Occluder selection (split per scene: interiors favour smaller

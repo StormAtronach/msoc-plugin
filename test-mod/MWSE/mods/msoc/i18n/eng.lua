@@ -79,19 +79,6 @@ return {
     ["OcclusionTerrainResolution.option.1"] = "Half (3x3, 8 tris/subcell)",
     ["OcclusionTerrainResolution.option.2"] = "Corners (2x2, 2 tris/subcell)",
 
-    ["OcclusionCullLights.label"] = "Cull occluded lights",
-    ["OcclusionCullLights.description"] = "Every registered NiLight is tested once per frame "
-        .. "against the MSOC depth buffer. Fully-occluded lights are temporarily disabled "
-        .. "for that frame; the light stays in the scene graph but D3D8 treats it as if "
-        .. "its enabled flag were cleared. Main beneficiary: dense interiors with many "
-        .. "behind-wall fixtures.",
-
-    ["OcclusionLightCullHysteresisFrames.label"] = "Light cull hysteresis frames",
-    ["OcclusionLightCullHysteresisFrames.description"] = "Consecutive frames a light's bound "
-        .. "sphere must be reported OCCLUDED before latching to the culled state. Visible "
-        .. "verdicts unlatch immediately, so this only tunes the off-transition. 3 ~ 50 ms "
-        .. "at 60 FPS; 10 ~ 170 ms.",
-
     ["OcclusionTemporalCoherenceFrames.label"] = "Temporal coherence frames",
     ["OcclusionTemporalCoherenceFrames.description"] = "Frames to reuse a deferred shape's "
         .. "visibility verdict before re-querying. 0 disables the cache; higher values skip "

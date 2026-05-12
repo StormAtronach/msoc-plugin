@@ -510,6 +510,15 @@ namespace msoc::patch::occlusion {
 	// Forensics watchdog reads this for "time since last clean exit."
 	static std::atomic<uint64_t> g_lastFrameEndTimeMs{0};
 
+	// Frame-time sampling for per-window FPS logging. Microsecond precision
+	// (the existing watchdog timestamp is millisecond, too coarse for a
+	// per-frame delta). `g_windowFrameTimeUs` is the running sum since the
+	// last log emission, `g_windowFrameCount` the matching frame count;
+	// divide for the window average and zero both inside the log block.
+	static uint64_t g_prevFrameEndUs    = 0;
+	static uint64_t g_windowFrameTimeUs = 0;
+	static uint64_t g_windowFrameCount  = 0;
+
 	static bool ensureMSOCResourcesMatchConfig();
 
 	// ============================================================
@@ -1033,17 +1042,36 @@ namespace msoc::patch::occlusion {
 			return true;
 		}
 
-		// Captured on the AVObject base so worldBound comparisons are
-		// offsetof-stable across NiLight subclasses (Point/Spot/
-		// Directional/Ambient all share this layout).
-		NI::AVObject* const av = light;
-		const float cx = av->worldBoundOrigin.x;
-		const float cy = av->worldBoundOrigin.y;
-		const float cz = av->worldBoundOrigin.z;
-		const float cr = av->worldBoundRadius;
+		// Only NiPointLight is spatially cullable. Directional / ambient
+		// lights affect the scene globally and must never be tested. The
+		// specular.r overload below is point-light-specific (Bethesda's
+		// modder-set fade radius); other light types may carry non-zero
+		// specular for actual specular colour, so we can't filter by
+		// that alone — we'd dim the menu / sun light at unlucky angles.
+		if (!light->isInstanceOfType(NI::RTTIStaticPtr::NiPointLight)) {
+			return true;
+		}
 
-		// Degenerate bound: zero-radius lights are ambients or fresh
-		// instances whose worldBound hasn't propagated yet. Pass through.
+		// Position + radius for the occlusion test:
+		//   - worldTransform.translation: live engine-computed transform.
+		//     worldBoundOrigin / worldBoundRadius look tempting but they
+		//     stay uncomputed for most NiLights (the engine never asks
+		//     for their bounding volume), so they degenerate to (0,0,0)/0.
+		//     Same trap MGE-XE's many-lights producer hit (see
+		//     occlusion-and-rendering.md §12).
+		//   - specular.r: Bethesda overloaded NI::Light::specular.r as the
+		//     modder-set fade radius. The engine's per-object light
+		//     selection at 0x4D2F40 uses this and culls lights with
+		//     radius=0 from every object — match its behavior here so we
+		//     never test a light the engine itself wouldn't render.
+		const TES3::Vector3& t = light->worldTransform.translation;
+		const float cx = t.x;
+		const float cy = t.y;
+		const float cz = t.z;
+		const float cr = light->specular.r;
+
+		// PointLight with no modder-set radius — engine wouldn't render
+		// it on most objects anyway, so don't bother testing.
 		if (cr <= 0.0f) {
 			return true;
 		}
@@ -2576,12 +2604,30 @@ namespace msoc::patch::occlusion {
 			// frame freezes mid-body, MSOC.forensics.txt shows
 			// sinceFrameEndMs growing — freeze is inside MSOC. If it
 			// stays near 250ms during a freeze, the freeze is upstream.
-			g_lastFrameEndTimeMs.store(
-				static_cast<uint64_t>(
-					std::chrono::duration_cast<std::chrono::milliseconds>(
-						std::chrono::steady_clock::now()
-							.time_since_epoch()).count()),
+			const auto frameEndNowUs = static_cast<uint64_t>(
+				std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now()
+						.time_since_epoch()).count());
+			g_lastFrameEndTimeMs.store(frameEndNowUs / 1000,
 				std::memory_order_relaxed);
+			// Accumulate frame-to-frame delta into the per-window window
+			// so the log emission can publish an average FPS. Skip the
+			// first frame (no prior sample) to avoid a giant first delta.
+			// Gated on the log channels for symmetry with the rest of
+			// the diagnostic surface; first window after a mid-session
+			// toggle reports avgFrameUs=0 until samples accumulate.
+			if (g_logEnabledEffective) {
+				if (g_prevFrameEndUs != 0) {
+					g_windowFrameTimeUs += (frameEndNowUs - g_prevFrameEndUs);
+					++g_windowFrameCount;
+				}
+				g_prevFrameEndUs = frameEndNowUs;
+			}
+			else {
+				// Reset so a flip-on later doesn't fold in a stale delta
+				// spanning the off-period.
+				g_prevFrameEndUs = 0;
+			}
 
 			// Cumulative counters survive across frames so rare OCCLUDED
 			// events — scenes where one building sits squarely behind
@@ -2652,6 +2698,18 @@ namespace msoc::patch::occlusion {
 					<< " landCacheHit=" << g_landCacheHits
 					<< " landCacheMiss=" << g_landCacheMisses
 					<< " landCacheEvict=" << g_landCacheEvictions
+					// Light-cull A/B counters. lightCullMiss == lightsTested
+					// (every miss runs the MSOC test); kept separate for
+					// symmetry with other *Hit/Miss pairs.
+					<< " lightCullHit=" << g_lightCullCacheHits
+					<< " lightCullMiss=" << g_lightCullCacheMisses
+					<< " lightOccluded=" << g_lightsOccluded
+					<< " lightCacheSize=" << g_lightCullCache.size()
+					// Average per-frame time across this sample window.
+					// 1e6 / avgFrameUs = average FPS. Reset right after.
+					<< " avgFrameUs=" << (g_windowFrameCount
+						? (g_windowFrameTimeUs / g_windowFrameCount) : 0)
+					<< " framesInWin=" << g_windowFrameCount
 					<< " tcHit=" << g_drainCacheHits
 					<< " tcMiss=" << g_drainCacheMisses
 					<< " tcSize=" << g_drainCache.size()
@@ -2692,6 +2750,10 @@ namespace msoc::patch::occlusion {
 					<< " maxMainAttemptsSess=" << g_maxMainCamCullShowAttemptsSession
 					<< " cumul=" << totalOccluded << "/" << totalTested
 					<< "(vc=" << totalViewCulled << ")" << std::endl;
+				// Reset the per-window frame-time accumulator so the next
+				// log line reflects its own window only.
+				g_windowFrameTimeUs = 0;
+				g_windowFrameCount  = 0;
 			}
 		}
 	}

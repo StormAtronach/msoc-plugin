@@ -2,9 +2,10 @@
 
 CPU-side occlusion culling for Morrowind. Each frame the plugin software-
 rasterizes a coarse depth mask from opaque near-scene geometry, then tests
-every small NiTriShape leaf against it before the engine draws it. Leaves
-that fall fully behind the mask are skipped — fewer GPU draw calls, fewer
-vertex-shader invocations on geometry the player would never have seen.
+every small `NiTriBasedGeom` leaf (both `NiTriShape` and `NiTriStrips`)
+against it before the engine draws it. Leaves that fall fully behind the
+mask are skipped — fewer GPU draw calls, fewer vertex-shader invocations
+on geometry the player would never have seen.
 
 This is the **near-scene** half of the work and runs standalone — no extra
 mods required beyond MWSE.
@@ -15,6 +16,23 @@ The MGE-XE side of this integration **is not yet released upstream** —
 the work lives on a development branch and will land in a future MGE-XE
 release. Until then the plugin's distant-statics path is dormant, and the
 near-scene culling is what you get.
+
+## What's new in 1.1.0
+
+- **NiTriStrips are now valid occluders.** Vivec architecture and large
+  swathes of vanilla statics ship as NiTriStrips rather than NiTriShape —
+  in 1.0 they were silently skipped and contributed nothing to the mask.
+- **The inside-AABB occluder guard is opt-in now** via the new
+  `OcclusionInsideOccluderGuard` setting (default off). The old rejection
+  rule was over-eager and ate close-up walls; turning it off raises the
+  lifetime cull rate by ~7 percentage points without visual regressions.
+  Set it back to `true` in `msoc.json` if you want the 1.0 behavior.
+- **Per-instance occluder eligibility cache** removes a ~1.2–1.8 ms/frame
+  hidden cost on dense scenes (the per-vertex world-transform that ran on
+  every static mesh every frame). After cell warmup the cache hits at
+  ≥99.9% and rebuilds on cell change.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the longer write-up.
 
 ## Hardware notes
 

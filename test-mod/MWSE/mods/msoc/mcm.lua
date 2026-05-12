@@ -137,20 +137,11 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
-    main:createOnOffButton({
-        label       = i18n("OcclusionCullLights.label"),
-        description = i18n("OcclusionCullLights.description"),
-        configKey   = "OcclusionCullLights",
-        callback    = applyChange,
-    })
-
-    main:createSlider({
-        label       = i18n("OcclusionLightCullHysteresisFrames.label"),
-        description = i18n("OcclusionLightCullHysteresisFrames.description"),
-        min = 0, max = 10, step = 1, jump = 5,
-        configKey   = "OcclusionLightCullHysteresisFrames",
-        callback    = applyChange,
-    })
+    -- The "Cull occluded lights" toggle and its hysteresis slider were
+    -- exposed in 1.0.0 but removed from the MCM in 1.1.0 after the
+    -- feature tested net-negative (~12% FPS regression). The native
+    -- knob `OcclusionCullLights` is still read from msoc.json so a
+    -- power user can flip it on for re-testing.
 
     main:createSlider({
         label       = i18n("OcclusionTemporalCoherenceFrames.label"),
