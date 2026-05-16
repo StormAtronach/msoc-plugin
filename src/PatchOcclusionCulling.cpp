@@ -413,6 +413,12 @@ namespace msoc::patch::occlusion {
 	// 0x6BB7D4. Iterated lock-free from the render thread.
 	static std::vector<LightObservedCallback> g_lightObservers;
 
+	// Visible-geom observers — registered by external consumers (MGE-XE)
+	// to receive the MSOC-culled visible set before display() is called.
+	static std::vector<VisibleGeomCallback> g_visibleGeomObservers;
+	static std::vector<void*>  g_visCallbackNodes;   // reused each frame, avoids alloc
+	static std::vector<float>  g_visCallbackBounds;  // xyzr per node, reused each frame
+
 	// ============================================================
 	// Frame counters & diagnostic state
 	// ============================================================
@@ -1006,6 +1012,17 @@ namespace msoc::patch::occlusion {
 		if (it != g_lightObservers.end()) {
 			g_lightObservers.erase(it);
 		}
+	}
+
+	void registerVisibleGeomCallback(VisibleGeomCallback cb) {
+		if (!cb) return;
+		if (std::find(g_visibleGeomObservers.begin(), g_visibleGeomObservers.end(), cb)
+				!= g_visibleGeomObservers.end()) return;
+		g_visibleGeomObservers.push_back(cb);
+	}
+	void unregisterVisibleGeomCallback(VisibleGeomCallback cb) {
+		auto it = std::find(g_visibleGeomObservers.begin(), g_visibleGeomObservers.end(), cb);
+		if (it != g_visibleGeomObservers.end()) g_visibleGeomObservers.erase(it);
 	}
 
 	// Called from the naked hook at 0x6bb7d4 (replacing the original
@@ -2109,6 +2126,24 @@ namespace msoc::patch::occlusion {
 		// terrain submissions count as occluders too — 40k hill triangles
 		// can still cull deferred leaves.
 		if (g_rasterizedAsOccluder == 0 && g_aggregateTerrainLands == 0) {
+			if (!g_visibleGeomObservers.empty()) {
+				const size_t nFast = g_pendingDisplays.size();
+				g_visCallbackNodes.clear();
+				g_visCallbackBounds.clear();
+				g_visCallbackNodes.reserve(nFast);
+				g_visCallbackBounds.reserve(nFast * 4);
+				for (size_t i = 0; i < nFast; ++i) {
+					const auto& p = g_pendingDisplays[i];
+					g_visCallbackNodes.push_back(p.shape);
+					g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.x);
+					g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.y);
+					g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.z);
+					g_visCallbackBounds.push_back(p.shape->worldBoundRadius);
+				}
+				for (const auto cb : g_visibleGeomObservers)
+					cb(g_visCallbackNodes.data(), g_visCallbackBounds.data(),
+					   (int)g_visCallbackNodes.size());
+			}
 			ScopedUsAccumulator tt(g_drainDisplayUs);
 			for (const auto& p : g_pendingDisplays) {
 				p.shape->vTable.asAVObject->display(p.shape, p.camera);
@@ -2163,6 +2198,29 @@ namespace msoc::patch::occlusion {
 		g_classifyUs = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(
 				std::chrono::steady_clock::now() - classifyT0).count());
+
+		// Fire visible-geom callback: give external consumers (e.g. MGE-XE) the exact
+		// set of nodes Morrowind will draw, before any display() calls.
+		if (!g_visibleGeomObservers.empty()) {
+			g_visCallbackNodes.clear();
+			g_visCallbackBounds.clear();
+			g_visCallbackNodes.reserve(n);
+			g_visCallbackBounds.reserve(n * 4);
+			for (size_t i = 0; i < n; ++i) {
+				const auto& s = g_drainSlots[i];
+				if (s.verdict == DrainVerdict::Occluded ||
+				    s.verdict == DrainVerdict::CachedOccluded) continue;
+				const auto& p = g_pendingDisplays[i];
+				g_visCallbackNodes.push_back(p.shape);
+				g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.x);
+				g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.y);
+				g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.z);
+				g_visCallbackBounds.push_back(p.shape->worldBoundRadius);
+			}
+			for (const auto cb : g_visibleGeomObservers)
+				cb(g_visCallbackNodes.data(), g_visCallbackBounds.data(),
+				   (int)g_visCallbackNodes.size());
+		}
 
 		// Shared handler for OCCLUDED verdicts (fresh + cached paths).
 		auto handleOccluded = [&](const PendingDisplay& p) {
@@ -3576,6 +3634,20 @@ void __cdecl mwse_unregisterLightObservedCallback(void(__cdecl* cb)(void* niLigh
 	using Typed = msoc::patch::occlusion::LightObservedCallback;
 	msoc::patch::occlusion::unregisterLightObservedCallback(
 		reinterpret_cast<Typed>(cb));
+}
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_registerVisibleGeomCallback(
+		void(__cdecl* cb)(void* const*, const float*, int)) {
+	using Typed = msoc::patch::occlusion::VisibleGeomCallback;
+	msoc::patch::occlusion::registerVisibleGeomCallback(reinterpret_cast<Typed>(cb));
+}
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_unregisterVisibleGeomCallback(
+		void(__cdecl* cb)(void* const*, const float*, int)) {
+	using Typed = msoc::patch::occlusion::VisibleGeomCallback;
+	msoc::patch::occlusion::unregisterVisibleGeomCallback(reinterpret_cast<Typed>(cb));
 }
 
 // Mask query exports. Returns MWSE_OCC_* codes (0=Visible, 1=Occluded,
