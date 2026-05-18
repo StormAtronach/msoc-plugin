@@ -413,6 +413,12 @@ namespace msoc::patch::occlusion {
 	// 0x6BB7D4. Iterated lock-free from the render thread.
 	static std::vector<LightObservedCallback> g_lightObservers;
 
+	// Visible-geom observers — registered by external consumers (MGE-XE)
+	// to receive the MSOC-culled visible set before display() is called.
+	static std::vector<VisibleGeomCallback> g_visibleGeomObservers;
+	static std::vector<void*>  g_visCallbackNodes;   // reused each frame, avoids alloc
+	static std::vector<float>  g_visCallbackBounds;  // xyzr per node, reused each frame
+
 	// ============================================================
 	// Frame counters & diagnostic state
 	// ============================================================
@@ -1006,6 +1012,17 @@ namespace msoc::patch::occlusion {
 		if (it != g_lightObservers.end()) {
 			g_lightObservers.erase(it);
 		}
+	}
+
+	void registerVisibleGeomCallback(VisibleGeomCallback cb) {
+		if (!cb) return;
+		if (std::find(g_visibleGeomObservers.begin(), g_visibleGeomObservers.end(), cb)
+				!= g_visibleGeomObservers.end()) return;
+		g_visibleGeomObservers.push_back(cb);
+	}
+	void unregisterVisibleGeomCallback(VisibleGeomCallback cb) {
+		auto it = std::find(g_visibleGeomObservers.begin(), g_visibleGeomObservers.end(), cb);
+		if (it != g_visibleGeomObservers.end()) g_visibleGeomObservers.erase(it);
 	}
 
 	// Called from the naked hook at 0x6bb7d4 (replacing the original
@@ -2109,6 +2126,24 @@ namespace msoc::patch::occlusion {
 		// terrain submissions count as occluders too — 40k hill triangles
 		// can still cull deferred leaves.
 		if (g_rasterizedAsOccluder == 0 && g_aggregateTerrainLands == 0) {
+			if (!g_visibleGeomObservers.empty()) {
+				const size_t nFast = g_pendingDisplays.size();
+				g_visCallbackNodes.clear();
+				g_visCallbackBounds.clear();
+				g_visCallbackNodes.reserve(nFast);
+				g_visCallbackBounds.reserve(nFast * 4);
+				for (size_t i = 0; i < nFast; ++i) {
+					const auto& p = g_pendingDisplays[i];
+					g_visCallbackNodes.push_back(p.shape);
+					g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.x);
+					g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.y);
+					g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.z);
+					g_visCallbackBounds.push_back(p.shape->worldBoundRadius);
+				}
+				for (const auto cb : g_visibleGeomObservers)
+					cb(g_visCallbackNodes.data(), g_visCallbackBounds.data(),
+					   (int)g_visCallbackNodes.size());
+			}
 			ScopedUsAccumulator tt(g_drainDisplayUs);
 			for (const auto& p : g_pendingDisplays) {
 				p.shape->vTable.asAVObject->display(p.shape, p.camera);
@@ -2163,6 +2198,29 @@ namespace msoc::patch::occlusion {
 		g_classifyUs = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(
 				std::chrono::steady_clock::now() - classifyT0).count());
+
+		// Fire visible-geom callback: give external consumers (e.g. MGE-XE) the exact
+		// set of nodes Morrowind will draw, before any display() calls.
+		if (!g_visibleGeomObservers.empty()) {
+			g_visCallbackNodes.clear();
+			g_visCallbackBounds.clear();
+			g_visCallbackNodes.reserve(n);
+			g_visCallbackBounds.reserve(n * 4);
+			for (size_t i = 0; i < n; ++i) {
+				const auto& s = g_drainSlots[i];
+				if (s.verdict == DrainVerdict::Occluded ||
+				    s.verdict == DrainVerdict::CachedOccluded) continue;
+				const auto& p = g_pendingDisplays[i];
+				g_visCallbackNodes.push_back(p.shape);
+				g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.x);
+				g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.y);
+				g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.z);
+				g_visCallbackBounds.push_back(p.shape->worldBoundRadius);
+			}
+			for (const auto cb : g_visibleGeomObservers)
+				cb(g_visCallbackNodes.data(), g_visCallbackBounds.data(),
+				   (int)g_visCallbackNodes.size());
+		}
 
 		// Shared handler for OCCLUDED verdicts (fresh + cached paths).
 		auto handleOccluded = [&](const PendingDisplay& p) {
@@ -3515,36 +3573,57 @@ namespace msoc::patch::occlusion {
 			return kMaskQueryNotReady;
 		}
 
-		// 8 corners = center + (±vx ±vy ±vz). (x, y, z, w) stride 16.
-		float corners[8 * 4];
+		// Project the 8 corners through the snapshot matrix and test the
+		// covered screen-space rectangle against the mask. This keeps the
+		// query tied to the bbox footprint instead of a loose sphere, while
+		// avoiding TestTriangles false positives on tall slabs where only the
+		// bottom face is behind occluders.
 		const float sx[8] = { -1, +1, +1, -1, -1, +1, +1, -1 };
 		const float sy[8] = { -1, -1, +1, +1, -1, -1, +1, +1 };
 		const float sz[8] = { -1, -1, -1, -1, +1, +1, +1, +1 };
+		const float* m = g_worldToClip_prev;
+		float ndcMinX = +FLT_MAX;
+		float ndcMinY = +FLT_MAX;
+		float ndcMaxX = -FLT_MAX;
+		float ndcMaxY = -FLT_MAX;
+		float wMin = +FLT_MAX;
+
 		for (int i = 0; i < 8; ++i) {
-			corners[i * 4 + 0] = cx + sx[i] * vxX + sy[i] * vyX + sz[i] * vzX;
-			corners[i * 4 + 1] = cy + sx[i] * vxY + sy[i] * vyY + sz[i] * vzY;
-			corners[i * 4 + 2] = cz + sx[i] * vxZ + sy[i] * vyZ + sz[i] * vzZ;
-			corners[i * 4 + 3] = 1.0f;
+			const float wx = cx + sx[i] * vxX + sy[i] * vyX + sz[i] * vzX;
+			const float wy = cy + sx[i] * vxY + sy[i] * vyY + sz[i] * vzY;
+			const float wz = cz + sx[i] * vxZ + sy[i] * vyZ + sz[i] * vzZ;
+			const float clipX = wx * m[0] + wy * m[4] + wz * m[8] + m[12];
+			const float clipY = wx * m[1] + wy * m[5] + wz * m[9] + m[13];
+			const float clipW = wx * m[3] + wy * m[7] + wz * m[11] + m[15];
+
+			if (clipW <= kNearClipW) {
+				return kMaskQueryVisible;
+			}
+
+			const float invW = 1.0f / clipW;
+			const float ndcX = clipX * invW;
+			const float ndcY = clipY * invW;
+			ndcMinX = std::min(ndcMinX, ndcX);
+			ndcMinY = std::min(ndcMinY, ndcY);
+			ndcMaxX = std::max(ndcMaxX, ndcX);
+			ndcMaxY = std::max(ndcMaxY, ndcY);
+			wMin = std::min(wMin, clipW);
 		}
 
-		static const unsigned int tris[12 * 3] = {
-			0, 1, 2,  0, 2, 3,   // -Z face (0-1-2-3)
-			4, 6, 5,  4, 7, 6,   // +Z face (4-5-6-7)
-			0, 5, 1,  0, 4, 5,   // -Y face (0-1-5-4)
-			3, 2, 6,  3, 6, 7,   // +Y face (3-2-6-7)
-			0, 3, 7,  0, 7, 4,   // -X face (0-3-7-4)
-			1, 5, 6,  1, 6, 2,   // +X face (1-2-6-5)
-		};
+		wMin -= g_depthSlackWorldUnitsEffective * g_wGradMag_prev;
+		if (wMin <= kNearClipW) {
+			return kMaskQueryVisible;
+		}
 
-		const ::MaskedOcclusionCulling::VertexLayout layout(16, 4, 12); // stride, offY, offW
+		ndcMinX = std::max(ndcMinX, -1.0f);
+		ndcMinY = std::max(ndcMinY, -1.0f);
+		ndcMaxX = std::min(ndcMaxX, 1.0f);
+		ndcMaxY = std::min(ndcMaxY, 1.0f);
+		if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY) {
+			return kMaskQueryViewCulled;
+		}
 
-		// Test against the SNAPSHOT buffer with the SNAPSHOT matrix.
-		const auto result = g_msoc_prev->TestTriangles(
-			corners, tris, 12,
-			g_worldToClip_prev,
-			::MaskedOcclusionCulling::BACKFACE_NONE,
-			::MaskedOcclusionCulling::CLIP_PLANE_ALL,
-			layout);
+		const auto result = g_msoc_prev->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
 
 		switch (result) {
 		case ::MaskedOcclusionCulling::VISIBLE:     return kMaskQueryVisible;
@@ -3576,6 +3655,20 @@ void __cdecl mwse_unregisterLightObservedCallback(void(__cdecl* cb)(void* niLigh
 	using Typed = msoc::patch::occlusion::LightObservedCallback;
 	msoc::patch::occlusion::unregisterLightObservedCallback(
 		reinterpret_cast<Typed>(cb));
+}
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_registerVisibleGeomCallback(
+		void(__cdecl* cb)(void* const*, const float*, int)) {
+	using Typed = msoc::patch::occlusion::VisibleGeomCallback;
+	msoc::patch::occlusion::registerVisibleGeomCallback(reinterpret_cast<Typed>(cb));
+}
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_unregisterVisibleGeomCallback(
+		void(__cdecl* cb)(void* const*, const float*, int)) {
+	using Typed = msoc::patch::occlusion::VisibleGeomCallback;
+	msoc::patch::occlusion::unregisterVisibleGeomCallback(reinterpret_cast<Typed>(cb));
 }
 
 // Mask query exports. Returns MWSE_OCC_* codes (0=Visible, 1=Occluded,

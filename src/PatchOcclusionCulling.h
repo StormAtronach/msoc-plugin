@@ -34,6 +34,17 @@ namespace msoc::patch::occlusion {
 	void registerLightObservedCallback(LightObservedCallback cb);
 	void unregisterLightObservedCallback(LightObservedCallback cb);
 
+	// Fires after all drain-slot verdicts are assigned but BEFORE any display() calls.
+	// Receives every node whose verdict is NOT Occluded or CachedOccluded — i.e., exactly
+	// the set that Morrowind will draw this frame. Callback is synchronous on the render
+	// thread; MGE renders depth/shadows inside it, then returns so display() can proceed.
+	// shapes[i] and boundsXYZR[i*4..i*4+3] are parallel arrays. bounds = (x, y, z, r).
+	// Do not mutate the scene graph or retain pointers past the callback's return.
+	using VisibleGeomCallback = void(__cdecl*)(void* const* shapes,
+	                                           const float* boundsXYZR, int count);
+	void registerVisibleGeomCallback(VisibleGeomCallback cb);
+	void unregisterVisibleGeomCallback(VisibleGeomCallback cb);
+
 	// Mask query API. Result codes are frozen ABI — values match the
 	// mwse_testOcclusion* C exports below.
 	enum MaskQueryResult {
@@ -62,10 +73,9 @@ namespace msoc::patch::occlusion {
 		float maxX, float maxY, float maxZ);
 
 	// World-space OBB test. Expands center + (±vx ±vy ±vz) into 8
-	// corners and runs MOC's TestTriangles against the 12 box faces.
-	// Tighter than testOcclusionSphere for non-spherical shapes
-	// (architectural giants). ~1-5μs per call vs ~100ns for TestRect;
-	// gate on a radius threshold before using.
+	// corners, projects their screen-space rectangle, and tests that
+	// footprint against the mask. Tighter than testOcclusionSphere for
+	// non-spherical shapes while remaining conservative for tall slabs.
 	MaskQueryResult testOcclusionOBB(
 		float cx, float cy, float cz,
 		float vxX, float vxY, float vxZ,
@@ -127,6 +137,12 @@ void __cdecl mwse_registerLightObservedCallback(void(__cdecl* cb)(void* niLight)
 
 extern "C" __declspec(dllexport)
 void __cdecl mwse_unregisterLightObservedCallback(void(__cdecl* cb)(void* niLight));
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_registerVisibleGeomCallback(void(__cdecl* cb)(void* const*, const float*, int));
+
+extern "C" __declspec(dllexport)
+void __cdecl mwse_unregisterVisibleGeomCallback(void(__cdecl* cb)(void* const*, const float*, int));
 
 // MSOC mask query exports. Return values match
 // msoc::patch::occlusion::MaskQueryResult:
