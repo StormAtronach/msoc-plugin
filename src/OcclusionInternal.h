@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <iosfwd>
 
 namespace msoc::patch::occlusion {
 
@@ -97,6 +98,21 @@ void updateLights_enabledRead_hook();
 // mode rasterizes a 1D silhouette curtain.
 void rasterizeAggregateTerrain(NI::Camera* camera);
 void rasterizeAggregateTerrainHorizon(NI::Camera* camera);
+
+// Mask resource lifecycle (MaskResources.cpp). create/ensure are called by
+// installPatches and the detour's top-of-frame reconcile; destroy by the
+// create-failure paths and a toggle-off.
+bool createMSOCResources(std::ostream& log);
+void destroyMSOCResources(std::ostream& log);
+bool ensureMSOCResourcesMatchConfig();
+
+// Drop queued external-occluder submissions. Defined in the core TU (next to
+// the queue); called by destroyMSOCResources on teardown.
+void clearExternalOccluderQueue();
+
+// Live mask readiness: true once the depth buffer reflects the complete
+// vanilla main-scene occluder set; cleared at the next ClearBuffer.
+extern bool g_maskReady;
 
 // Live projection forwarder + clip type alias, shared by the query, drain,
 // and terrain paths. Header-inline so the hot path still inlines fully.

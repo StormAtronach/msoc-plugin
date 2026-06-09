@@ -97,6 +97,8 @@ if(MSOC_BUILD_DLL)
         src/LightCulling.cpp
         # Terrain occluder aggregation (Raster + Horizon modes).
         src/TerrainAggregation.cpp
+        # MSOC mask buffer + threadpool lifecycle (create/destroy/reconcile).
+        src/MaskResources.cpp
         # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
         # of the patch TU. Forward to the msoc::patch::occlusion public API.
         src/Exports.cpp
