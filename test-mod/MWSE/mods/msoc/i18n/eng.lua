@@ -200,6 +200,13 @@ return {
         .. "cumulative culler counters (rasterised, occluded/tested, view-culled, drain "
         .. "timings). For steady-state profiling.",
 
+    ["OcclusionLogCellCross.label"] = "Log cell-cross spikes",
+    ["OcclusionLogCellCross.description"] = "Writes the full stats line on each cell change "
+        .. "and the next several frames (tagged cellCross=0..7), so the cross spike's phase "
+        .. "breakdown is visible. Watch frameDeltaUs (spike size), cellWipeUs (cache wipe), "
+        .. "and the rasterize/classify/aggTerrain timings + cache-miss counts. The 300-frame "
+        .. "aggregate sample almost never lands on a cross, so use this to profile crossings.",
+
     ["OcclusionForensicsWatchdog.label"] = "Freeze-forensics watchdog",
     ["OcclusionForensicsWatchdog.description"] = "Spawns a background thread that polls the "
         .. "MSOC pipeline's checkpoints every 250 ms and overwrites MSOC.forensics.txt next to "

@@ -26,6 +26,8 @@
 #include "NIProperty.h"
 #include "NITArray.h"
 #include "NITransform.h"
+#include "NIPoint3.h"
+#include "NIPoint4.h"
 #include "NITriShape.h"
 #include "NITriShapeData.h"
 
@@ -84,13 +86,13 @@ namespace msoc::patch::occlusion {
 		return 6;
 	}
 
-	static inline const TES3::Vector4* cameraCullingPlane(NI::Camera* cam, int i) {
+	static inline const NI::Point4* cameraCullingPlane(NI::Camera* cam, int i) {
 		return &cam->cullingPlanes[i];
 	}
 
 	static inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
 		auto* base = reinterpret_cast<char*>(&cam->cullingPlanes[0]);
-		return reinterpret_cast<uint32_t*>(base + sizeof(TES3::Vector4) * 6);
+		return reinterpret_cast<uint32_t*>(base + sizeof(NI::Point4) * 6);
 	}
 
 	// ============================================================
@@ -430,6 +432,14 @@ namespace msoc::patch::occlusion {
 	// g_drainCache (NI::Node*/NI::AVObject* recycle in the new cell).
 	static TES3::Cell* g_lastCell = nullptr;
 	static uint64_t g_cellChanges = 0;
+	// Cell-cross profiling (Configuration::OcclusionLogCellCross). Set to a
+	// small frame budget when the cell changes; the per-frame stats line is
+	// emitted while it counts down, capturing the cross + the re-population
+	// frames where the caches refill on the miss path. g_cellWipeUs times the
+	// cache-wipe itself; g_lastFrameDeltaUs is this frame's wall time.
+	static int g_cellCrossLogFrames = 0;
+	static uint64_t g_cellWipeUs = 0;
+	static uint64_t g_lastFrameDeltaUs = 0;
 
 	// Phase timers (µs). steady_clock is QPC-backed on MSVC. Rasterize
 	// accumulates each RenderTriangles call; drainPhase wraps the whole
@@ -439,6 +449,11 @@ namespace msoc::patch::occlusion {
 	static uint64_t g_drainPhaseTimeUs = 0;
 	static uint64_t g_classifyUs = 0;
 	static uint64_t g_drainDisplayUs = 0;
+	// Occluder world-space vertex transform (the cache-miss rebuild loop in
+	// rasterizeTriShape). Separate from rasterizeUs (which is the MOC
+	// RenderTriangles call): this is the R*v*s+T + AABB pass that re-runs for
+	// every occluder when the occluder cache is wiped on a cell cross.
+	static uint64_t g_occluderTransformUs = 0;
 
 	// Hybrid phase budgeting (Configuration::Occlusion*BudgetUs):
 	//   Layer 1 — predictive skip: if EMA(last frames) > 2× budget,
@@ -968,7 +983,7 @@ namespace msoc::patch::occlusion {
 	// Sphere straddling the near plane bails as VISIBLE; TestRect can't
 	// project a straddling rect safely.
 	static ::MaskedOcclusionCulling::CullingResult testSphereVisible(
-		const TES3::Vector3& center, float radius) {
+		const NI::Point3& center, float radius) {
 		const ClipXYW c = projectWorld(center.x, center.y, center.z);
 
 		const float wMin = c.w - (radius + g_depthSlackWorldUnitsEffective) * g_wGradMag;
@@ -1081,7 +1096,7 @@ namespace msoc::patch::occlusion {
 		//     selection at 0x4D2F40 uses this and culls lights with
 		//     radius=0 from every object — match its behavior here so we
 		//     never test a light the engine itself wouldn't render.
-		const TES3::Vector3& t = light->worldTransform.translation;
+		const NI::Point3& t = light->worldTransform.translation;
 		const float cx = t.x;
 		const float cy = t.y;
 		const float cz = t.z;
@@ -1109,7 +1124,7 @@ namespace msoc::patch::occlusion {
 		// Miss (or stale) — run MSOC test.
 		++g_lightCullCacheMisses;
 		++g_lightsTested;
-		const TES3::Vector3 center{ cx, cy, cz };
+		const NI::Point3 center{ cx, cy, cz };
 		const auto verdict = testSphereVisible(center, cr);
 		const bool occluded = (verdict == ::MaskedOcclusionCulling::OCCLUDED);
 		if (occluded) ++g_lightsOccluded;
@@ -1176,7 +1191,7 @@ namespace msoc::patch::occlusion {
 	// (g_occluderCache); only re-derived when worldTransform changes.
 	// Returns true on rasterise, false on skip (no data, thin axis,
 	// inside-guard if enabled, or budget gate).
-	static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const TES3::Vector3& eye, OccluderCacheEntry& cache) {
+	static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye, OccluderCacheEntry& cache) {
 		// Phase budget gate. Compares against g_rasterizeTimeUs (sum
 		// of completed RenderTriangles SIMD time), NOT wall-clock-since-
 		// frame-start. The latter would include cullShowBody traversal
@@ -1234,6 +1249,9 @@ namespace msoc::patch::occlusion {
 		const bool xfStale = !cache.geomResolved
 			|| std::memcmp(cache.xfData, &xf, sizeof(cache.xfData)) != 0;
 		if (xfStale) {
+			// Measure the vertex transform + index expansion: dominates the
+			// occluder re-population on a cell cross (occVertVerts).
+			ScopedUsAccumulator transformTimer(g_occluderTransformUs);
 			const auto& R = xf.rotation;
 			const auto& T = xf.translation;
 			const float s = xf.scale;
@@ -2385,7 +2403,8 @@ namespace msoc::patch::occlusion {
 						g_tintTestedEffective                = Configuration::DebugOcclusionTintTested;
 						g_insideOccluderGuardEffective       = Configuration::OcclusionInsideOccluderGuard;
 						g_logEnabledEffective                = Configuration::OcclusionLogPerFrame
-						                                    || Configuration::OcclusionLogAggregate;
+						                                    || Configuration::OcclusionLogAggregate
+						                                    || Configuration::OcclusionLogCellCross;
 						g_worldLandscapeRoot = dh->worldLandscapeRoot;
 						// Stored only on active frames so a disabled-
 						// scene span doesn't spuriously "change cell".
@@ -2431,18 +2450,27 @@ namespace msoc::patch::occlusion {
 			// free them. Both caches key off pointers a cell load can
 			// recycle (per-Land NiNode*, shape AVObject*).
 			g_lastStage = 4;
+			g_cellWipeUs = 0;
 			if (activeCell != g_lastCell) {
-				g_landCache.clear();
-				g_drainCache.clear();
-				g_lightCullCache.clear();
-				g_terrainMembership.clear();
-				g_occluderCache.clear();
-				// Releases our NI::Pointer refs on outgoing-cell shapes
-				// so they can actually be freed. Surviving shapes
-				// (player, inventory) re-enter on next tint.
-				g_tintClones.clear();
+				{
+					// Time just the wipe — the one cross cost the per-frame
+					// timers don't already capture.
+					ScopedUsAccumulator wipeTimer(g_cellWipeUs);
+					g_landCache.clear();
+					g_drainCache.clear();
+					g_lightCullCache.clear();
+					g_terrainMembership.clear();
+					g_occluderCache.clear();
+					// Releases our NI::Pointer refs on outgoing-cell shapes
+					// so they can actually be freed. Surviving shapes
+					// (player, inventory) re-enter on next tint.
+					g_tintClones.clear();
+				}
 				g_lastCell = activeCell;
 				++g_cellChanges;
+				// Profile this cross + the next few frames as the caches
+				// refill on the miss path (the spike isn't just frame 0).
+				g_cellCrossLogFrames = 8;
 			}
 			g_recursiveCalls = 0;
 			g_recursiveAppCulled = 0;
@@ -2533,6 +2561,7 @@ namespace msoc::patch::occlusion {
 				}
 			}
 			g_rasterizeTimeUs = 0;
+			g_occluderTransformUs = 0;
 			g_drainPhaseTimeUs = 0;
 			g_classifyUs = 0;
 			g_drainDisplayUs = 0;
@@ -2676,7 +2705,8 @@ namespace msoc::patch::occlusion {
 			// toggle reports avgFrameUs=0 until samples accumulate.
 			if (g_logEnabledEffective) {
 				if (g_prevFrameEndUs != 0) {
-					g_windowFrameTimeUs += (frameEndNowUs - g_prevFrameEndUs);
+					g_lastFrameDeltaUs = frameEndNowUs - g_prevFrameEndUs;
+					g_windowFrameTimeUs += g_lastFrameDeltaUs;
 					++g_windowFrameCount;
 				}
 				g_prevFrameEndUs = frameEndNowUs;
@@ -2712,8 +2742,15 @@ namespace msoc::patch::occlusion {
 				&& (g_frameCounter % 300) == 0;
 			const bool hadOccluded = Configuration::OcclusionLogPerFrame
 				&& g_queryOccluded > 0;
-			if (baselineTick || hadOccluded) {
+			// Cell-cross channel: fire on the cross frame + the re-population
+			// frames. cellCross=<age> (0 = cross frame). Same line format.
+			const bool cellCrossTick = Configuration::OcclusionLogCellCross
+				&& g_cellCrossLogFrames > 0;
+			if (baselineTick || hadOccluded || cellCrossTick) {
 				log::getLog() << "MSOC: frame " << g_frameCounter
+					<< " cellCross=" << (cellCrossTick ? (8 - g_cellCrossLogFrames) : -1)
+					<< " cellWipeUs=" << g_cellWipeUs
+					<< " frameDeltaUs=" << g_lastFrameDeltaUs
 					<< " rasterized=" << g_rasterizedAsOccluder
 					<< " occluderTris=" << g_occluderTriangles
 					<< " queryOccluded=" << g_queryOccluded
@@ -2775,6 +2812,7 @@ namespace msoc::patch::occlusion {
 					<< " sceneGateSkipped=" << g_skippedSceneGate
 					<< " menuModeSkipped=" << g_skippedMenuMode // cumulative
 					<< " rasterizeUs=" << g_rasterizeTimeUs
+					<< " occXformUs=" << g_occluderTransformUs
 					<< " drainUs=" << g_drainPhaseTimeUs
 					<< " classifyUs=" << g_classifyUs // phase-1 wall (serial = work; parallel = barrier)
 					<< " displayUs=" << g_drainDisplayUs // audit
@@ -2812,6 +2850,12 @@ namespace msoc::patch::occlusion {
 				// log line reflects its own window only.
 				g_windowFrameTimeUs = 0;
 				g_windowFrameCount  = 0;
+			}
+
+			// Count down the cell-cross profiling budget (set to 8 on the
+			// cross); runs every frame so cellCross ages 0..7 then stops.
+			if (g_cellCrossLogFrames > 0) {
+				--g_cellCrossLogFrames;
 			}
 		}
 	}
@@ -2854,6 +2898,8 @@ namespace msoc::patch::occlusion {
 		// leave state inconsistent.
 		resetFrameTints();
 	}
+
+	static void destroyMSOCResources(std::ostream& log);  // complete teardown, used by the create-failure paths
 
 	// Allocate g_msoc + g_threadpool. Idempotent. Returns false on
 	// allocation failure (callers treat as permanent disable). Called
@@ -2967,23 +3013,13 @@ namespace msoc::patch::occlusion {
 			catch (const std::exception& e) {
 				log << "MSOC: threadpool creation threw: " << e.what()
 					<< "; freeing partial state, occlusion disabled this session." << std::endl;
-				if (g_threadpool) {
-					delete g_threadpool;
-					g_threadpool = nullptr;
-				}
-				::MaskedOcclusionCulling::Destroy(g_msoc);
-				g_msoc = nullptr;
+				destroyMSOCResources(log);
 				return false;
 			}
 			catch (...) {
 				log << "MSOC: threadpool creation threw non-std exception; "
 					"freeing partial state, occlusion disabled this session." << std::endl;
-				if (g_threadpool) {
-					delete g_threadpool;
-					g_threadpool = nullptr;
-				}
-				::MaskedOcclusionCulling::Destroy(g_msoc);
-				g_msoc = nullptr;
+				destroyMSOCResources(log);
 				return false;
 			}
 
@@ -3124,7 +3160,7 @@ namespace msoc::patch::occlusion {
 		// 5-byte prologue overwrite — we reimplement the body end-to-end
 		// so no trampoline is needed. Replaces the previous 7-call-site
 		// patch (equivalent coverage; all 7 direct callers land here).
-		mwse::genJumpUnprotected(0x6EB480, reinterpret_cast<DWORD>(CullShow_detour));
+		se::memory::genJumpUnprotected(0x6EB480, reinterpret_cast<DWORD>(CullShow_detour));
 
 		// Call-site wrappers for renderMainScene. We need to call the
 		// original, so call-site wrapping (vs prologue trampoline) is
@@ -3137,7 +3173,7 @@ namespace msoc::patch::occlusion {
 			0x4B50FF, // TES3File_static::createSaveScreenshot
 		};
 		for (auto site : kRenderMainSceneCallSites) {
-			if (mwse::genCallEnforced(site, 0x41C400, wrapperAddr)) {
+			if (se::memory::genCallEnforced(site, 0x41C400, wrapperAddr)) {
 				++renderMainSceneInstalled;
 			}
 			else {
@@ -3154,7 +3190,7 @@ namespace msoc::patch::occlusion {
 		// 0x6bb7d4 with `call shouldLightBeEnabled; nop`. Installed
 		// unconditionally; the detour short-circuits when the feature
 		// is off or MSOC failed to init.
-		mwse::genCallUnprotected(0x6bb7d4,
+		se::memory::genCallUnprotected(0x6bb7d4,
 			reinterpret_cast<DWORD>(updateLights_enabledRead_hook), 6);
 		log << "MSOC: light cull hook installed at 0x6bb7d4 (gated by "
 			<< "Configuration::OcclusionCullLights, default off)." << std::endl;
@@ -3177,7 +3213,7 @@ namespace msoc::patch::occlusion {
 	// NDC constants captured at swap time. Math mirrors testSphereVisible;
 	// kept separate so the in-progress-mask path stays untouched.
 	static ::MaskedOcclusionCulling::CullingResult testSphereVisiblePrev(
-		const TES3::Vector3& center, float radius)
+		const NI::Point3& center, float radius)
 	{
 		// Project center through last frame's world-to-clip.
 		const float* m = g_worldToClip_prev;
@@ -3212,7 +3248,7 @@ namespace msoc::patch::occlusion {
 		if (!isOcclusionMaskReady()) {
 			return kMaskQueryNotReady;
 		}
-		const TES3::Vector3 center(worldX, worldY, worldZ);
+		const NI::Point3 center(worldX, worldY, worldZ);
 		const auto result = testSphereVisiblePrev(center, radius);
 		switch (result) {
 		case ::MaskedOcclusionCulling::VISIBLE:     return kMaskQueryVisible;
@@ -3275,7 +3311,7 @@ namespace msoc::patch::occlusion {
 
 		for (int i = 0; i < count; ++i) {
 			const float* s = centersAndRadii + i * 4;
-			const TES3::Vector3 center(s[0], s[1], s[2]);
+			const NI::Point3 center(s[0], s[1], s[2]);
 			const auto result = testSphereVisiblePrev(center, s[3]);
 			switch (result) {
 			case ::MaskedOcclusionCulling::VISIBLE:     resultsOut[i] = kMaskQueryVisible;    break;

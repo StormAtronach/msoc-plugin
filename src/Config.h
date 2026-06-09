@@ -69,6 +69,11 @@ namespace msoc {
 
         static bool OcclusionLogPerFrame;
         static bool OcclusionLogAggregate;
+        // Cell-cross profiling: emit the full per-frame stats line on the
+        // cell-change frame and the next several re-population frames, so the
+        // cross spike's phase breakdown is visible (the 300-frame sample
+        // almost never lands on a cross). Lines carry cellCross=<age>.
+        static bool OcclusionLogCellCross;
 
         // Restart-only freeze diagnostic: spawns a detached thread that
         // dumps MSOC.forensics.txt every 250ms. Read once in

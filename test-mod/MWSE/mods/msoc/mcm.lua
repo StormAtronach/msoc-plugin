@@ -338,6 +338,12 @@ local function registerModConfig()
         configKey   = "OcclusionLogAggregate",
         callback    = applyChange,
     })
+    logging:createOnOffButton({
+        label       = i18n("OcclusionLogCellCross.label"),
+        description = i18n("OcclusionLogCellCross.description"),
+        configKey   = "OcclusionLogCellCross",
+        callback    = applyChange,
+    })
 
     -- Restart-only diagnostic. The native side reads this once during
     -- installPatches() (which runs before msoc.configure() is ever

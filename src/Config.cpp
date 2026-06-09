@@ -62,6 +62,7 @@ namespace msoc {
 
     bool Configuration::OcclusionLogPerFrame  = false;
     bool Configuration::OcclusionLogAggregate = false;
+    bool Configuration::OcclusionLogCellCross = false;
 
     bool Configuration::OcclusionForensicsWatchdog = false;
 
@@ -238,6 +239,7 @@ int configure(lua_State* L) {
 
     readBool (L, 1, "OcclusionLogPerFrame",                Configuration::OcclusionLogPerFrame);
     readBool (L, 1, "OcclusionLogAggregate",               Configuration::OcclusionLogAggregate);
+    readBool (L, 1, "OcclusionLogCellCross",               Configuration::OcclusionLogCellCross);
 
     // Restart-only — see header. Accepted here so msoc.json round-trips.
     readBool (L, 1, "OcclusionForensicsWatchdog",          Configuration::OcclusionForensicsWatchdog);

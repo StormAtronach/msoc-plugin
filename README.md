@@ -106,6 +106,43 @@ invocations on culled near-scene leaves today, plus distant-statics culling
 once MGE-XE integration ships. How that translates into FPS depends entirely
 on whether your scene was CPU-draw-bound or GPU-bound to begin with.
 
+### Cell-cross cost
+
+Enabling **Log cell-cross spikes** (`OcclusionLogCellCross`) emits the full
+stats line on each cell change and the next several frames, tagged
+`cellCross=<age>` (0 = the cross frame). Profiled in Narsis (Tamriel
+Rebuilt, a dense exterior city) over 17 crossings, the cross "hitch" is two
+frames with different owners:
+
+| Frame             | frame time | vs settled | owner  |
+| ----------------- | ---------- | ---------- | ------ |
+| age 0 (the cross) | ~30 ms     | +1.7 ms    | MSOC   |
+| age 1 (next)      | ~53 ms     | +24 ms     | engine |
+| age 2+ (settled)  | ~28 ms     | settled    | n/a    |
+
+Baseline was ~28 ms (~35 FPS). The big +24 ms spike on age 1 is the engine
+committing/rendering the freshly-loaded cell; MSOC does essentially no work on
+that frame (zero classify steps, zero occluder rebuilds). **The hitch is an
+engine cell-load cost, not an MSOC one.**
+
+MSOC's own cross cost lands entirely on age 0 (~1.7 ms over baseline) and
+breaks down as:
+
+- **cache wipe ~0.9 ms:** releasing the outgoing cell's `NI::Pointer` pins.
+  Because the caches are the last holders of the old cell's shapes by the time
+  the wipe runs, each release that drops a refcount to zero fires that shape's
+  engine destructor. This is the cell-unload teardown deferred onto the cross
+  frame, not `malloc`/`free`.
+- **terrain re-aggregation ~1.1 ms:** rebuilding the merged per-Land occluder
+  for the new cell.
+- **occluder world-vertex re-transform ~0.26 ms for 68k verts** (~4 ns/vert):
+  fast, not a bottleneck.
+
+(The three overlap rather than sum, since the age-0 total is only +1.7 ms.)
+Takeaway: there is no worthwhile MSOC-side cell-cross optimization. Its
+contribution is small, on a separate frame from the hitch, and dominated by
+necessary NI teardown.
+
 ## Installation
 
 Drop the contents of the release archive into your Morrowind `Data Files`

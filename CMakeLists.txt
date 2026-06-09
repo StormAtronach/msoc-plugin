@@ -18,16 +18,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Override via -DMWSE_ROOT=... to test against a different version.
 #
 # The path points at the OUTER MWSE repo root; LuaJIT lives at
-# ${MWSE_ROOT}/deps/LuaJIT/src and the engine struct headers live at
+# ${MWSE_ROOT}/deps/luajit2/src and the engine struct headers live at
 # ${MWSE_ROOT}/MWSE/.
 set(MWSE_ROOT "${CMAKE_SOURCE_DIR}/deps/mwse-upstream"
     CACHE PATH "Path to MWSE source root (outer dir, containing deps/ and MWSE/)")
 
-if(NOT EXISTS "${MWSE_ROOT}/deps/LuaJIT/src/lua51.lib")
+if(NOT EXISTS "${MWSE_ROOT}/deps/luajit2/src/lua51.lib")
     message(FATAL_ERROR
-        "Couldn't find lua51.lib at ${MWSE_ROOT}/deps/LuaJIT/src/. "
-        "Run msvcbuild.bat from a VS x86 dev prompt in that directory, "
-        "or copy the prebuilt lua51.lib from a working MWSE checkout.")
+        "Couldn't find lua51.lib at ${MWSE_ROOT}/deps/luajit2/src/. "
+        "luajit2 is a nested submodule that ships source only — build it "
+        "the way MWSE does: initialise submodules "
+        "(git submodule update --init --recursive), then from a Visual "
+        "Studio x86 developer prompt run, in that directory, "
+        "`msvcbuild.bat lua52compat` to produce lua51.lib.")
 endif()
 
 if(NOT EXISTS "${MWSE_ROOT}/MWSE/NIAVObject.h"
@@ -49,6 +52,17 @@ set(MOC_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/msoc/CullingThreadpool.cpp"
 )
 
+# SharedSE engine sources, compiled in full — the same model MGE-XE uses
+# (it imports SharedSE.vcxitems). SharedSE's NI .cpp cross-reference each
+# other (NIObject -> NIStream/NIRTTI, NIAVObject -> NINode/NITransform/
+# NIMatrix33, NITriBasedGeometryData -> NISkinInstance/NIGeometry/NIBound,
+# ...), so the plugin compiles the whole set rather than hand-rolling
+# forwarders for the handful of methods it calls. They build with the PCH,
+# so stdafx.h's SharedSE prelude (SE_TARGETS_MW + the SE_*_FNADDR address
+# sets; SE_USE_LUA / SE_IS_MWSE left off) drives the engine-address thunks
+# and gates out the Lua / MWSE-private surface. MemoryUtil.cpp is in here too.
+file(GLOB SHAREDSE_SOURCES CONFIGURE_DEPENDS "${MWSE_ROOT}/SharedSE/*.cpp")
+
 add_library(msoc SHARED
     src/plugin.cpp
     src/Log.cpp
@@ -66,11 +80,7 @@ add_library(msoc SHARED
     # UIE-style: each body is a one-liner reinterpret_cast to a fixed
     # Morrowind.exe address. Pure engine thunks, no MWSE runtime dep.
     src/MWSEImports.cpp
-    # Compile MWSE's own MemoryUtil.cpp directly rather than rewriting
-    # the gen*Unprotected helpers. Only adaptation: a tiny mwse::log
-    # forwarder in src/Log.cpp points MWSE's log::getLog() calls at
-    # our msoc::log sink.
-    "${MWSE_ROOT}/MWSE/MemoryUtil.cpp"
+    ${SHAREDSE_SOURCES}
     ${MOC_SOURCES}
 )
 
@@ -110,20 +120,17 @@ set_source_files_properties(
 # LuaManager shim because the plugin doesn't bind a sol usertype.
 target_include_directories(msoc PRIVATE
     "${MWSE_ROOT}/MWSE"
-    # SharedSE/ holds NIRTTIDefines.Morrowind.h on the sharedse-ni-unification
-    # branch (and any later branches that adopt the SharedSE split). Harmless
-    # on older branches that don't have a SharedSE/ — the path just doesn't
-    # contribute any headers.
+    # SharedSE/ holds the unified NI*.h engine headers + MemoryUtil after
+    # the SharedSE split. TES3*.h still live under MWSE/.
     "${MWSE_ROOT}/SharedSE"
     "${CMAKE_SOURCE_DIR}/deps/msoc"
     "${MWSE_ROOT}/deps/sol/include"
-    "${MWSE_ROOT}/deps/span-lite"
     "${MWSE_ROOT}/deps/DirectX8/include"
-    "${MWSE_ROOT}/deps/LuaJIT/src"
+    "${MWSE_ROOT}/deps/luajit2/src"
 )
 
 target_link_libraries(msoc PRIVATE
-    "${MWSE_ROOT}/deps/LuaJIT/src/lua51.lib"
+    "${MWSE_ROOT}/deps/luajit2/src/lua51.lib"
 )
 
 target_compile_definitions(msoc PRIVATE

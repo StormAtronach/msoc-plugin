@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.2.0 - 2026-06-09
+
+Build against the unified-NI MWSE/SharedSE, a cell-cross profiler, and a
+crash-path fix. No gameplay behaviour change.
+
+- **Compile against the unified SharedSE NI headers.** Bumped the pinned
+  MWSE submodule to the post-unification engine: NI types moved to
+  `SharedSE/`, vectors are now `NI::Point3` / `NI::Point4` (was
+  `TES3::Vector3` / `Vector4`), memory helpers are `se::memory::`, and LuaJIT
+  moved to the `luajit2` submodule. The plugin declares its SharedSE consumer
+  config in `stdafx.h` (a prelude mirroring MGE-XE's: `SE_TARGETS_MW` plus the
+  Morrowind allocator addresses) and compiles the SharedSE sources directly
+  via a file-glob, the same model MGE-XE uses.
+
+- **Replaced the hand-rolled NI forwarders with the canonical SharedSE
+  sources.** `MWSEImports.cpp` previously bound ~12 NI methods with raw inline
+  engine addresses; those are now the versioned, `SE_*_FNADDR`-gated impls
+  compiled from SharedSE. `MWSEImports.cpp` now holds only the three TES3
+  globals SharedSE has no equivalent for.
+
+- **Cell-cross profiling (`OcclusionLogCellCross`; MCM: Debug -> Logging).**
+  Emits the full stats line on each cell change plus the next few
+  re-population frames, tagged `cellCross=<age>` (0 = the cross frame), with a
+  dedicated `cellWipeUs` (cache wipe / NI teardown), `occXformUs` (occluder
+  vertex re-transform), and per-frame `frameDeltaUs`. The 300-frame aggregate
+  sample almost never lands on a crossing; this makes the cross spike's phase
+  breakdown directly visible. See README -> Performance characteristics ->
+  Cell-cross cost for the Narsis numbers (the hitch is engine cell-load on the
+  frame after the cross, not MSOC).
+
+- **Fix: leaked `g_msoc_prev` on threadpool-creation failure.** The two catch
+  blocks in `createMSOCResources` freed `g_msoc` + `g_threadpool` but not the
+  snapshot buffer; both now route through the complete `destroyMSOCResources`
+  teardown.
+
 ## 1.1.0 — 2026-05-12
 
 Occluder population fixes + a per-instance eligibility cache. Lifetime

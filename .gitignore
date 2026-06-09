@@ -19,3 +19,5 @@
 # Release staging
 /test-mod/MSOC Plugin Test Version/
 /test-mod/*.7z
+scripts/analyze_cellcross.py
+.gitignore

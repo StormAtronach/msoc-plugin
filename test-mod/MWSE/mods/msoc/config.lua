@@ -87,6 +87,7 @@ local default_config = {
     -- Logging.
     OcclusionLogPerFrame                = false,
     OcclusionLogAggregate               = false,
+    OcclusionLogCellCross               = false,
 
     -- Freeze-forensics watchdog. Restart-only — the native side reads
     -- this at installPatches() time, which runs before this config
