@@ -30,13 +30,13 @@ namespace msoc::patch::occlusion::forensics {
 	// Implemented in PatchOcclusionCulling.cpp where the read targets live.
 	Snapshot captureSnapshot();
 
-	// 0..15 → human-readable label. Kept in sync with the stage-numbering
+	// 0..15 -> human-readable label. Kept in sync with the stage-numbering
 	// comment above g_lastStage in PatchOcclusionCulling.cpp.
 	const char* stageName(uint32_t stage);
 
 	// Spawn the detached watchdog thread when
 	// Configuration::OcclusionForensicsWatchdog is true. No-op otherwise.
-	// Restart-only — installPatches runs from luaopen_msoc before Lua's
+	// Restart-only - installPatches runs from luaopen_msoc before Lua's
 	// first msoc.configure() call, so the gate reflects C++/tier defaults
 	// at startup, not the user's most recent MCM edit.
 	void spawnIfEnabled(std::ostream& log);

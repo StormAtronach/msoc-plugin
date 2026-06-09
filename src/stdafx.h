@@ -2,18 +2,18 @@
 
 // Precompiled header (target_precompile_headers in CMakeLists.txt). Brings
 // in what MWSE's engine mirrors (MemoryUtil.h, NI*.h, TES3*.h) need to
-// parse. Skipped on the MOC sources — Intel's code is self-contained.
+// parse. Skipped on the MOC sources - Intel's code is self-contained.
 
 // WIN32_LEAN_AND_MEAN / NOMINMAX are set in CMakeLists.txt.
 #include <windows.h>
-#include <d3d8.h>       // D3DFORMAT — NIPixelFormat.h
+#include <d3d8.h>       // D3DFORMAT - NIPixelFormat.h
 
 // Undo windows.h macro pollution that clashes with NI:: field names.
 #undef near
 #undef far
 #undef PlaySound
 
-#include <cstddef>      // offsetof — TES3IteratedList.h static_asserts
+#include <cstddef>      // offsetof - TES3IteratedList.h static_asserts
 #include <iterator>
 #include <string>
 #include <map>
@@ -54,7 +54,7 @@
 // Morrowind.exe engine allocator entry points. se::memory::_new/_delete
 // are gated on these; NI::Object::operator new/delete (provided in
 // MWSEImports.cpp) routes through them so engine-owned objects the plugin
-// allocates — e.g. the tint MaterialProperty — live on the engine heap.
+// allocates - e.g. the tint MaterialProperty - live on the engine heap.
 #define SE_MEMORY_FNADDR_NEW     0x727692
 #define SE_MEMORY_FNADDR_DELETE  0x727530
 #define SE_MEMORY_FNADDR_MALLOC  0x727738
@@ -63,8 +63,8 @@
 
 // Neutralise the engine-allocator references inside the NI containers
 // (NITArray / NIHashMap / NIIteratedList / StlList). Like MGE-XE, the
-// plugin never constructs or destroys engine-owned NI containers — it
-// reads the live scene graph and keeps its own std:: structures — so the
+// plugin never constructs or destroys engine-owned NI containers - it
+// reads the live scene graph and keeps its own std:: structures - so the
 // container allocator is irrelevant. (Does not affect NI::Object operator
 // new above, which is a separate, ungated declaration.)
 #define MWSE_NO_CUSTOM_ALLOC 1

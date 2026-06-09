@@ -1,0 +1,57 @@
+# MSOC plugin C++ formatting standard.
+#
+# Derived from the existing hand-written style in src/ (most faithfully
+# preserved in HorizonOccluder.cpp / Config.cpp): 4-space indent, attached
+# braces, left-aligned pointers, un-indented namespace bodies.
+#
+# ColumnLimit is intentionally 0 and ReflowComments is off. The source has
+# carefully hand-wrapped comment blocks and manual line breaks; disabling
+# reflow keeps the first enforcement pass to a mechanical tabs-to-spaces +
+# namespace de-indent diff instead of churning every comment in the tree.
+---
+Language:        Cpp
+Standard:        c++20
+
+# Indentation
+UseTab:          Never
+IndentWidth:     4
+TabWidth:        4
+ContinuationIndentWidth: 4
+NamespaceIndentation: None
+IndentCaseLabels: true
+AccessModifierOffset: -4
+
+# Line breaking — keep the author's manual breaks; do not reflow.
+ColumnLimit:     0
+ReflowComments:  false
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+
+# Pointers / references bind to the type: `NI::Camera* cam`, `const T& x`.
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+# Includes — the stdafx / engine-header ordering is deliberate; never resort.
+SortIncludes:    Never
+SortUsingDeclarations: false
+
+# Spacing / misc
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+SpaceBeforeParens: ControlStatements
+SpacesBeforeTrailingComments: 2
+FixNamespaceComments: true
+AlignTrailingComments: true
+AlignAfterOpenBracket: Align
+
+# Alignment of consecutive constructs is left off: the source aligns only
+# a few blocks by hand, and forcing it on (or off) globally would reflow
+# the others either way. Off is the simpler canonical rule.
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: None

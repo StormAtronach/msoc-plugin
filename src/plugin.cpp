@@ -1,4 +1,4 @@
-// msoc plugin — luaopen_msoc entry point. Loaded by MWSE's
+// msoc plugin - luaopen_msoc entry point. Loaded by MWSE's
 // `include("msoc")`; whatever this returns becomes the Lua-side `msoc`
 // table.
 

@@ -14,7 +14,7 @@
 
 namespace TES3 {
 
-    // Inlined rather than introducing getCellFlag — patch only calls this.
+    // Inlined rather than introducing getCellFlag - patch only calls this.
     bool Cell::getIsInterior() const {
         return (cellFlags & TES3::CellFlag::Interior) != 0;
     }

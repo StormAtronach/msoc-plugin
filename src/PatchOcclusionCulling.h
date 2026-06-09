@@ -7,7 +7,7 @@ namespace NI {
 namespace msoc::patch::occlusion {
 
 	// Install hooks for DX8 Masked Software Occlusion Culling. Hooks
-	// always install — EnableMSOC is a runtime gate re-checked every
+	// always install - EnableMSOC is a runtime gate re-checked every
 	// frame inside the detour. When the gate is off the detour falls
 	// through to vanilla cullShowBody at zero overhead. Resources
 	// (g_msoc + ~57MB ring-buffer threadpool) are allocated eagerly at
@@ -35,7 +35,7 @@ namespace msoc::patch::occlusion {
 	void unregisterLightObservedCallback(LightObservedCallback cb);
 
 	// Fires after all drain-slot verdicts are assigned but BEFORE any display() calls.
-	// Receives every node whose verdict is NOT Occluded or CachedOccluded — i.e., exactly
+	// Receives every node whose verdict is NOT Occluded or CachedOccluded - i.e., exactly
 	// the set that Morrowind will draw this frame. Callback is synchronous on the render
 	// thread; MGE renders depth/shadows inside it, then returns so display() can proceed.
 	// shapes[i] and boundsXYZR[i*4..i*4+3] are parallel arrays. bounds = (x, y, z, r).
@@ -45,7 +45,7 @@ namespace msoc::patch::occlusion {
 	void registerVisibleGeomCallback(VisibleGeomCallback cb);
 	void unregisterVisibleGeomCallback(VisibleGeomCallback cb);
 
-	// Mask query API. Result codes are frozen ABI — values match the
+	// Mask query API. Result codes are frozen ABI - values match the
 	// mwse_testOcclusion* C exports below.
 	enum MaskQueryResult {
 		kMaskQueryVisible    = 0,  // not occluded; draw the thing
@@ -61,18 +61,18 @@ namespace msoc::patch::occlusion {
 	bool isOcclusionMaskReady();
 
 	// World-space sphere test. Uses the engine's main-scene CullShow
-	// projection — verdicts aren't meaningful for draw passes that use
+	// projection - verdicts aren't meaningful for draw passes that use
 	// a different camera.
 	MaskQueryResult testOcclusionSphere(
 		float worldX, float worldY, float worldZ, float radius);
 
-	// World-space AABB test. Converts to bounding sphere internally —
+	// World-space AABB test. Converts to bounding sphere internally -
 	// same looseness as NiAVObject::worldBoundRadius.
 	MaskQueryResult testOcclusionAABB(
 		float minX, float minY, float minZ,
 		float maxX, float maxY, float maxZ);
 
-	// World-space OBB test. Expands center + (±vx ±vy ±vz) into 8
+	// World-space OBB test. Expands center + (+/-vx +/-vy +/-vz) into 8
 	// corners, projects their screen-space rectangle, and tests that
 	// footprint against the mask. Tighter than testOcclusionSphere for
 	// non-spherical shapes while remaining conservative for tall slabs.
@@ -106,7 +106,7 @@ namespace msoc::patch::occlusion {
 	bool dumpOcclusionMask(const char* path);
 
 	// Queue triangles to be rasterized into the NEXT mask build.
-	// One-frame latency by design — data lands in frame N+1's mask,
+	// One-frame latency by design - data lands in frame N+1's mask,
 	// consumers query in frame N+2, matching the double-buffer contract.
 	// Plugin copies the input arrays; caller may free after return.
 	// modelMatrix may be null (world-space identity). stride/offY/offW

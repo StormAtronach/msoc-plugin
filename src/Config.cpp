@@ -70,7 +70,7 @@ namespace msoc {
 
 namespace {
 
-// nil → leave `out` untouched. Pops the value either way.
+// nil -> leave `out` untouched. Pops the value either way.
 void readBool(lua_State* L, int tbl, const char* key, bool& out) {
     lua_getfield(L, tbl, key);
     if (!lua_isnil(L, -1)) {
@@ -98,7 +98,7 @@ void readUInt(lua_State* L, int tbl, const char* key, unsigned int& out) {
 }
 
 // Tri-state with legacy-bool acceptance (the key was a bool before
-// LAYER-A): false→0, true→1, int N→clamp(N, 0, 2).
+// LAYER-A): false->0, true->1, int N->clamp(N, 0, 2).
 void readTerrainOcclusionMode(lua_State* L, int tbl, const char* key, int& out) {
     lua_getfield(L, tbl, key);
     if (lua_isnumber(L, -1)) {
@@ -118,7 +118,7 @@ void readTerrainOcclusionMode(lua_State* L, int tbl, const char* key, int& out) 
 namespace msoc {
 
 HardwareTier classifyHardwareTier(int simdImpl, unsigned hwConcurrency) {
-    // Sandy/Ivy Bridge fall back to SSE4.1 (4-wide) — half the per-tile
+    // Sandy/Ivy Bridge fall back to SSE4.1 (4-wide) - half the per-tile
     // throughput of Haswell+ AVX2. Combined with their 4-thread ceiling,
     // async occluders cost more in sync than they save in parallelism.
     const bool noAvx2 = (simdImpl < 2);
@@ -147,10 +147,10 @@ void applyHardwareTierDefaults(HardwareTier tier) {
     // remain scene-shape-sensitive only.
     switch (tier) {
         case HardwareTier::Low:
-            // SSE4.1 or ≤4 threads: fixed per-frame threadpool tax
+            // SSE4.1 or <=4 threads: fixed per-frame threadpool tax
             // (Wake/Flush/Suspend) outweighs the parallelism win on
             // 4-wide SIMD. Synchronous skips the tax entirely.
-            // Mask 256×128 = ¼ rasterization work per triangle. Tight
+            // Mask 256x128 = 1/4 rasterization work per triangle. Tight
             // budgets bound spike cost (one log showed 32ms drainUs
             // spikes on i5-2400; 1500us caps that at ~5% of a 30fps
             // frame).
@@ -161,16 +161,16 @@ void applyHardwareTierDefaults(HardwareTier tier) {
             Configuration::OcclusionMaskHeight     = 128;
             Configuration::OcclusionRasterizeBudgetUs = 1500;
             Configuration::OcclusionClassifyBudgetUs  = 1500;
-            // Keep the bypass on — classifyUs headroom is tight here
+            // Keep the bypass on - classifyUs headroom is tight here
             // and the displayUs win is smaller (the mask is also smaller).
             Configuration::OcclusionSkipTerrainOccludees = true;
             break;
 
         case HardwareTier::Mid:
-            // 6–8 threads with AVX2. 4×2=8 bins is more atomic
-            // ping-pong than parallelism with ~4–6 workers; 2×2 keeps
+            // 6-8 threads with AVX2. 4x2=8 bins is more atomic
+            // ping-pong than parallelism with ~4-6 workers; 2x2 keeps
             // work-stealing alive at half the per-bin coordination cost.
-            // Mask 384×192 ≈ 56% of full work.
+            // Mask 384x192 ~ 56% of full work.
             Configuration::OcclusionAsyncOccluders = true;
             Configuration::OcclusionThreadpoolBinsW = 2;
             Configuration::OcclusionThreadpoolBinsH = 2;
@@ -231,7 +231,7 @@ int configure(lua_State* L) {
     readUInt (L, 1, "OcclusionThreadpoolBinsW",            Configuration::OcclusionThreadpoolBinsW);
     readUInt (L, 1, "OcclusionThreadpoolBinsH",            Configuration::OcclusionThreadpoolBinsH);
     readUInt (L, 1, "OcclusionTemporalCoherenceFrames",    Configuration::OcclusionTemporalCoherenceFrames);
-    // Restart-only — see header. Accepted here so msoc.json round-trips.
+    // Restart-only - see header. Accepted here so msoc.json round-trips.
     readUInt (L, 1, "OcclusionMaskWidth",                  Configuration::OcclusionMaskWidth);
     readUInt (L, 1, "OcclusionMaskHeight",                 Configuration::OcclusionMaskHeight);
     readUInt (L, 1, "OcclusionRasterizeBudgetUs",          Configuration::OcclusionRasterizeBudgetUs);
@@ -241,7 +241,7 @@ int configure(lua_State* L) {
     readBool (L, 1, "OcclusionLogAggregate",               Configuration::OcclusionLogAggregate);
     readBool (L, 1, "OcclusionLogCellCross",               Configuration::OcclusionLogCellCross);
 
-    // Restart-only — see header. Accepted here so msoc.json round-trips.
+    // Restart-only - see header. Accepted here so msoc.json round-trips.
     readBool (L, 1, "OcclusionForensicsWatchdog",          Configuration::OcclusionForensicsWatchdog);
 
     return 0;

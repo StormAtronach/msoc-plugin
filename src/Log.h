@@ -4,7 +4,7 @@
 // (separate file from MWSE.log to avoid contention). API mirrors MWSE's
 // Log.h so existing `log::getLog() << ...` call sites carry over.
 //
-// std::endl does not force a flush — the underlying filebuf has a 64KB
+// std::endl does not force a flush - the underlying filebuf has a 64KB
 // buffer and a no-op sync(). Call msoc::log::flush() at safe sync points
 // or rely on atexit for clean exit.
 

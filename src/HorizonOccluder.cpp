@@ -111,7 +111,7 @@ bool HorizonOccluder::init(int resolution, int maxSamples) {
     m_d.assign(static_cast<size_t>(resolution), 0.0f);
 
     // Workspace: keep[resolution] (one byte per column) followed by a
-    // heap of HeapItem. 2*maxSamples is the worst-case bound — every
+    // heap of HeapItem. 2*maxSamples is the worst-case bound - every
     // split adds at most two new intervals.
     const size_t keepBytes = (static_cast<size_t>(resolution) + 15u) & ~size_t{15u};
     const size_t heapBytes = static_cast<size_t>(2 * maxSamples) * sizeof(HeapItem);
@@ -160,7 +160,7 @@ float HorizonOccluder::computeAdaptiveEpsD(float fraction, float floor_) const {
     }
 
     if (activeCols < 2) {
-        // No meaningful depth structure — disable the depth term.
+        // No meaningful depth structure - disable the depth term.
         return std::numeric_limits<float>::infinity();
     }
 
@@ -279,11 +279,11 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
         const Sample& s1 = samples[i + 1];
 
         // Conservative: y_top below silhouette (min), z at/behind
-        // terrain (max — farther depth in clip-w convention).
+        // terrain (max - farther depth in clip-w convention).
         const float yTop = (s0.h < s1.h) ? s0.h : s1.h;
         const float z    = (s0.d > s1.d) ? s0.d : s1.d;
 
-        // Skip segments where neither endpoint has been touched —
+        // Skip segments where neither endpoint has been touched -
         // otherwise the kYBelow sentinel projects to garbage quads.
         if (yTop <= kYBelow * 0.5f) continue;
 
@@ -304,7 +304,7 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
 }
 
 void HorizonOccluder::fixupForMOC(CurtainVertex* verts, int vertCount) {
-    // (x, y, z=depth, w=1) → (x*d, y*d, _, w=d). MOC's RenderTriangles
+    // (x, y, z=depth, w=1) -> (x*d, y*d, _, w=d). MOC's RenderTriangles
     // expects this layout when modelToClip is nullptr.
     for (int i = 0; i < vertCount; ++i) {
         const float d = verts[i].z;

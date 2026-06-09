@@ -1,6 +1,6 @@
 // Plugin-local logger. Writes to <MorrowindRoot>/MSOC.log, truncated
 // each launch. Uses a 64KB buffer with a no-op sync() so std::endl
-// writes '\n' but does not fsync — flush is explicit (or atexit on
+// writes '\n' but does not fsync - flush is explicit (or atexit on
 // clean exit). A hard process kill loses up to kBufferSize trailing
 // bytes; call flush() before known-risky ops.
 
