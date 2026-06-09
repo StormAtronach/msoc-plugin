@@ -90,6 +90,9 @@ if(MSOC_BUILD_DLL)
         # forensics::captureSnapshot() defined in PatchOcclusionCulling.cpp.
         src/PatchForensicsWatchdog.cpp
         src/PatchOcclusionCulling.cpp
+        # Out-of-tree mask query API (testOcclusion*, snapshot accessors).
+        # Reads the shared snapshot state via OcclusionInternal.h.
+        src/QueryApi.cpp
         # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
         # of the patch TU. Forward to the msoc::patch::occlusion public API.
         src/Exports.cpp
