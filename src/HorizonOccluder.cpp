@@ -14,17 +14,16 @@ namespace {
 
 // Linear NDC-x for column c with resolution R: ndc_x = -1 + 2*c / (R-1).
 inline float colToNdc(int c, int resolution) {
-    return -1.0f + 2.0f * static_cast<float>(c)
-                       / static_cast<float>(resolution - 1);
+    return -1.0f + 2.0f * static_cast<float>(c) / static_cast<float>(resolution - 1);
 }
 
 // One interval in the simplifier's max-heap. err is the maximum
 // normalized error from the linear interpolant; split is the column at
 // which it occurred (-1 if too short to split).
 struct HeapItem {
-    int   a;
-    int   b;
-    int   split;
+    int a;
+    int b;
+    int split;
     float err;
 };
 
@@ -66,7 +65,7 @@ HeapItem computeWorst(const std::vector<float>& h, const std::vector<float>& d,
     const float invEpsH = (epsH > 0.0f) ? 1.0f / epsH : 0.0f;
     const float invEpsD = (epsD > 0.0f) ? 1.0f / epsD : 0.0f;
 
-    int   bestIdx = -1;
+    int bestIdx = -1;
     float bestErr = 0.0f;
 
     for (int i = a + 1; i < b; ++i) {
@@ -75,7 +74,7 @@ HeapItem computeWorst(const std::vector<float>& h, const std::vector<float>& d,
         const float dLerp = dA + t * (dB - dA);
         const float eH = std::fabs(h[static_cast<size_t>(i)] - hLerp) * invEpsH;
         const float eD = std::fabs(d[static_cast<size_t>(i)] - dLerp) * invEpsD;
-        const float e  = (eH > eD) ? eH : eD;
+        const float e = (eH > eD) ? eH : eD;
         if (e > bestErr) {
             bestErr = e;
             bestIdx = i;
@@ -83,7 +82,7 @@ HeapItem computeWorst(const std::vector<float>& h, const std::vector<float>& d,
     }
 
     item.split = bestIdx;
-    item.err   = bestErr;
+    item.err = bestErr;
     return item;
 }
 
@@ -91,7 +90,7 @@ inline CurtainVertex makeNDCVert(float x, float y, float depth) {
     return CurtainVertex{x, y, depth, 1.0f};
 }
 
-} // namespace
+}  // namespace
 
 HorizonOccluder& HorizonOccluder::getInstance() {
     static HorizonOccluder instance;
@@ -148,7 +147,7 @@ float HorizonOccluder::computeAdaptiveEpsD(float fraction, float floor_) const {
     // covers both arrays.
     float minD = std::numeric_limits<float>::infinity();
     float maxD = -std::numeric_limits<float>::infinity();
-    int   activeCols = 0;
+    int activeCols = 0;
 
     const int n = m_resolution;
     for (int c = 0; c < n; ++c) {
@@ -244,23 +243,23 @@ int HorizonOccluder::simplify(Sample* out, int maxSamples,
     int n = 0;
     for (int c = 0; c < R && n < maxSamples; ++c) {
         if (!keep[c]) continue;
-        out[n].col   = c;
-        out[n].ndcX  = colToNdc(c, R);
-        out[n].h     = m_h[static_cast<size_t>(c)];
-        out[n].d     = m_d[static_cast<size_t>(c)];
+        out[n].col = c;
+        out[n].ndcX = colToNdc(c, R);
+        out[n].h = m_h[static_cast<size_t>(c)];
+        out[n].d = m_d[static_cast<size_t>(c)];
         ++n;
     }
 
     // Force endpoints if simplify somehow returned < 2.
     if (n < 2) {
-        out[0].col  = 0;
+        out[0].col = 0;
         out[0].ndcX = -1.0f;
-        out[0].h    = m_h.front();
-        out[0].d    = m_d.front();
-        out[1].col  = R - 1;
+        out[0].h = m_h.front();
+        out[0].d = m_d.front();
+        out[1].col = R - 1;
         out[1].ndcX = 1.0f;
-        out[1].h    = m_h.back();
-        out[1].d    = m_d.back();
+        out[1].h = m_h.back();
+        out[1].d = m_d.back();
         n = 2;
     }
     return n;
@@ -281,16 +280,16 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
         // Conservative: y_top below silhouette (min), z at/behind
         // terrain (max - farther depth in clip-w convention).
         const float yTop = (s0.h < s1.h) ? s0.h : s1.h;
-        const float z    = (s0.d > s1.d) ? s0.d : s1.d;
+        const float z = (s0.d > s1.d) ? s0.d : s1.d;
 
         // Skip segments where neither endpoint has been touched -
         // otherwise the kYBelow sentinel projects to garbage quads.
         if (yTop <= kYBelow * 0.5f) continue;
 
-        const CurtainVertex TL = makeNDCVert(s0.ndcX, yTop,        z);
-        const CurtainVertex TR = makeNDCVert(s1.ndcX, yTop,        z);
-        const CurtainVertex BL = makeNDCVert(s0.ndcX, ndcYBottom,  z);
-        const CurtainVertex BR = makeNDCVert(s1.ndcX, ndcYBottom,  z);
+        const CurtainVertex TL = makeNDCVert(s0.ndcX, yTop, z);
+        const CurtainVertex TR = makeNDCVert(s1.ndcX, yTop, z);
+        const CurtainVertex BL = makeNDCVert(s0.ndcX, ndcYBottom, z);
+        const CurtainVertex BR = makeNDCVert(s1.ndcX, ndcYBottom, z);
 
         // CCW winding for y-up; MOC accepts BACKFACE_NONE so it's cosmetic.
         outVerts[w++] = TL;
@@ -310,7 +309,7 @@ void HorizonOccluder::fixupForMOC(CurtainVertex* verts, int vertCount) {
         const float d = verts[i].z;
         verts[i].x *= d;
         verts[i].y *= d;
-        verts[i].w  = d;
+        verts[i].w = d;
     }
 }
 
@@ -322,4 +321,4 @@ int HorizonOccluder::columnsTouched() const {
     return n;
 }
 
-} // namespace msoc::horizon
+}  // namespace msoc::horizon

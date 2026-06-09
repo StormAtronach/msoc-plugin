@@ -13,62 +13,59 @@
 
 namespace msoc::patch::occlusion {
 
-    struct FrameConfig {
-        // Occluder eligibility, resolved per scene type by snapshot().
-        float occluderRadiusMin = 0.0f;
-        float occluderRadiusMax = 0.0f;
-        float occluderMinDimension = 0.0f;
-        float insideOccluderMargin = 0.0f;
-        bool insideOccluderGuard = false;
+struct FrameConfig {
+    // Occluder eligibility, resolved per scene type by snapshot().
+    float occluderRadiusMin = 0.0f;
+    float occluderRadiusMax = 0.0f;
+    float occluderMinDimension = 0.0f;
+    float insideOccluderMargin = 0.0f;
+    bool insideOccluderGuard = false;
 
-        // Direct copies (scene-type independent).
-        float depthSlackWorldUnits = 128.0f;
-        unsigned int occluderMaxTriangles = 4096;
-        float occludeeMinRadius = 1.0f;
-        bool skipTerrainOccludees = true;
-        int aggregateTerrain = 1;
-        unsigned int terrainResolution = 1;
-        unsigned int temporalCoherenceFrames = 4;
-        bool cullLights = true;
-        unsigned int lightCullHysteresisFrames = 3;
-        bool tintOccluder = false;
-        bool tintOccluded = false;
-        bool tintTested = false;
-        bool logEnabled = false;
+    // Direct copies (scene-type independent).
+    float depthSlackWorldUnits = 128.0f;
+    unsigned int occluderMaxTriangles = 4096;
+    float occludeeMinRadius = 1.0f;
+    bool skipTerrainOccludees = true;
+    int aggregateTerrain = 1;
+    unsigned int terrainResolution = 1;
+    unsigned int temporalCoherenceFrames = 4;
+    bool cullLights = true;
+    unsigned int lightCullHysteresisFrames = 3;
+    bool tintOccluder = false;
+    bool tintOccluded = false;
+    bool tintTested = false;
+    bool logEnabled = false;
 
-        // Resolve every field from Configuration:: for this frame. isInterior
-        // selects the interior/exterior occluder thresholds.
-        void snapshot(bool isInterior) {
-            using C = Configuration;
-            if (isInterior) {
-                occluderRadiusMin = C::OcclusionOccluderRadiusMinInterior;
-                occluderRadiusMax = C::OcclusionOccluderRadiusMaxInterior;
-                occluderMinDimension = C::OcclusionOccluderMinDimensionInterior;
-                insideOccluderMargin = C::OcclusionInsideOccluderMarginInterior;
-            }
-            else {
-                occluderRadiusMin = C::OcclusionOccluderRadiusMinExterior;
-                occluderRadiusMax = C::OcclusionOccluderRadiusMaxExterior;
-                occluderMinDimension = C::OcclusionOccluderMinDimensionExterior;
-                insideOccluderMargin = C::OcclusionInsideOccluderMarginExterior;
-            }
-            depthSlackWorldUnits = C::OcclusionDepthSlackWorldUnits;
-            occluderMaxTriangles = C::OcclusionOccluderMaxTriangles;
-            occludeeMinRadius = static_cast<float>(C::OcclusionOccludeeMinRadius);
-            skipTerrainOccludees = C::OcclusionSkipTerrainOccludees;
-            aggregateTerrain = C::OcclusionAggregateTerrain;
-            terrainResolution = C::OcclusionTerrainResolution;
-            temporalCoherenceFrames = C::OcclusionTemporalCoherenceFrames;
-            cullLights = C::OcclusionCullLights;
-            lightCullHysteresisFrames = C::OcclusionLightCullHysteresisFrames;
-            tintOccluder = C::DebugOcclusionTintOccluder;
-            tintOccluded = C::DebugOcclusionTintOccluded;
-            tintTested = C::DebugOcclusionTintTested;
-            insideOccluderGuard = C::OcclusionInsideOccluderGuard;
-            logEnabled = C::OcclusionLogPerFrame
-                || C::OcclusionLogAggregate
-                || C::OcclusionLogCellCross;
+    // Resolve every field from Configuration:: for this frame. isInterior
+    // selects the interior/exterior occluder thresholds.
+    void snapshot(bool isInterior) {
+        using C = Configuration;
+        if (isInterior) {
+            occluderRadiusMin = C::OcclusionOccluderRadiusMinInterior;
+            occluderRadiusMax = C::OcclusionOccluderRadiusMaxInterior;
+            occluderMinDimension = C::OcclusionOccluderMinDimensionInterior;
+            insideOccluderMargin = C::OcclusionInsideOccluderMarginInterior;
+        } else {
+            occluderRadiusMin = C::OcclusionOccluderRadiusMinExterior;
+            occluderRadiusMax = C::OcclusionOccluderRadiusMaxExterior;
+            occluderMinDimension = C::OcclusionOccluderMinDimensionExterior;
+            insideOccluderMargin = C::OcclusionInsideOccluderMarginExterior;
         }
-    };
+        depthSlackWorldUnits = C::OcclusionDepthSlackWorldUnits;
+        occluderMaxTriangles = C::OcclusionOccluderMaxTriangles;
+        occludeeMinRadius = static_cast<float>(C::OcclusionOccludeeMinRadius);
+        skipTerrainOccludees = C::OcclusionSkipTerrainOccludees;
+        aggregateTerrain = C::OcclusionAggregateTerrain;
+        terrainResolution = C::OcclusionTerrainResolution;
+        temporalCoherenceFrames = C::OcclusionTemporalCoherenceFrames;
+        cullLights = C::OcclusionCullLights;
+        lightCullHysteresisFrames = C::OcclusionLightCullHysteresisFrames;
+        tintOccluder = C::DebugOcclusionTintOccluder;
+        tintOccluded = C::DebugOcclusionTintOccluded;
+        tintTested = C::DebugOcclusionTintTested;
+        insideOccluderGuard = C::OcclusionInsideOccluderGuard;
+        logEnabled = C::OcclusionLogPerFrame || C::OcclusionLogAggregate || C::OcclusionLogCellCross;
+    }
+};
 
-} // namespace msoc::patch::occlusion
+}  // namespace msoc::patch::occlusion

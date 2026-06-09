@@ -15,10 +15,22 @@ namespace {
 
 // Column-major 4x4 identity, element [col*4 + row].
 constexpr std::array<float, 16> kIdentity = {
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    0, 0, 0, 1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
 };
 
 }  // namespace
@@ -26,10 +38,22 @@ constexpr std::array<float, 16> kIdentity = {
 TEST_CASE("mat4MulColumnMajor: identity is the multiplicative unit") {
     // A populated, non-symmetric matrix so a transpose bug would show.
     std::array<float, 16> a = {
-        1, 2, 3, 4,
-        5, 6, 7, 8,
-        9, 10, 11, 12,
-        13, 14, 15, 16,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
     };
     std::array<float, 16> out{};
 

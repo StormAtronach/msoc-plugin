@@ -45,8 +45,8 @@ struct ClipXYW {
 // TransformVerts, so sphere rects stay aligned with rasterised occluder depth.
 inline ClipXYW projectWorld(const float* m, float wx, float wy, float wz) {
     return {
-        wx * m[0] + wy * m[4] + wz * m[8]  + m[12],
-        wx * m[1] + wy * m[5] + wz * m[9]  + m[13],
+        wx * m[0] + wy * m[4] + wz * m[8] + m[12],
+        wx * m[1] + wy * m[5] + wz * m[9] + m[13],
         wx * m[3] + wy * m[7] + wz * m[11] + m[15],
     };
 }
@@ -68,4 +68,4 @@ inline RowNorms clipRowNorms(const float* m) {
     };
 }
 
-} // namespace msoc::clipmath
+}  // namespace msoc::clipmath

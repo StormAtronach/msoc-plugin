@@ -12,22 +12,24 @@
 // frame end; clearClones() drops all clones (and their NI::Pointer pins) on
 // cell change. See DebugTint.cpp for the refcount / vtable contract.
 
-namespace NI { struct AVObject; }
+namespace NI {
+struct AVObject;
+}
 
 namespace msoc::debugtint {
 
-    // Tint a classified leaf. No-op on non-NiTriBasedGeom nodes - tinting a
-    // NiNode would stain its whole inheriting subtree.
-    void tintOccluded(NI::AVObject* shape);
-    void tintTested(NI::AVObject* shape);
-    void tintOccluder(NI::AVObject* shape);
+// Tint a classified leaf. No-op on non-NiTriBasedGeom nodes - tinting a
+// NiNode would stain its whole inheriting subtree.
+void tintOccluded(NI::AVObject* shape);
+void tintTested(NI::AVObject* shape);
+void tintOccluder(NI::AVObject* shape);
 
-    // End-of-frame: restore each tracked clone to its source material's colors
-    // so an untinted frame renders normally. Call once per main-scene frame.
-    void resetFrameTints();
+// End-of-frame: restore each tracked clone to its source material's colors
+// so an untinted frame renders normally. Call once per main-scene frame.
+void resetFrameTints();
 
-    // Drop every clone (releases the NI::Pointer pins on shapes + sources).
-    // Call on cell change, where the outgoing cell's shapes are torn down.
-    void clearClones();
+// Drop every clone (releases the NI::Pointer pins on shapes + sources).
+// Call on cell change, where the outgoing cell's shapes are torn down.
+void clearClones();
 
-} // namespace msoc::debugtint
+}  // namespace msoc::debugtint

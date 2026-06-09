@@ -49,7 +49,7 @@ struct CurtainVertex {
 // pre-computed by the simplifier so the emit phase doesn't need the
 // column->ndc map.
 struct Sample {
-    int   col;
+    int col;
     float ndcX;
     float h;
     float d;
@@ -138,14 +138,14 @@ public:
 
     // Diagnostic accessors - validation use only, not for hot path.
     float heightAt(int c) const { return m_h[static_cast<size_t>(c)]; }
-    float depthAt (int c) const { return m_d[static_cast<size_t>(c)]; }
+    float depthAt(int c) const { return m_d[static_cast<size_t>(c)]; }
 
 private:
     int m_resolution = 0;
     int m_maxSamples = 0;
-    std::vector<float>   m_h;
-    std::vector<float>   m_d;
+    std::vector<float> m_h;
+    std::vector<float> m_d;
     std::vector<uint8_t> m_workspace;  // simplify scratch (keep[] + heap[])
 };
 
-} // namespace msoc::horizon
+}  // namespace msoc::horizon

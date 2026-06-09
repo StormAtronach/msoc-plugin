@@ -37,14 +37,14 @@ void setCFunctionField(lua_State* L, const char* key, lua_CFunction fn) {
 
 struct ProbeResult {
     const char* linkText;
-    int         impl;  // MaskedOcclusionCulling::Implementation, or -1
+    int impl;  // MaskedOcclusionCulling::Implementation, or -1
 };
 
 // Create + exercise + destroy. Catches AVX2/AVX512 link failures at load
 // instead of at first patch use.
 ProbeResult probeMocLink() {
     auto* moc = MaskedOcclusionCulling::Create();
-    if (!moc) return { "Create() returned null", -1 };
+    if (!moc) return {"Create() returned null", -1};
 
     moc->SetResolution(64, 32);
     unsigned int w = 0, h = 0;
@@ -55,32 +55,41 @@ ProbeResult probeMocLink() {
 
     const int implInt = static_cast<int>(impl);
     if (w != 64 || h != 32) {
-        return { "GetResolution mismatch after SetResolution", implInt };
+        return {"GetResolution mismatch after SetResolution", implInt};
     }
 
     switch (impl) {
-        case MaskedOcclusionCulling::SSE2:    return { "ok (SSE2)",    implInt };
-        case MaskedOcclusionCulling::SSE41:   return { "ok (SSE4.1)",  implInt };
-        case MaskedOcclusionCulling::AVX2:    return { "ok (AVX2)",    implInt };
-        case MaskedOcclusionCulling::AVX512:  return { "ok (AVX-512)", implInt };
-        default:                              return { "ok (unknown ISA)", implInt };
+        case MaskedOcclusionCulling::SSE2:
+            return {"ok (SSE2)", implInt};
+        case MaskedOcclusionCulling::SSE41:
+            return {"ok (SSE4.1)", implInt};
+        case MaskedOcclusionCulling::AVX2:
+            return {"ok (AVX2)", implInt};
+        case MaskedOcclusionCulling::AVX512:
+            return {"ok (AVX-512)", implInt};
+        default:
+            return {"ok (unknown ISA)", implInt};
     }
 }
 
 const char* simdLevelName(int impl) {
     switch (impl) {
-        case MaskedOcclusionCulling::SSE2:    return "SSE2";
-        case MaskedOcclusionCulling::SSE41:   return "SSE4.1";
-        case MaskedOcclusionCulling::AVX2:    return "AVX2";
-        case MaskedOcclusionCulling::AVX512:  return "AVX-512";
-        default:                              return "unknown";
+        case MaskedOcclusionCulling::SSE2:
+            return "SSE2";
+        case MaskedOcclusionCulling::SSE41:
+            return "SSE4.1";
+        case MaskedOcclusionCulling::AVX2:
+            return "AVX2";
+        case MaskedOcclusionCulling::AVX512:
+            return "AVX-512";
+        default:
+            return "unknown";
     }
 }
 
-} // namespace
+}  // namespace
 
-extern "C" __declspec(dllexport)
-int luaopen_msoc(lua_State* L) {
+extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     lua_newtable(L);
 
     // Probe + classify before installPatches() so the threadpool's first

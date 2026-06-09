@@ -79,8 +79,7 @@ NI::MaterialProperty* cloneMaterialProperty(NI::MaterialProperty* source, const 
         // refCount=1. Preferred - picks up every inherited field, even those
         // we don't enumerate below.
         mat = static_cast<NI::MaterialProperty*>(source->createClone());
-    }
-    else {
+    } else {
         // Fresh allocation. NiObject::ctor sets refCount=0; bump to match the
         // createClone path.
         mat = new NI::MaterialProperty();
@@ -137,19 +136,24 @@ void tintEmissive(NI::AVObject* shape, const NI::Color& color) {
     NI::Pointer<NI::MaterialProperty> sourcePtr;
     if (detachedOwn) {
         sourcePtr = static_cast<NI::MaterialProperty*>(detachedOwn.get());
-    }
-    else {
+    } else {
         sourcePtr = source;
     }
 
-    g_tintClones.emplace(shape, TintClone{ shape, sourcePtr, clone });
+    g_tintClones.emplace(shape, TintClone{shape, sourcePtr, clone});
 }
 
-} // namespace
+}  // namespace
 
-void tintOccluded(NI::AVObject* shape) { tintEmissive(shape, kTintOccluded); }
-void tintTested(NI::AVObject* shape) { tintEmissive(shape, kTintTested); }
-void tintOccluder(NI::AVObject* shape) { tintEmissive(shape, kTintOccluder); }
+void tintOccluded(NI::AVObject* shape) {
+    tintEmissive(shape, kTintOccluded);
+}
+void tintTested(NI::AVObject* shape) {
+    tintEmissive(shape, kTintTested);
+}
+void tintOccluder(NI::AVObject* shape) {
+    tintEmissive(shape, kTintOccluder);
+}
 
 // End-of-frame tint reset: restore each tracked source's ambient + diffuse +
 // emissive into its clone (all three channels - tintEmissive sets all three to
@@ -162,8 +166,7 @@ void resetFrameTints() {
             entry.clone->ambient = entry.source->ambient;
             entry.clone->diffuse = entry.source->diffuse;
             entry.clone->emissive = entry.source->emissive;
-        }
-        else {
+        } else {
             entry.clone->ambient = zero;
             entry.clone->diffuse = zero;
             entry.clone->emissive = zero;
@@ -177,4 +180,4 @@ void clearClones() {
     g_tintClones.clear();
 }
 
-} // namespace msoc::debugtint
+}  // namespace msoc::debugtint

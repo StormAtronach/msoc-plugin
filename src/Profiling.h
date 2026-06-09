@@ -34,4 +34,4 @@ inline bool spikeClipTripped(uint64_t elapsedUs, uint64_t budgetUs) {
     return budgetUs > 0 && elapsedUs > budgetUs;
 }
 
-} // namespace msoc::profiling
+}  // namespace msoc::profiling

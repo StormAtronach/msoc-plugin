@@ -64,7 +64,7 @@ std::ostream& openOnce() {
     if (!g_initAttempted) {
         g_initAttempted = true;
         if (g_filebuf.open("MSOC.log",
-                std::ios::out | std::ios::trunc | std::ios::binary)) {
+                           std::ios::out | std::ios::trunc | std::ios::binary)) {
             registerAtExitFlushOnce();
         } else {
             g_logStream.rdbuf(g_fallback.rdbuf());
@@ -73,7 +73,7 @@ std::ostream& openOnce() {
     return g_logStream;
 }
 
-} // namespace
+}  // namespace
 
 namespace msoc::log {
 
@@ -130,11 +130,13 @@ void prettyDump(const void* data, const size_t length, std::ostream& output) {
     output.fill(oldFill);
 }
 
-} // namespace msoc::log
+}  // namespace msoc::log
 
 // MWSE's upstream MemoryUtil.cpp (compiled into the plugin) calls
 // mwse::log::getLog(). Forward to our msoc::log sink so everything ends
 // up in MSOC.log.
 namespace mwse::log {
-    std::ostream& getLog() { return ::msoc::log::getLog(); }
+std::ostream& getLog() {
+    return ::msoc::log::getLog();
 }
+}  // namespace mwse::log

@@ -6,14 +6,14 @@
 
 // WIN32_LEAN_AND_MEAN / NOMINMAX are set in CMakeLists.txt.
 #include <windows.h>
-#include <d3d8.h>       // D3DFORMAT - NIPixelFormat.h
+#include <d3d8.h>  // D3DFORMAT - NIPixelFormat.h
 
 // Undo windows.h macro pollution that clashes with NI:: field names.
 #undef near
 #undef far
 #undef PlaySound
 
-#include <cstddef>      // offsetof - TES3IteratedList.h static_asserts
+#include <cstddef>  // offsetof - TES3IteratedList.h static_asserts
 #include <iterator>
 #include <string>
 #include <map>
@@ -55,10 +55,10 @@
 // are gated on these; NI::Object::operator new/delete (provided in
 // MWSEImports.cpp) routes through them so engine-owned objects the plugin
 // allocates - e.g. the tint MaterialProperty - live on the engine heap.
-#define SE_MEMORY_FNADDR_NEW     0x727692
-#define SE_MEMORY_FNADDR_DELETE  0x727530
-#define SE_MEMORY_FNADDR_MALLOC  0x727738
-#define SE_MEMORY_FNADDR_FREE    0x727732
+#define SE_MEMORY_FNADDR_NEW 0x727692
+#define SE_MEMORY_FNADDR_DELETE 0x727530
+#define SE_MEMORY_FNADDR_MALLOC 0x727738
+#define SE_MEMORY_FNADDR_FREE 0x727732
 #define SE_MEMORY_FNADDR_REALLOC 0x746288
 
 // Neutralise the engine-allocator references inside the NI containers

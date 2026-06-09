@@ -11,20 +11,19 @@
 #include "TES3Defines.h"
 #include "TES3WorldController.h"
 
-
 namespace TES3 {
 
-    // Inlined rather than introducing getCellFlag - patch only calls this.
-    bool Cell::getIsInterior() const {
-        return (cellFlags & TES3::CellFlag::Interior) != 0;
-    }
-
-    DataHandler* DataHandler::get() {
-        return *reinterpret_cast<TES3::DataHandler**>(0x7C67E0);
-    }
-
-    WorldController* WorldController::get() {
-        return *reinterpret_cast<TES3::WorldController**>(0x7C67DC);
-    }
-
+// Inlined rather than introducing getCellFlag - patch only calls this.
+bool Cell::getIsInterior() const {
+    return (cellFlags & TES3::CellFlag::Interior) != 0;
 }
+
+DataHandler* DataHandler::get() {
+    return *reinterpret_cast<TES3::DataHandler**>(0x7C67E0);
+}
+
+WorldController* WorldController::get() {
+    return *reinterpret_cast<TES3::WorldController**>(0x7C67DC);
+}
+
+}  // namespace TES3
