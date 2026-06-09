@@ -40,10 +40,14 @@ struct ProbeResult {
     int impl;  // MaskedOcclusionCulling::Implementation, or -1
 };
 
-// Create + exercise + destroy. Catches AVX2/AVX512 link failures at load
-// instead of at first patch use.
+// Create + exercise + destroy. Catches AVX2 link failures at load instead of
+// at first patch use.
+//
+// AVX512 is intentionally disabled (known issues) by capping RequestedSIMD at
+// AVX2 here and at both buffer allocations in MaskResources.cpp. Revisit:
+// re-enable by removing the AVX2 cap (Create() defaults to AVX512).
 ProbeResult probeMocLink() {
-    auto* moc = MaskedOcclusionCulling::Create();
+    auto* moc = MaskedOcclusionCulling::Create(MaskedOcclusionCulling::AVX2);
     if (!moc) return {"Create() returned null", -1};
 
     moc->SetResolution(64, 32);

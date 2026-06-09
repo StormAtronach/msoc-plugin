@@ -22,7 +22,9 @@ bool createMSOCResources(std::ostream& log) {
     if (g_msoc && g_threadpool) return true;
 
     if (!g_msoc) {
-        g_msoc = ::MaskedOcclusionCulling::Create();
+        // AVX2 cap: AVX512 is intentionally disabled (known issues). See the
+        // probe in plugin.cpp. Revisit to re-enable (Create() defaults to AVX512).
+        g_msoc = ::MaskedOcclusionCulling::Create(::MaskedOcclusionCulling::AVX2);
         if (!g_msoc) {
             log << "MSOC: MaskedOcclusionCulling::Create() returned null; occlusion disabled." << std::endl;
             return false;
@@ -35,8 +37,8 @@ bool createMSOCResources(std::ostream& log) {
         // Snapshot buffer - external consumers read this. Same config
         // as g_msoc so the drain-complete swap preserves rasterizer
         // state. Pre-cleared so the first query (before any frame
-        // has completed) sees a defined all-far mask.
-        g_msoc_prev = ::MaskedOcclusionCulling::Create();
+        // has completed) sees a defined all-far mask. AVX2 cap (AVX512 off).
+        g_msoc_prev = ::MaskedOcclusionCulling::Create(::MaskedOcclusionCulling::AVX2);
         if (!g_msoc_prev) {
             log << "MSOC: snapshot buffer Create() returned null; occlusion disabled." << std::endl;
             ::MaskedOcclusionCulling::Destroy(g_msoc);
