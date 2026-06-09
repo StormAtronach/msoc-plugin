@@ -11,6 +11,9 @@
 #include "MaskedOcclusionCulling.h"
 #include "FrameConfig.h"
 #include "ClipMath.h"
+#include "OcclusionCaches.h"   // cache types + extern g_caches
+
+#include "NIPoint3.h"          // NI::Point3 for the testSphereVisible decl
 
 namespace msoc::patch::occlusion {
 
@@ -36,7 +39,19 @@ namespace msoc::patch::occlusion {
     extern FrameConfig g_frame;        // per-frame Configuration snapshot
     extern MaskSnapshot g_snapshot;    // published snapshot metadata
     extern ::MaskedOcclusionCulling* g_msoc_prev;  // swapped snapshot buffer
+    extern ::MaskedOcclusionCulling* g_msoc;       // live frame buffer
     extern unsigned int kMsocWidth;    // mask resolution (latched at install)
     extern unsigned int kMsocHeight;
+    extern uint32_t g_frameCounter;    // top-level frame counter
+
+    // Live sphere test against g_msoc (uses the live per-frame projection).
+    // Defined in PatchOcclusionCulling.cpp; called by LightCulling.cpp and the
+    // drain. Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
+    ::MaskedOcclusionCulling::CullingResult testSphereVisible(
+        const NI::Point3& center, float radius);
+
+    // Naked trampoline (NiDX8LightManager::updateLights enabled-read hook),
+    // defined in LightCulling.cpp; installPatches() takes its address.
+    void updateLights_enabledRead_hook();
 
 } // namespace msoc::patch::occlusion

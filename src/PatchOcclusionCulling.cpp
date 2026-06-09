@@ -112,7 +112,7 @@ namespace msoc::patch::occlusion {
 	// ============================================================
 
 	// Heap-allocated via Create()/Destroy(). Leaked on process exit.
-	static ::MaskedOcclusionCulling* g_msoc = nullptr;
+	::MaskedOcclusionCulling* g_msoc = nullptr;  // extern in OcclusionInternal.h
 	// Double-buffer. g_msoc_prev holds the PREVIOUS frame's completed
 	// mask - what external consumers (MGE-XE) read from. We rasterize
 	// into g_msoc each frame and swap at drain-complete so consumers
@@ -264,105 +264,9 @@ namespace msoc::patch::occlusion {
 	// Cache types & globals (land / drain / light)
 	// ============================================================
 
-	// Per-Land merged occluder cache. Key = per-Land NiNode under
-	// WorldLandscape; value = world-space vertex+index buffers prebuilt
-	// on first sight. Mark-and-sweep evicted per frame.
-	//
-	// nodePtr (NI::Pointer) refcounts the NiNode so the engine can't
-	// free a key we still hold. Sweep eviction releases the ref.
-	struct LandCacheEntry {
-		NI::Pointer<NI::Node> nodePtr;
-		std::vector<float> verts;
-		std::vector<unsigned int> indices;
-		unsigned int triCount = 0;
-		bool seen = false;
-		// Mismatch with current OcclusionTerrainResolution forces a
-		// rebuild on hit, so MCM changes take effect lazily without
-		// a global cache flush. 0xff = uninitialised.
-		uint8_t builtForResolution = 0xff;
 
-		// Per-subcell ranges into `indices` for per-subcell frustum-cull
-		// at submit time. `node` is the subcell NiNode used per frame
-		// as the frustumCulledSphere argument.
-		struct SubcellRange {
-			NI::Node* node;
-			unsigned int firstIdx;
-			unsigned int triCount;
-		};
-		std::vector<SubcellRange> subcellRanges;
-	};
 
-	// Temporal coherence cache for drain-phase TestRect verdicts. Keyed
-	// by NI::AVObject*. OcclusionTemporalCoherenceFrames N: 0 disables;
-	// N>0 reuses a fresh entry for up to N frames.
-	//
-	// Caches only OCCLUDED verdicts - VISIBLE and VIEW_CULLED fall
-	// through to display() anyway, so caching them adds stale-pointer
-	// surface for no hit-path win.
-	//
-	// Move detection compares worldBound origin + radius against the
-	// snapshot taken at query time.
-	//
-	// shapePtr (NI::Pointer) refcounts the AVObject key. Without it,
-	// raising N widens the window where a destroyed-but-not-yet-pruned
-	// entry could collide with a recycled pointer. Age-prune at 2*N
-	// frames bounds memory.
-	struct DrainCacheEntry {
-		NI::Pointer<NI::AVObject> shapePtr;
-		::MaskedOcclusionCulling::CullingResult result;
-		uint32_t lastQueryFrame;
-		float boundOriginX, boundOriginY, boundOriginZ;
-		float boundRadius;
-	};
 
-	// Terrain-descendant membership cache. Replaces a 7-deep parent-
-	// chain walk (called twice per deferred leaf) with a flat lookup.
-	// On a peak Vivec frame: 2354 calls x 7.3 avg = 17k pointer chases
-	// per frame, dominated by L2 misses on cold scene-graph nodes.
-	//
-	// Wiped on cell change. Within a cell, scene-graph parentage and
-	// g_worldLandscapeRoot are stable. Mid-cell reparenting is rare;
-	// the failure mode is benign (wrong "is terrain" -> harmless under-
-	// occlusion for one item).
-	struct TerrainMembershipEntry {
-		NI::Pointer<NI::AVObject> objPtr;
-		bool isDescendant;
-	};
-
-	// Per-instance occluder eligibility cache. Combines (a) ancestor-walked
-	// alpha/stencil classification and (b) world-space vertex/index buffers
-	// + AABB, keyed on NI::AVObject*. For static cell meshes both are
-	// invariant between frames. Profile data on user's machine: vertex-loop
-	// peak ~1.8 ms/frame, classify peak ~260 us/frame - both well above the
-	// 50 us/frame caching threshold from MSOC_CACHE_AUDIT.md.
-	//
-	// Invalidation:
-	//   - Cell change wipes the whole map (same hook as g_caches.drain).
-	//   - Geometry slot refreshes whenever the worldTransform memcmp differs
-	//     (catches moved pickables, scripted moves; ~no-op for cell statics).
-	//
-	// Profile probes kept in place so the cache's own hit rate and any
-	// residual miss-path cost stay visible in MSOC.log.
-	struct OccluderCacheEntry {
-		NI::Pointer<NI::AVObject> objPtr;
-
-		bool propsResolved = false;
-		bool alpha = false;
-		bool stencil = false;
-
-		bool geomResolved = false;
-		std::vector<float> worldVerts;
-		std::vector<unsigned int> indices;
-		unsigned int outTriCount = 0;
-		unsigned short vertexCount = 0;
-		float minX = 0, minY = 0, minZ = 0;
-		float maxX = 0, maxY = 0, maxZ = 0;
-
-		// 13 floats = sizeof(TES3::Transform). Storing the bytes verbatim
-		// (rotation + translation + scale) lets a single memcmp catch any
-		// kind of motion without writing a per-field comparator.
-		float xfData[13] = {};
-	};
 
 	// Miss-path workload probes: count walked ancestor steps and transformed
 	// verts on the cache-miss path. Together with hit/miss above these
@@ -373,69 +277,9 @@ namespace msoc::patch::occlusion {
 	static uint64_t g_occluderVertexVerts   = 0;
 
 
-	// Per-light occlusion cache for updateLights (gated by
-	// OcclusionCullLights). Tracks last query frame, last verdict,
-	// consecutive-occluded count for hysteresis, and worldBound snapshot
-	// for move detection.
-	//
-	// lightPtr (NI::Pointer) refcounts the NiLight so a freed-then-
-	// reallocated address can't collide with a stale entry mid-cell.
-	struct LightCullEntry {
-		NI::Pointer<NI::Light> lightPtr;
-		uint32_t lastQueryFrame;
-		uint8_t consecOccluded;
-		bool cullActive;
-		float boundOriginX, boundOriginY, boundOriginZ;
-		float boundRadius;
-	};
 
-	// ------------------------------------------------------------
-	// Owner for the five per-cell caches + their hit/miss counters.
-	// Single g_caches instance replaces the loose g_*Cache* statics.
-	// ------------------------------------------------------------
-	struct OcclusionCaches {
-		std::unordered_map<NI::Node*, LandCacheEntry> land;
-		uint64_t landHits = 0, landMisses = 0, landEvictions = 0;
+	OcclusionCaches g_caches;  // extern in OcclusionCaches.h
 
-		std::unordered_map<NI::AVObject*, DrainCacheEntry> drain;
-		uint64_t drainHits = 0, drainMisses = 0;
-
-		std::unordered_map<NI::AVObject*, TerrainMembershipEntry> terrainMembership;
-		uint64_t terrainMembershipHits = 0, terrainMembershipMisses = 0;
-
-		std::unordered_map<NI::AVObject*, OccluderCacheEntry> occluder;
-		uint64_t occluderHits = 0, occluderMisses = 0;
-
-		std::unordered_map<NI::Light*, LightCullEntry> lightCull;
-		uint64_t lightsTested = 0, lightsOccluded = 0, lightCullHits = 0, lightCullMisses = 0;
-
-		// Get-or-create the occluder entry for obj (refcounts the key).
-		OccluderCacheEntry& occluderEntry(NI::AVObject* obj) {
-			auto it = occluder.find(obj);
-			if (it != occluder.end()) {
-				return it->second;
-			}
-			auto& e = occluder[obj];
-			e.objPtr = NI::Pointer<NI::AVObject>(obj);
-			return e;
-		}
-
-		// Cell-change wipe: release every cached NI::Pointer pin. Clear
-		// order preserved verbatim from the original inline wipe.
-		void wipeForCellChange() {
-			land.clear();
-			drain.clear();
-			lightCull.clear();
-			terrainMembership.clear();
-			occluder.clear();
-		}
-	};
-	static OcclusionCaches g_caches;
-
-	// Light observers - registered by external consumers (MGE-XE) that
-	// want the live renderer-iterated light list without re-patching
-	// 0x6BB7D4. Iterated lock-free from the render thread.
-	static std::vector<LightObservedCallback> g_lightObservers;
 
 	// Visible-geom observers - registered by external consumers (MGE-XE)
 	// to receive the MSOC-culled visible set before display() is called.
@@ -449,7 +293,7 @@ namespace msoc::patch::occlusion {
 
 	// File-scope frame counter; incremented once per top-level frame.
 	// Used by the drain loop for cache-freshness checks.
-	static uint32_t g_frameCounter = 0;
+	uint32_t g_frameCounter = 0;  // extern in OcclusionInternal.h
 	// Cell pointer across frames. Cell change -> wipe g_caches.land and
 	// g_caches.drain (NI::Node*/NI::AVObject* recycle in the new cell).
 	static TES3::Cell* g_lastCell = nullptr;
@@ -806,7 +650,7 @@ namespace msoc::patch::occlusion {
 	//
 	// Sphere straddling the near plane bails as VISIBLE; TestRect can't
 	// project a straddling rect safely.
-	static ::MaskedOcclusionCulling::CullingResult testSphereVisible(
+	::MaskedOcclusionCulling::CullingResult testSphereVisible(
 		const NI::Point3& center, float radius) {
 		const ClipXYW c = projectWorld(center.x, center.y, center.z);
 
@@ -834,24 +678,12 @@ namespace msoc::patch::occlusion {
 	}
 
 	// ============================================================
-	// Light culling
+	// Visible-geom observer registration
 	// ============================================================
 
 	// Dedup on register so DLL reload doesn't double-dispatch. Startup
 	// only, not hot path.
-	void registerLightObservedCallback(LightObservedCallback cb) {
-		if (cb == nullptr) return;
-		const auto it = std::find(g_lightObservers.begin(), g_lightObservers.end(), cb);
-		if (it != g_lightObservers.end()) return;
-		g_lightObservers.push_back(cb);
-	}
 
-	void unregisterLightObservedCallback(LightObservedCallback cb) {
-		const auto it = std::find(g_lightObservers.begin(), g_lightObservers.end(), cb);
-		if (it != g_lightObservers.end()) {
-			g_lightObservers.erase(it);
-		}
-	}
 
 	void registerVisibleGeomCallback(VisibleGeomCallback cb) {
 		if (!cb) return;
@@ -864,145 +696,6 @@ namespace msoc::patch::occlusion {
 		if (it != g_visibleGeomObservers.end()) g_visibleGeomObservers.erase(it);
 	}
 
-	// Called from the naked hook at 0x6bb7d4 (replacing the original
-	// `mov al, [ebx+0x90]` enabled-read in NiDX8LightManager::updateLights).
-	// Returns the effective enabled byte: real flag, unless
-	// OcclusionCullLights is on AND the worldBound sphere has been
-	// OCCLUDED for at least OcclusionLightCullHysteresisFrames consecutive
-	// frames, in which case 0 (disabled). Pre-empts D3D8 SetLight/
-	// LightEnable without touching the scene graph.
-	//
-	// Hysteresis: VISIBLE resets and unlatches immediately (lights
-	// reappear same-frame). OCCLUDED only latches after N consecutive,
-	// so transient misfires don't flicker. Default N=3 (~50ms at 60Hz).
-	// Counter is uint8_t - slider values above 255 effectively disable
-	// the latch.
-	extern "C" bool __cdecl shouldLightBeEnabled(NI::Light* light) {
-		// Observer dispatch runs unconditionally - observers see every
-		// iterated NiLight regardless of cache hit / MSOC state.
-		for (const auto cb : g_lightObservers) {
-			cb(light);
-		}
-
-		// The true enabled flag - always fetched, since a disabled
-		// light stays disabled regardless of occlusion.
-		const bool realEnabled = light->enabled;
-		if (!realEnabled) {
-			return false;
-		}
-		if (!g_frame.cullLights) {
-			return true;
-		}
-		if (!g_msoc) {
-			// Hook installed but MSOC backend failed to init - bypass.
-			return true;
-		}
-
-		// Only NiPointLight is spatially cullable. Directional / ambient
-		// lights affect the scene globally and must never be tested. The
-		// specular.r overload below is point-light-specific (Bethesda's
-		// modder-set fade radius); other light types may carry non-zero
-		// specular for actual specular colour, so we can't filter by
-		// that alone - we'd dim the menu / sun light at unlucky angles.
-		if (!light->isInstanceOfType(NI::RTTIStaticPtr::NiPointLight)) {
-			return true;
-		}
-
-		// Position + radius for the occlusion test:
-		//   - worldTransform.translation: live engine-computed transform.
-		//     worldBoundOrigin / worldBoundRadius look tempting but they
-		//     stay uncomputed for most NiLights (the engine never asks
-		//     for their bounding volume), so they degenerate to (0,0,0)/0.
-		//     Same trap MGE-XE's many-lights producer hit (see
-		//     occlusion-and-rendering.md sec 12).
-		//   - specular.r: Bethesda overloaded NI::Light::specular.r as the
-		//     modder-set fade radius. The engine's per-object light
-		//     selection at 0x4D2F40 uses this and culls lights with
-		//     radius=0 from every object - match its behavior here so we
-		//     never test a light the engine itself wouldn't render.
-		const NI::Point3& t = light->worldTransform.translation;
-		const float cx = t.x;
-		const float cy = t.y;
-		const float cz = t.z;
-		const float cr = light->specular.r;
-
-		// PointLight with no modder-set radius - engine wouldn't render
-		// it on most objects anyway, so don't bother testing.
-		if (cr <= 0.0f) {
-			return true;
-		}
-
-		auto it = g_caches.lightCull.find(light);
-		const bool haveValidEntry = (it != g_caches.lightCull.end())
-			&& it->second.boundOriginX == cx
-			&& it->second.boundOriginY == cy
-			&& it->second.boundOriginZ == cz
-			&& it->second.boundRadius == cr;
-
-		// Same-frame cache hit - return latched verdict without re-testing.
-		if (haveValidEntry && it->second.lastQueryFrame == g_frameCounter) {
-			++g_caches.lightCullHits;
-			return !it->second.cullActive;
-		}
-
-		// Miss (or stale) - run MSOC test.
-		++g_caches.lightCullMisses;
-		++g_caches.lightsTested;
-		const NI::Point3 center{ cx, cy, cz };
-		const auto verdict = testSphereVisible(center, cr);
-		const bool occluded = (verdict == ::MaskedOcclusionCulling::OCCLUDED);
-		if (occluded) ++g_caches.lightsOccluded;
-
-		if (haveValidEntry) {
-			auto& e = it->second;
-			e.lastQueryFrame = g_frameCounter;
-			if (occluded) {
-				if (e.consecOccluded < 0xFF) ++e.consecOccluded;
-				if (e.consecOccluded >= g_frame.lightCullHysteresisFrames) {
-					e.cullActive = true;
-				}
-			}
-			else {
-				e.consecOccluded = 0;
-				e.cullActive = false;
-			}
-			return !e.cullActive;
-		}
-
-		// Fresh insert: not-culled-yet, so hysteresis ramps up before
-		// first darkening even when the first verdict is OCCLUDED.
-		LightCullEntry e;
-		e.lightPtr = light;
-		e.lastQueryFrame = g_frameCounter;
-		e.consecOccluded = occluded ? 1 : 0;
-		e.cullActive = false;
-		e.boundOriginX = cx;
-		e.boundOriginY = cy;
-		e.boundOriginZ = cz;
-		e.boundRadius = cr;
-		g_caches.lightCull[light] = e;
-		return true;
-	}
-
-	// Naked trampoline replacing `mov al, [ebx+NiLight.super.enabled]`
-	// at 0x6bb7d4. Entry: ebx = NiLight*. Exit: AL = effective enabled
-	// byte. Upper EAX is don't-care (matches the mov-al semantics; the
-	// followup `test al, al` only reads AL).
-	__declspec(naked) void updateLights_enabledRead_hook() {
-		__asm {
-			// ecx/edx are nominally caller-save but the surrounding
-			// loop doesn't preserve them across our site.
-			push ecx
-			push edx
-			push ebx                 // arg: NI::Light*
-			call shouldLightBeEnabled
-			add esp, 4
-			movzx eax, al            // zero-extend so upper bits are defined
-			pop edx
-			pop ecx
-			retn
-		}
-	}
 
 	// ============================================================
 	// Occluder rasterisation
