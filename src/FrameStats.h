@@ -6,9 +6,9 @@
 // reference a single extern instead of dozens of loose globals.
 //
 // NOT included here: the budget / EMA / call-depth / frame-window control
-// state, which is detour-internal and stays in PatchOcclusionCulling.cpp.
+// state, which is detour-internal and stays in OcclusionPass.cpp.
 //
-// The single g_stats instance is defined in PatchOcclusionCulling.cpp. Reset
+// The single g_stats instance is defined in OcclusionPass.cpp. Reset
 // to zero each top-level frame by the detour; no synchronization beyond the
 // render thread except queryNearClip (touched from the threadpool path).
 
@@ -35,6 +35,7 @@ struct FrameStats {
     uint64_t queryTested = 0;
     uint64_t queryOccluded = 0;
     uint64_t queryViewCulled = 0;
+    uint64_t boxOccluded = 0;  // sphere VISIBLE but tighter box test culled it
     std::atomic<uint64_t> queryNearClip{0};
     uint64_t deferred = 0;
     uint64_t inlineTested = 0;

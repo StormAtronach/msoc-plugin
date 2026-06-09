@@ -1,5 +1,5 @@
 // Unit tests for msoc::clipmath - the engine-free clip-space / projection
-// math extracted from PatchOcclusionCulling.cpp. All pure float helpers;
+// math extracted from OcclusionPass.cpp. All pure float helpers;
 // no NI/TES3/MOC dependency.
 
 #include "doctest.h"

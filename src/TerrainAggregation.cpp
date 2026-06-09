@@ -1,8 +1,8 @@
 // Terrain occluder aggregation: merges each near Land into one MOC
 // submission (Raster mode) or a 1D horizon curtain (Horizon mode). Split
-// from PatchOcclusionCulling.cpp; shared state via OcclusionInternal.h.
+// from OcclusionPass.cpp; shared state via OcclusionInternal.h.
 
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 #include "OcclusionInternal.h"
 #include "HorizonOccluder.h"
 

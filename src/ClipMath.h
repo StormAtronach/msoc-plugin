@@ -1,7 +1,7 @@
 #pragma once
 
 // Engine-free clip-space / projection math, extracted from
-// PatchOcclusionCulling.cpp. Pure float helpers with no NI/TES3/MOC types, so
+// OcclusionPass.cpp. Pure float helpers with no NI/TES3/MOC types, so
 // they compile into both the plugin DLL and the unit-test target. Header-only
 // `inline` so the hot-path call sites (per-occludee projectWorld) inline fully
 // in every config, without depending on the Release-only LTO pass.

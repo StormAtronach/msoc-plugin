@@ -7,7 +7,7 @@
 // predictiveSkip (Layer 1: EMA vs 2x budget), spikeClipTripped (Layer 2:
 // elapsed vs budget) all operate on these fields.
 //
-// The single g_budget instance is defined in PatchOcclusionCulling.cpp.
+// The single g_budget instance is defined in OcclusionPass.cpp.
 
 #include <chrono>
 #include <cstdint>

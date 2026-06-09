@@ -35,6 +35,14 @@ def main(path):
     print(f"(steady state = last {len(ss)} frames)\n")
     print("-- occlusion effectiveness --")
     print(f"  occludees OCCLUDED:  {tot_occ}/{tot_test}  ({100*tot_occ/tot_test:.1f}% cull rate)")
+    box = sum(num(f, 'boxOccluded') for f in ss)
+    if box or any('boxOccluded' in f for f in ss):
+        share = 100 * box / tot_occ if tot_occ else 0
+        print(f"  of which from box test: {int(box)}  ({share:.1f}% of occlusions)")
+        bh = sum(num(f, 'boxCacheHit') for f in ss)
+        bm = sum(num(f, 'boxCacheMiss') for f in ss)
+        if bh + bm:
+            print(f"  box-AABB cache: {100*bh/(bh+bm):.1f}% hit  (hits={int(bh)} miss={int(bm)})")
     print(f"  occluders rasterized/frame: {avg('rasterized'):.0f}   viewCulled/frame: {avg('viewCulled'):.0f}")
     print(f"  terrain lands aggregated/frame: {avg('aggTerrainLands'):.0f}")
 

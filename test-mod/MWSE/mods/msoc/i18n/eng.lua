@@ -52,6 +52,14 @@ return {
         .. "viewpoint. Enabled: they bypass the visibility test and render unconditionally, "
         .. "saving one TestRect call per patch per frame. Disable only to A/B test.",
 
+    ["OcclusionOccludeeBoxTest.label"] = "Tighter box occludee test",
+    ["OcclusionOccludeeBoxTest.description"] = "After the bounding-sphere test "
+        .. "reports an occludee visible, re-test its tighter object-space bounding "
+        .. "box. The sphere is conservative for long or flat meshes, so the box can "
+        .. "catch occlusions the sphere misses, raising the cull rate. The box is "
+        .. "computed once per mesh and cached. Costs an extra projection only on "
+        .. "occludees the sphere left visible. Default off; enable to A/B test.",
+
     ["OcclusionAggregateTerrain.label"] = "Terrain occluder mode",
     ["OcclusionAggregateTerrain.description"] = "Off: no terrain in the occlusion mask "
         .. "(lowest CPU, lowest cull rate). "

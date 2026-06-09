@@ -6,9 +6,9 @@
 // kills it, the file shows which stage the main thread was stuck in,
 // recursion depth at freeze, and time since the last clean frame end.
 //
-// Decouples watchdog logic from PatchOcclusionCulling.cpp. The hot path
+// Decouples watchdog logic from OcclusionPass.cpp. The hot path
 // keeps its globals internal-linkage; the only crossing point is
-// captureSnapshot(), defined in PatchOcclusionCulling.cpp.
+// captureSnapshot(), defined in OcclusionPass.cpp.
 
 #include <cstdint>
 #include <iosfwd>
@@ -27,11 +27,11 @@ struct Snapshot {
     bool threadpoolAlive;  // g_threadpool != nullptr
 };
 
-// Implemented in PatchOcclusionCulling.cpp where the read targets live.
+// Implemented in OcclusionPass.cpp where the read targets live.
 Snapshot captureSnapshot();
 
 // 0..15 -> human-readable label. Kept in sync with the stage-numbering
-// comment above g_lastStage in PatchOcclusionCulling.cpp.
+// comment above g_lastStage in OcclusionPass.cpp.
 const char* stageName(uint32_t stage);
 
 // Spawn the detached watchdog thread when

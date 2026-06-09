@@ -4,7 +4,7 @@
 // feature module - depends only on shared state + leaf math, nothing in the
 // core - so it closes the last core<->subsystem back-edge.
 
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 #include "OcclusionInternal.h"
 #include "Config.h"
 #include "Log.h"

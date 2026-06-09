@@ -1,6 +1,6 @@
 #pragma once
 
-// Debug-only occlusion tint overlay, split out of PatchOcclusionCulling.cpp.
+// Debug-only occlusion tint overlay, split out of OcclusionPass.cpp.
 // Recolors classified NiTriBasedGeom leaves so the cull decision is visible
 // in-engine: occluded (red), survived the query (green), rasterised as an
 // occluder (yellow). Engine-coupled (NI material/property mutation), so it is

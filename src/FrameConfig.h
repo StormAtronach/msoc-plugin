@@ -3,7 +3,7 @@
 // Per-top-level-frame snapshot of the Configuration:: knobs the hot path
 // reads, resolved once at the start of an active frame so the inner loops
 // stay branch-free on scene type and immune to a mid-frame configure().
-// Replaces the loose g_*Effective file-statics that PatchOcclusionCulling.cpp
+// Replaces the loose g_*Effective file-statics that OcclusionPass.cpp
 // used to hand-copy in the detour.
 //
 // Not the phase budgets: those live with the profiling/FrameStats machinery
@@ -26,6 +26,7 @@ struct FrameConfig {
     unsigned int occluderMaxTriangles = 4096;
     float occludeeMinRadius = 1.0f;
     bool skipTerrainOccludees = true;
+    bool occludeeBoxTest = false;
     int aggregateTerrain = 1;
     unsigned int terrainResolution = 1;
     unsigned int temporalCoherenceFrames = 4;
@@ -55,6 +56,7 @@ struct FrameConfig {
         occluderMaxTriangles = C::OcclusionOccluderMaxTriangles;
         occludeeMinRadius = static_cast<float>(C::OcclusionOccludeeMinRadius);
         skipTerrainOccludees = C::OcclusionSkipTerrainOccludees;
+        occludeeBoxTest = C::OcclusionOccludeeBoxTest;
         aggregateTerrain = C::OcclusionAggregateTerrain;
         terrainResolution = C::OcclusionTerrainResolution;
         temporalCoherenceFrames = C::OcclusionTemporalCoherenceFrames;

@@ -1,7 +1,7 @@
 #pragma once
 
 // Engine-free profiling / phase-budget math, extracted from
-// PatchOcclusionCulling.cpp. Pure integer logic - no engine or clock types -
+// OcclusionPass.cpp. Pure integer logic - no engine or clock types -
 // so it compiles into both the plugin DLL and the unit-test target and inlines
 // on the hot path.
 //

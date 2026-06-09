@@ -1,7 +1,7 @@
 // MSOC mask resource lifecycle: allocate / free the live + snapshot MOC
 // buffers and the culling threadpool, and reconcile them against the
 // EnableMSOC gate. Not hot-path (install / MCM toggle / create-failure).
-// Split from PatchOcclusionCulling.cpp; shared state via OcclusionInternal.h.
+// Split from OcclusionPass.cpp; shared state via OcclusionInternal.h.
 
 #include "OcclusionInternal.h"
 #include "Config.h"

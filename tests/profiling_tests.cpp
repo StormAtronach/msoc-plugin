@@ -1,6 +1,6 @@
 // Unit tests for msoc::profiling - the engine-free phase-budget math
 // (EMA + predictive-skip / spike-clip decisions) extracted from
-// PatchOcclusionCulling.cpp.
+// OcclusionPass.cpp.
 
 #include "doctest.h"
 

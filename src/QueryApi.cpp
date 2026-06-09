@@ -1,9 +1,9 @@
 // Out-of-tree mask query API (testOcclusion*, snapshot accessors), split
-// from PatchOcclusionCulling.cpp. Reads the published snapshot
+// from OcclusionPass.cpp. Reads the published snapshot
 // (g_snapshot / g_msoc_prev) via OcclusionInternal.h; the public C-ABI
-// declarations live in PatchOcclusionCulling.h.
+// declarations live in OcclusionApi.h.
 
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 #include "OcclusionInternal.h"
 
 #include "NIPoint3.h"

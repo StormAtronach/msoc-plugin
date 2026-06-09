@@ -2,7 +2,7 @@
 
 // Per-cell cache types + the single owner object, shared between the core TU
 // and the subsystem TUs that read/write the caches. The g_caches instance is
-// defined in PatchOcclusionCulling.cpp.
+// defined in OcclusionPass.cpp.
 
 #include "MaskedOcclusionCulling.h"
 
@@ -133,8 +133,19 @@ struct LightCullEntry {
     float boundRadius;
 };
 
+// Object-space AABB of a geometry's verts, for the optional occludee box
+// test. Keyed by the NI::GeometryData pointer (shared across instances via
+// NIF dedup), so the vert min/max is computed once per unique mesh and reused
+// for every instance. The pointer is held as an opaque key; the cache is
+// wiped on cell change like the others, so a freed-then-recycled pointer
+// can't survive into the next cell.
+struct OccludeeBoxEntry {
+    float minX, minY, minZ;
+    float maxX, maxY, maxZ;
+};
+
 // ------------------------------------------------------------
-// Owner for the five per-cell caches + their hit/miss counters.
+// Owner for the per-cell caches + their hit/miss counters.
 // Single g_caches instance replaces the loose g_*Cache* statics.
 // ------------------------------------------------------------
 struct OcclusionCaches {
@@ -152,6 +163,10 @@ struct OcclusionCaches {
 
     std::unordered_map<NI::Light*, LightCullEntry> lightCull;
     uint64_t lightsTested = 0, lightsOccluded = 0, lightCullHits = 0, lightCullMisses = 0;
+
+    // Object-space vertex AABB per geometry (optional occludee box test).
+    std::unordered_map<const void*, OccludeeBoxEntry> occludeeBox;
+    uint64_t occludeeBoxHits = 0, occludeeBoxMisses = 0;
 
     // Get-or-create the occluder entry for obj (refcounts the key).
     OccluderCacheEntry& occluderEntry(NI::AVObject* obj) {
@@ -172,6 +187,7 @@ struct OcclusionCaches {
         lightCull.clear();
         terrainMembership.clear();
         occluder.clear();
+        occludeeBox.clear();
     }
 };
 

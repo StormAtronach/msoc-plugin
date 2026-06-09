@@ -8,7 +8,7 @@
 
 #include "Config.h"
 #include "MaskedOcclusionCulling.h"
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 
 extern "C" {
 #include "lua.h"

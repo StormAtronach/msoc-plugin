@@ -26,6 +26,7 @@ bool Configuration::OcclusionInsideOccluderGuard = false;
 float Configuration::OcclusionDepthSlackWorldUnits = 128.0f;
 unsigned int Configuration::OcclusionOccluderMaxTriangles = 4096;
 unsigned int Configuration::OcclusionOccludeeMinRadius = 1;
+bool Configuration::OcclusionOccludeeBoxTest = false;
 
 bool Configuration::OcclusionEnableInterior = true;
 bool Configuration::OcclusionEnableExterior = true;
@@ -203,6 +204,7 @@ int configure(lua_State* L) {
     readBool(L, 1, "OcclusionEnableInterior", Configuration::OcclusionEnableInterior);
     readBool(L, 1, "OcclusionEnableExterior", Configuration::OcclusionEnableExterior);
     readBool(L, 1, "OcclusionSkipTerrainOccludees", Configuration::OcclusionSkipTerrainOccludees);
+    readBool(L, 1, "OcclusionOccludeeBoxTest", Configuration::OcclusionOccludeeBoxTest);
     readTerrainOcclusionMode(L, 1, "OcclusionAggregateTerrain", Configuration::OcclusionAggregateTerrain);
     readUInt(L, 1, "OcclusionTerrainResolution", Configuration::OcclusionTerrainResolution);
 

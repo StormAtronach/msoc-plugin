@@ -46,6 +46,9 @@ void emitPerFrameStatsLine() {
                       << " occluderTris=" << g_stats.occluderTriangles
                       << " queryOccluded=" << g_stats.queryOccluded
                       << "/" << g_stats.queryTested
+                      << " boxOccluded=" << g_stats.boxOccluded
+                      << " boxCacheHit=" << g_caches.occludeeBoxHits
+                      << " boxCacheMiss=" << g_caches.occludeeBoxMisses
                       << " viewCulled=" << g_stats.queryViewCulled
                       << " nearClip=" << g_stats.queryNearClip.load(std::memory_order_relaxed)
                       << " deferred=" << g_stats.deferred

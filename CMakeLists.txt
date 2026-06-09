@@ -89,9 +89,9 @@ if(MSOC_BUILD_DLL)
         src/DebugTint.cpp
         # Detached watchdog thread that dumps MSOC.forensics.txt every
         # ~250 ms while the gate is on. Reads hot-path checkpoints via
-        # forensics::captureSnapshot() defined in PatchOcclusionCulling.cpp.
-        src/PatchForensicsWatchdog.cpp
-        src/PatchOcclusionCulling.cpp
+        # forensics::captureSnapshot() defined in OcclusionPass.cpp.
+        src/ForensicsWatchdog.cpp
+        src/OcclusionPass.cpp
         # Out-of-tree mask query API (testOcclusion*, snapshot accessors).
         # Reads the shared snapshot state via OcclusionInternal.h.
         src/QueryApi.cpp

@@ -14,10 +14,10 @@ The source is organized as a dependency DAG: every module depends only on
 modules below it. Nothing below the core depends back up into it.
 
 ```
-  ABI boundary      PatchOcclusionCulling.h (public C exports' declarations)
+  ABI boundary      OcclusionApi.h (public C exports' declarations)
                     Exports.cpp (mwse_* __cdecl thunks)   plugin.cpp (luaopen)
   ----------------------------------------------------------------------------
-  Core orchestrator PatchOcclusionCulling.cpp
+  Core orchestrator OcclusionPass.cpp
                       - CullShow detour + frame lifecycle
                       - scene-graph traversal (cullShowBody)
                       - occluder rasterization (rasterizeTriShape)   [hot]
@@ -60,11 +60,11 @@ detour drains it, `MaskResources` clears it, so it lives below both.
 ## The shared-state seam: `OcclusionInternal.h`
 
 The plugin's private internal contract (distinct from the public ABI in
-`PatchOcclusionCulling.h`). It is included by every patch TU and provides two
+`OcclusionApi.h`). It is included by every patch TU and provides two
 things:
 
 1. **Shared state** - `extern` declarations of the single global instances
-   defined in `PatchOcclusionCulling.cpp`: the state owners (`g_frame`,
+   defined in `OcclusionPass.cpp`: the state owners (`g_frame`,
    `g_stats`, `g_budget`, `g_diag`, `g_caches`, `g_snapshot`), the MOC
    resources (`g_msoc`, `g_msoc_prev`, `g_threadpool`), the live projection
    (`g_worldToClip`, `g_ndcRadius*`, `g_wGradMag`), and assorted frame flags.
@@ -118,7 +118,7 @@ detoured. One top-level pass per scene:
 
 ## ABI
 
-- `PatchOcclusionCulling.h` is the frozen public contract: the `mwse_*` C
+- `OcclusionApi.h` is the frozen public contract: the `mwse_*` C
   exports and the `msoc::patch::occlusion` query/callback API. Result codes are
   fixed (`0=Visible 1=Occluded 2=ViewCulled 3=NotReady`).
 - `Exports.cpp` is a thin thunk layer; the API functions it forwards to live in

@@ -2,9 +2,9 @@
 // Tests each NiPointLight bounding sphere against the live mask and latches
 // off fully-occluded lights (hysteresis), pre-empting D3D8 SetLight/
 // LightEnable without touching the scene graph. Split from
-// PatchOcclusionCulling.cpp; shared state via OcclusionInternal.h.
+// OcclusionPass.cpp; shared state via OcclusionInternal.h.
 
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 #include "OcclusionInternal.h"
 
 #include "NILight.h"

@@ -1,9 +1,9 @@
 // C-ABI exports for out-of-tree consumers (MGE-XE etc.). Thin __cdecl
 // thunks forwarding to the msoc::patch::occlusion public API; the
-// matching dllexport declarations live in PatchOcclusionCulling.h.
-// Split out of PatchOcclusionCulling.cpp.
+// matching dllexport declarations live in OcclusionApi.h.
+// Split out of OcclusionPass.cpp.
 
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 
 // ============================================================
 // C-ABI exports (out-of-tree consumers: MGE-XE etc.)

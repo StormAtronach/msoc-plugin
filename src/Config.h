@@ -37,6 +37,10 @@ public:
     static float OcclusionDepthSlackWorldUnits;
     static unsigned int OcclusionOccluderMaxTriangles;
     static unsigned int OcclusionOccludeeMinRadius;
+    // Optional tighter occludee test: after a VISIBLE sphere result, project
+    // the occludee's object-space vertex AABB (8 corners) and re-test. Catches
+    // non-spherical leaves the loose bounding sphere keeps visible. Default off.
+    static bool OcclusionOccludeeBoxTest;
 
     static bool OcclusionEnableInterior;
     static bool OcclusionEnableExterior;

@@ -2,11 +2,11 @@
 
 // Internal shared state for the occlusion patch, exposed so subsystem
 // translation units (QueryApi.cpp, ...) can link against the core state that
-// PatchOcclusionCulling.cpp defines. This is the plugin's private seam, not a
-// public API - the public C surface lives in PatchOcclusionCulling.h.
+// OcclusionPass.cpp defines. This is the plugin's private seam, not a
+// public API - the public C surface lives in OcclusionApi.h.
 //
 // The single definitions of the extern globals below live in
-// PatchOcclusionCulling.cpp.
+// OcclusionPass.cpp.
 
 #include "MaskedOcclusionCulling.h"
 #include "CullingThreadpool.h"  // ::CullingThreadpool for g_threadpool
@@ -52,7 +52,7 @@ struct OccluderPropertyFlags {
 OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj);
 
 // Live per-frame state shared with the subsystem TUs (defined in
-// PatchOcclusionCulling.cpp).
+// OcclusionPass.cpp).
 extern float g_worldToClip[16];  // live world-to-clip (column-major)
 extern float g_ndcRadiusX;       // live sphere-projection metrics, set by
 extern float g_ndcRadiusY;       // uploadCameraTransform; read by LiveQuery
@@ -79,7 +79,7 @@ inline constexpr float kNearClipW = 1.0f;
 // External queries reject snapshots older than this (alt-tab, menu, load).
 inline constexpr unsigned long long kSnapshotMaxAgeMs = 200;
 
-// Cross-TU shared state. Defined once in PatchOcclusionCulling.cpp.
+// Cross-TU shared state. Defined once in OcclusionPass.cpp.
 extern FrameConfig g_frame;                    // per-frame Configuration snapshot
 extern MaskSnapshot g_snapshot;                // published snapshot metadata
 extern ::MaskedOcclusionCulling* g_msoc_prev;  // swapped snapshot buffer
@@ -93,6 +93,10 @@ extern uint32_t g_frameCounter;  // top-level frame counter
 // LightCulling. Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
 ::MaskedOcclusionCulling::CullingResult testSphereVisible(
     const NI::Point3& center, float radius);
+
+// Live OBB test against g_msoc: corners is 8 world-space (x, y, z) triples.
+// Defined in LiveQuery.cpp; used by the drain's optional occludee box test.
+::MaskedOcclusionCulling::CullingResult testBoxVisible(const float* corners);
 
 // Naked trampoline (NiDX8LightManager::updateLights enabled-read hook),
 // defined in LightCulling.cpp; installPatches() takes its address.

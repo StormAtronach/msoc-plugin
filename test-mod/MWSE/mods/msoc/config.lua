@@ -17,6 +17,8 @@ local default_config = {
     OcclusionEnableInterior             = true,
     OcclusionEnableExterior             = true,
     OcclusionSkipTerrainOccludees       = true,
+    -- Optional tighter occludee test (object-space box after the sphere).
+    OcclusionOccludeeBoxTest            = false,
     -- LAYER-A-HORIZON: tri-state. 0=Off, 1=Raster (default), 2=Horizon.
     -- Default Raster — on multi-core CPUs with async occluders enabled
     -- (the medium/high hardware tiers), the threadpool parallelizes the

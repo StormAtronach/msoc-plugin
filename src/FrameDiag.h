@@ -9,7 +9,7 @@
 // Reset semantics are the detour's: per-frame fields are cleared at the top of
 // each frame, *Session fields accumulate for the process lifetime, and the
 // window* fields reset per log window. The single g_diag instance is defined
-// in PatchOcclusionCulling.cpp.
+// in OcclusionPass.cpp.
 
 #include <cstdint>
 

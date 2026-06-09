@@ -1,4 +1,4 @@
-#include "PatchOcclusionCulling.h"
+#include "OcclusionApi.h"
 
 #include "Log.h"
 #include "MemoryUtil.h"
@@ -23,7 +23,7 @@
 // Freeze-forensics watchdog. Owns the watchdog thread, its stage-name
 // table, and the spawn gate. This TU implements the read accessor
 // (forensics::captureSnapshot) it calls back into.
-#include "PatchForensicsWatchdog.h"
+#include "ForensicsWatchdog.h"
 
 #include "TES3Cell.h"
 #include "TES3DataHandler.h"
@@ -235,7 +235,7 @@ struct CallDepthGuard {
 //   8 aggTerrain, 9 cullShowBody, 10 flush, 11 drain,
 //   12 suspendThreads, 13 exitedClean,
 //   14 drainClassify, 15 drainAction.
-// Mirrored in PatchForensicsWatchdog::stageName().
+// Mirrored in ForensicsWatchdog::stageName().
 static volatile uint32_t g_lastStage = 0;
 
 // Published at end of each top-level frame (after g_lastStage = 13).
@@ -302,7 +302,7 @@ FrameConfig g_frame;
 // Forensics watchdog - read accessor
 // ============================================================
 
-// Sole bridge to PatchForensicsWatchdog.cpp. Defined here so the
+// Sole bridge to ForensicsWatchdog.cpp. Defined here so the
 // hot-path statics stay internal-linkage. Called once per ~250ms;
 // no synchronisation - single loads, post-mortem-grade coherence.
 forensics::Snapshot forensics::captureSnapshot() {
@@ -706,11 +706,13 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
             // (fences, banners, leaves) would falsely occlude things
             // behind the transparent parts.
             //
-            // When aggregate-terrain is on, terrain descendants are
-            // already in the buffer as merged per-Land submissions -
-            // re-rasterising would be dup work.
-            const bool skipAsAggregated = (g_frame.aggregateTerrain != 0) && isLandscapeDescendant(self, g_worldLandscapeRoot);
-            if (!skipAsAggregated && boundRadius >= g_frame.occluderRadiusMin && boundRadius <= g_frame.occluderRadiusMax) {
+            // Terrain leaves are never per-leaf occluders. In Raster/Horizon
+            // mode they're already in the buffer as merged per-Land
+            // submissions (re-rasterising here would duplicate them); in Off
+            // mode terrain is intentionally absent from the mask (the MCM
+            // "Off: no terrain in the occlusion mask"). Either way, skip them.
+            const bool isTerrainLeaf = isLandscapeDescendant(self, g_worldLandscapeRoot);
+            if (!isTerrainLeaf && boundRadius >= g_frame.occluderRadiusMin && boundRadius <= g_frame.occluderRadiusMax) {
                 auto& cacheEntry = g_caches.occluderEntry(self);
                 if (!cacheEntry.propsResolved) {
                     if (g_frame.logEnabled) ++g_caches.occluderMisses;
@@ -757,6 +759,82 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
 // no counter increments except the atomic g_stats.queryNearClip, no
 // display(), no tints) - phase 2 owns all writes. Read-only-ness
 // is what lets this run on workers once parallel dispatch lands.
+// Optional tighter occludee test (OcclusionOccludeeBoxTest). Returns true if
+// the occludee's object-space vertex AABB, transformed to world, reads fully
+// behind the live mask. The object AABB is computed once per geometry and
+// cached (shared across instances via NIF dedup); per instance we just
+// transform the 8 corners. Called only on sphere-VISIBLE occludees, so it
+// only ever upgrades Visible -> Occluded - never the reverse.
+static bool occludeeBoxOccluded(NI::AVObject* shape) {
+    // Deferred occludees are always NiTriBasedGeom (see the cullShowBody
+    // deferral, which casts the same shape for rasterizeTriShape).
+    auto* geom = static_cast<NI::TriBasedGeometry*>(shape);
+    // Skinned meshes carry bind-pose vertices that skinInstance->deform()
+    // repositions per frame from the bone palette. The model AABB *
+    // worldTransform would bound the BIND POSE, not the animated geometry, so
+    // the box could sit somewhere the limb no longer is and wrongly occlude it
+    // (missing hands/legs on NPCs and creatures). Skip them and keep the
+    // sphere verdict - the same guard rasterizeTriShape uses to refuse skinned
+    // occluders.
+    if (geom->skinInstance) {
+        return false;
+    }
+    auto data = geom->getModelData();
+    if (!data) {
+        return false;
+    }
+    const void* key = data.get();
+
+    float mn[3], mx[3];
+    auto it = g_caches.occludeeBox.find(key);
+    if (it != g_caches.occludeeBox.end()) {
+        if (g_frame.logEnabled) ++g_caches.occludeeBoxHits;
+        const auto& e = it->second;
+        mn[0] = e.minX; mn[1] = e.minY; mn[2] = e.minZ;
+        mx[0] = e.maxX; mx[1] = e.maxY; mx[2] = e.maxZ;
+    } else {
+        if (g_frame.logEnabled) ++g_caches.occludeeBoxMisses;
+        const unsigned short n = data->getActiveVertexCount();
+        if (n == 0 || data->vertex == nullptr) {
+            return false;
+        }
+        float a[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+        float b[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (unsigned short i = 0; i < n; ++i) {
+            const auto& v = data->vertex[i];
+            if (v.x < a[0]) a[0] = v.x;
+            if (v.x > b[0]) b[0] = v.x;
+            if (v.y < a[1]) a[1] = v.y;
+            if (v.y > b[1]) b[1] = v.y;
+            if (v.z < a[2]) a[2] = v.z;
+            if (v.z > b[2]) b[2] = v.z;
+        }
+        g_caches.occludeeBox[key] = {a[0], a[1], a[2], b[0], b[1], b[2]};
+        mn[0] = a[0]; mn[1] = a[1]; mn[2] = a[2];
+        mx[0] = b[0]; mx[1] = b[1]; mx[2] = b[2];
+    }
+
+    // Transform the 8 object-AABB corners to world via the shape's transform
+    // (same R*v*s+T as rasterizeTriShape).
+    const auto& xf = shape->worldTransform;
+    const auto& R = xf.rotation;
+    const auto& T = xf.translation;
+    const float s = xf.scale;
+    float corners[24];
+    for (int c = 0; c < 8; ++c) {
+        const float ox = (c & 1) ? mx[0] : mn[0];
+        const float oy = (c & 2) ? mx[1] : mn[1];
+        const float oz = (c & 4) ? mx[2] : mn[2];
+        const float rx = R.m0.x * ox + R.m0.y * oy + R.m0.z * oz;
+        const float ry = R.m1.x * ox + R.m1.y * oy + R.m1.z * oz;
+        const float rz = R.m2.x * ox + R.m2.y * oy + R.m2.z * oz;
+        corners[c * 3 + 0] = rx * s + T.x;
+        corners[c * 3 + 1] = ry * s + T.y;
+        corners[c * 3 + 2] = rz * s + T.z;
+    }
+    return testBoxVisible(corners) == ::MaskedOcclusionCulling::OCCLUDED;
+}
+
 static void classifyDrainRange(size_t lo, size_t hi) {
     // Captured here, not at drainPendingDisplays entry, so the
     // spike-clip measures classify-only elapsed (excluding phase 2's
@@ -841,7 +919,14 @@ static void classifyDrainRange(size_t lo, size_t hi) {
         slot.ranTestRect = true;
         switch (r) {
             case ::MaskedOcclusionCulling::VISIBLE:
-                slot.verdict = DrainVerdict::Visible;
+                // Loose sphere says visible; optionally refine with the
+                // tighter object-space box before committing to display().
+                if (g_frame.occludeeBoxTest && occludeeBoxOccluded(p.shape)) {
+                    slot.verdict = DrainVerdict::Occluded;
+                    ++g_stats.boxOccluded;
+                } else {
+                    slot.verdict = DrainVerdict::Visible;
+                }
                 break;
             case ::MaskedOcclusionCulling::OCCLUDED:
                 slot.verdict = DrainVerdict::Occluded;
@@ -1515,7 +1600,7 @@ void installPatches() {
         log << "MSOC: starting with EnableMSOC=false; resources will be allocated on first MCM toggle-on." << std::endl;
     }
 
-    // Restart-only - see PatchForensicsWatchdog.h. Reads the gate
+    // Restart-only - see ForensicsWatchdog.h. Reads the gate
     // before configure() runs, so MCM edits only take effect on
     // next launch.
     forensics::spawnIfEnabled(log);

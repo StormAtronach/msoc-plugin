@@ -255,6 +255,13 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
+    occludee:createOnOffButton({
+        label       = i18n("OcclusionOccludeeBoxTest.label"),
+        description = i18n("OcclusionOccludeeBoxTest.description"),
+        configKey   = "OcclusionOccludeeBoxTest",
+        callback    = applyChange,
+    })
+
     ----------------------------------------------------------------
     -- Async threadpool
     ----------------------------------------------------------------
