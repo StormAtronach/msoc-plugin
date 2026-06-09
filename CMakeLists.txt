@@ -99,6 +99,8 @@ if(MSOC_BUILD_DLL)
         src/TerrainAggregation.cpp
         # MSOC mask buffer + threadpool lifecycle (create/destroy/reconcile).
         src/MaskResources.cpp
+        # Per-frame diagnostic stats-line logging (cold path).
+        src/DiagnosticsLog.cpp
         # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
         # of the patch TU. Forward to the msoc::patch::occlusion public API.
         src/Exports.cpp

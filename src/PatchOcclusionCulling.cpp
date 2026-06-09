@@ -167,10 +167,6 @@ static bool g_inRenderMainScene = false;
 // own subtree, so the LAST pass clobbers earlier ones. attempts
 // counts raw entries; fires counts those that survived the
 // alreadyBuiltThisScene guard. Both reset at renderMainScene_wrapper.
-static unsigned int g_isTopLevelFiresThisScene = 0;
-static unsigned int g_maxIsTopLevelFiresSession = 0;
-static unsigned int g_mainCamCullShowAttemptsThisScene = 0;
-static unsigned int g_maxMainCamCullShowAttemptsSession = 0;
 
 // True only while the worldCamera main pass is being traversed.
 // Gates MSOC so shadow-manager, water-refraction, armCamera, and
@@ -208,18 +204,15 @@ static std::vector<float> g_visCallbackBounds;  // xyzr per node, reused each fr
 // File-scope frame counter; incremented once per top-level frame.
 // Used by the drain loop for cache-freshness checks.
 uint32_t g_frameCounter = 0;  // extern in OcclusionInternal.h
+FrameDiag g_diag;  // per-frame + session diagnostics (FrameDiag.h)
 // Cell pointer across frames. Cell change -> wipe g_caches.land and
 // g_caches.drain (NI::Node*/NI::AVObject* recycle in the new cell).
 static TES3::Cell* g_lastCell = nullptr;
-static uint64_t g_cellChanges = 0;
 // Cell-cross profiling (Configuration::OcclusionLogCellCross). Set to a
 // small frame budget when the cell changes; the per-frame stats line is
 // emitted while it counts down, capturing the cross + the re-population
-// frames where the caches refill on the miss path. g_cellWipeUs times the
-// cache-wipe itself; g_lastFrameDeltaUs is this frame's wall time.
-static int g_cellCrossLogFrames = 0;
-static uint64_t g_cellWipeUs = 0;
-static uint64_t g_lastFrameDeltaUs = 0;
+// frames where the caches refill on the miss path. g_diag.cellWipeUs times the
+// cache-wipe itself; g_diag.lastFrameDeltaUs is this frame's wall time.
 
 // Hybrid phase budgeting (Configuration::Occlusion*BudgetUs):
 //   Layer 1 - predictive skip: if EMA(last frames) > 2x budget,
@@ -236,18 +229,8 @@ static uint64_t g_lastFrameDeltaUs = 0;
 // traversal); classify bounds TestRect only (not phase 2's
 // display() vanilla D3D8 submissions, which run regardless).
 //
-// EMA = (prev * 7 + sample) >> 3 - ~6-frame half-life.
-static uint64_t g_rasterizeEmaUs = 0;
-static uint64_t g_classifyEmaUs = 0;
-static uint64_t g_rasterizeBudgetUsEffective = 0;
-static uint64_t g_classifyBudgetUsEffective = 0;
-static bool g_skipRasterizeThisFrame = false;
-static bool g_skipClassifyThisFrame = false;
-static std::chrono::steady_clock::time_point g_classifyPhaseStart;
-static uint32_t g_rasterizeBudgetTrips = 0;
-static uint32_t g_classifyBudgetTrips = 0;
-static uint64_t g_rasterizeBudgetTripsSession = 0;
-static uint64_t g_classifyBudgetTripsSession = 0;
+// EMA = (prev * 7 + sample) >> 3 - ~6-frame half-life. Fields in BudgetState.h.
+BudgetState g_budget;
 
 static inline uint64_t elapsedUsSince(std::chrono::steady_clock::time_point t0) {
     return static_cast<uint64_t>(
@@ -261,26 +244,21 @@ static inline uint64_t elapsedUsSince(std::chrono::steady_clock::time_point t0) 
 using profiling::emaUpdate;
 // Phase 3.2: time spent in threadpool Flush() barrier before drain.
 // Only populated when async mode is active; zero otherwise.
-static uint64_t g_asyncFlushTimeUs = 0;
 // Time inside the threadpool's WakeThreads() spin. Should be ~0 every
 // frame; non-trivial values mean a worker didn't reach its suspended
 // state from the previous SuspendThreads(). max-seen kept lifetime
 // so a single outlier shows up in the next periodic log.
-static uint64_t g_wakeThreadsTimeUs = 0;
-static uint64_t g_maxWakeThreadsUsSession = 0;
 // Recursion diagnostic: a debugger during a freeze can read g_callDepth
 // directly to spot a runaway tree (cycle, broken sentinel) before
 // stack overflow.
 static uint32_t g_callDepth = 0;
-static uint32_t g_maxCallDepthThisFrame = 0;
-static uint32_t g_maxCallDepthSession = 0;
 
 // RAII for g_callDepth. Used exclusively by CullShow_detour.
 struct CallDepthGuard {
     CallDepthGuard() {
         ++g_callDepth;
-        if (g_callDepth > g_maxCallDepthThisFrame) {
-            g_maxCallDepthThisFrame = g_callDepth;
+        if (g_callDepth > g_diag.maxCallDepthThisFrame) {
+            g_diag.maxCallDepthThisFrame = g_callDepth;
         }
     }
     ~CallDepthGuard() { --g_callDepth; }
@@ -300,12 +278,10 @@ static std::atomic<uint64_t> g_lastFrameEndTimeMs{0};
 
 // Frame-time sampling for per-window FPS logging. Microsecond precision
 // (the existing watchdog timestamp is millisecond, too coarse for a
-// per-frame delta). `g_windowFrameTimeUs` is the running sum since the
-// last log emission, `g_windowFrameCount` the matching frame count;
+// per-frame delta). `g_diag.windowFrameTimeUs` is the running sum since the
+// last log emission, `g_diag.windowFrameCount` the matching frame count;
 // divide for the window average and zero both inside the log block.
 static uint64_t g_prevFrameEndUs = 0;
-static uint64_t g_windowFrameTimeUs = 0;
-static uint64_t g_windowFrameCount = 0;
 
 
 // ============================================================
@@ -367,7 +343,7 @@ forensics::Snapshot forensics::captureSnapshot() {
     forensics::Snapshot s{};
     s.stage = g_lastStage;
     s.callDepth = g_callDepth;
-    s.maxCallDepthSession = g_maxCallDepthSession;
+    s.maxCallDepthSession = g_diag.maxCallDepthSession;
     s.frame = g_frameCounter;
     s.lastFrameEndMs = g_lastFrameEndTimeMs.load(
         std::memory_order_relaxed);
@@ -579,12 +555,12 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
     // of completed RenderTriangles SIMD time), NOT wall-clock-since-
     // frame-start. The latter would include cullShowBody traversal
     // between calls and falsely trip every frame.
-    if (g_skipRasterizeThisFrame) {
-        g_rasterizeBudgetTrips = 1;
+    if (g_budget.skipRasterizeThisFrame) {
+        g_budget.rasterizeBudgetTrips = 1;
         return false;
     }
-    if (profiling::spikeClipTripped(g_stats.rasterizeTimeUs, g_rasterizeBudgetUsEffective)) {
-        g_rasterizeBudgetTrips = 1;
+    if (profiling::spikeClipTripped(g_stats.rasterizeTimeUs, g_budget.rasterizeBudgetUsEffective)) {
+        g_budget.rasterizeBudgetTrips = 1;
         return false;
     }
 
@@ -883,14 +859,14 @@ static void classifyDrainRange(size_t lo, size_t hi) {
     // Captured here, not at drainPendingDisplays entry, so the
     // spike-clip measures classify-only elapsed (excluding phase 2's
     // vanilla D3D8 display() calls).
-    g_classifyPhaseStart = std::chrono::steady_clock::now();
+    g_budget.classifyPhaseStart = std::chrono::steady_clock::now();
 
     // Predictive skip: EMA over 2x budget -> skip TestRect entirely
     // this frame, mark all Visible. Equivalent to EnableMSOC=false
     // for one frame, except mask build still happens so recovery
     // momentum is preserved once the EMA drops back.
-    if (g_skipClassifyThisFrame) {
-        g_classifyBudgetTrips = 1;
+    if (g_budget.skipClassifyThisFrame) {
+        g_budget.classifyBudgetTrips = 1;
         for (size_t i = lo; i < hi; ++i) {
             g_drainSlots[i].verdict = DrainVerdict::Visible;
             g_drainSlots[i].ranTestRect = false;
@@ -905,7 +881,7 @@ static void classifyDrainRange(size_t lo, size_t hi) {
     // Spike-clip armed when budget > 0. Timer is sampled every 32nd
     // iteration; per-iter overhead is ~one branch. On trip, remaining
     // slots become Visible (safe-fallback MOC invariant).
-    const bool budgetActive = (g_classifyBudgetUsEffective > 0);
+    const bool budgetActive = (g_budget.classifyBudgetUsEffective > 0);
     constexpr size_t kCheckMask = 31;
 
     for (size_t i = lo; i < hi; ++i) {
@@ -914,8 +890,8 @@ static void classifyDrainRange(size_t lo, size_t hi) {
         slot.ranTestRect = false;
 
         if (budgetActive && i > lo && (i & kCheckMask) == 0) {
-            if (elapsedUsSince(g_classifyPhaseStart) > g_classifyBudgetUsEffective) {
-                g_classifyBudgetTrips = 1;
+            if (elapsedUsSince(g_budget.classifyPhaseStart) > g_budget.classifyBudgetUsEffective) {
+                g_budget.classifyBudgetTrips = 1;
                 for (size_t j = i; j < hi; ++j) {
                     g_drainSlots[j].verdict = DrainVerdict::Visible;
                     g_drainSlots[j].ranTestRect = false;
@@ -1224,13 +1200,13 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // the last, so we only open isTopLevel on the FIRST entry
         // per scene. Later passes still render correctly (vanilla
         // body), they just don't re-build the mask.
-        const bool alreadyBuiltThisScene = g_isTopLevelFiresThisScene > 0;
+        const bool alreadyBuiltThisScene = g_diag.isTopLevelFiresThisScene > 0;
         // Outer-entry counter: ungated, this would tick on every
         // recursive descent (hundreds per frame). The !g_msocActive
         // gate restricts to true outer entries - value > 1 means
         // the engine genuinely issued multiple main-camera passes.
         if (camera == mainCamera && !inMenuMode && !g_msocActive) {
-            ++g_mainCamCullShowAttemptsThisScene;
+            ++g_diag.mainCamCullShowAttemptsThisScene;
         }
         if (camera == mainCamera && !inMenuMode && !alreadyBuiltThisScene) {
             // dh null on main menu / load screen - no scene to cull.
@@ -1264,7 +1240,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
     }
 
     if (isTopLevel) {
-        ++g_isTopLevelFiresThisScene;
+        ++g_diag.isTopLevelFiresThisScene;
         g_lastStage = 1;
         // Latch async mode once per frame so a mid-frame Lua toggle
         // can't split submissions between threadpool and direct MOC.
@@ -1279,7 +1255,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             // stragglers.
             g_lastStage = 2;
             {
-                ScopedUsAccumulator t(g_wakeThreadsTimeUs);
+                ScopedUsAccumulator t(g_diag.wakeThreadsTimeUs);
                 g_threadpool->WakeThreads();
             }
             g_lastStage = 3;
@@ -1294,12 +1270,12 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // free them. Both caches key off pointers a cell load can
         // recycle (per-Land NiNode*, shape AVObject*).
         g_lastStage = 4;
-        g_cellWipeUs = 0;
+        g_diag.cellWipeUs = 0;
         if (activeCell != g_lastCell) {
             {
                 // Time just the wipe - the one cross cost the per-frame
                 // timers don't already capture.
-                ScopedUsAccumulator wipeTimer(g_cellWipeUs);
+                ScopedUsAccumulator wipeTimer(g_diag.cellWipeUs);
                 g_caches.wipeForCellChange();
                 // Releases our NI::Pointer refs on outgoing-cell shapes
                 // so they can actually be freed. Surviving shapes
@@ -1307,10 +1283,10 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
                 debugtint::clearClones();
             }
             g_lastCell = activeCell;
-            ++g_cellChanges;
+            ++g_diag.cellChanges;
             // Profile this cross + the next few frames as the caches
             // refill on the miss path (the spike isn't just frame 0).
-            g_cellCrossLogFrames = 8;
+            g_diag.cellCrossLogFrames = 8;
         }
         g_stats.recursiveCalls = 0;
         g_stats.recursiveAppCulled = 0;
@@ -1401,22 +1377,22 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.drainPhaseTimeUs = 0;
         g_stats.classifyUs = 0;
         g_stats.drainDisplayUs = 0;
-        g_asyncFlushTimeUs = 0;
+        g_diag.asyncFlushTimeUs = 0;
         // Per-frame counters reset; g_max*Session are lifetime peaks.
-        g_wakeThreadsTimeUs = 0;
-        g_maxCallDepthThisFrame = 0;
+        g_diag.wakeThreadsTimeUs = 0;
+        g_diag.maxCallDepthThisFrame = 0;
 
         // Read budgets once per frame so a mid-frame configure()
         // doesn't split a phase across two regimes. 2x threshold so
         // one-shot spikes don't trigger sustained skipping. 0 = off.
-        g_rasterizeBudgetUsEffective = Configuration::OcclusionRasterizeBudgetUs;
-        g_classifyBudgetUsEffective = Configuration::OcclusionClassifyBudgetUs;
-        g_skipRasterizeThisFrame =
-            profiling::predictiveSkip(g_rasterizeEmaUs, g_rasterizeBudgetUsEffective);
-        g_skipClassifyThisFrame =
-            profiling::predictiveSkip(g_classifyEmaUs, g_classifyBudgetUsEffective);
-        g_rasterizeBudgetTrips = 0;
-        g_classifyBudgetTrips = 0;
+        g_budget.rasterizeBudgetUsEffective = Configuration::OcclusionRasterizeBudgetUs;
+        g_budget.classifyBudgetUsEffective = Configuration::OcclusionClassifyBudgetUs;
+        g_budget.skipRasterizeThisFrame =
+            profiling::predictiveSkip(g_budget.rasterizeEmaUs, g_budget.rasterizeBudgetUsEffective);
+        g_budget.skipClassifyThisFrame =
+            profiling::predictiveSkip(g_budget.classifyEmaUs, g_budget.classifyBudgetUsEffective);
+        g_budget.rasterizeBudgetTrips = 0;
+        g_budget.classifyBudgetTrips = 0;
         g_lastStage = 6;
         uploadCameraTransform(camera);
         if (g_asyncThisFrame) {
@@ -1468,7 +1444,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             // Barrier: blocks until every queued RenderTriangles is
             // fully rasterised. Only after return is it safe to
             // TestRect.
-            ScopedUsAccumulator t(g_asyncFlushTimeUs);
+            ScopedUsAccumulator t(g_diag.asyncFlushTimeUs);
             g_threadpool->Flush();
         }
         g_lastStage = 11;
@@ -1505,20 +1481,20 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_msocActive = false;
         // Lifetime peaks survive across frames so single outliers
         // show up in the next periodic log.
-        if (g_wakeThreadsTimeUs > g_maxWakeThreadsUsSession) {
-            g_maxWakeThreadsUsSession = g_wakeThreadsTimeUs;
+        if (g_diag.wakeThreadsTimeUs > g_diag.maxWakeThreadsUsSession) {
+            g_diag.maxWakeThreadsUsSession = g_diag.wakeThreadsTimeUs;
         }
-        if (g_maxCallDepthThisFrame > g_maxCallDepthSession) {
-            g_maxCallDepthSession = g_maxCallDepthThisFrame;
+        if (g_diag.maxCallDepthThisFrame > g_diag.maxCallDepthSession) {
+            g_diag.maxCallDepthSession = g_diag.maxCallDepthThisFrame;
         }
 
         // EMAs for next frame's predictive-skip gate. Samples are
         // MSOC-only - including non-MSOC work would have the gate
         // trigger on vanilla render slowness.
-        g_rasterizeEmaUs = emaUpdate(g_rasterizeEmaUs, g_stats.rasterizeTimeUs);
-        g_classifyEmaUs = emaUpdate(g_classifyEmaUs, g_stats.classifyUs);
-        g_rasterizeBudgetTripsSession += g_rasterizeBudgetTrips;
-        g_classifyBudgetTripsSession += g_classifyBudgetTrips;
+        g_budget.rasterizeEmaUs = emaUpdate(g_budget.rasterizeEmaUs, g_stats.rasterizeTimeUs);
+        g_budget.classifyEmaUs = emaUpdate(g_budget.classifyEmaUs, g_stats.classifyUs);
+        g_budget.rasterizeBudgetTripsSession += g_budget.rasterizeBudgetTrips;
+        g_budget.classifyBudgetTripsSession += g_budget.classifyBudgetTrips;
         g_lastStage = 13;
         // Publish frame-end timestamp for the watchdog. If the next
         // frame freezes mid-body, MSOC.forensics.txt shows
@@ -1539,9 +1515,9 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // toggle reports avgFrameUs=0 until samples accumulate.
         if (g_frame.logEnabled) {
             if (g_prevFrameEndUs != 0) {
-                g_lastFrameDeltaUs = frameEndNowUs - g_prevFrameEndUs;
-                g_windowFrameTimeUs += g_lastFrameDeltaUs;
-                ++g_windowFrameCount;
+                g_diag.lastFrameDeltaUs = frameEndNowUs - g_prevFrameEndUs;
+                g_diag.windowFrameTimeUs += g_diag.lastFrameDeltaUs;
+                ++g_diag.windowFrameCount;
             }
             g_prevFrameEndUs = frameEndNowUs;
         } else {
@@ -1550,142 +1526,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             g_prevFrameEndUs = 0;
         }
 
-        // Cumulative counters survive across frames so rare OCCLUDED
-        // events - scenes where one building sits squarely behind
-        // another - show up even when the 300-frame sampling misses
-        // them. Logged alongside per-frame counts so we can spot when
-        // the ratio totalOccluded/totalTested is nonzero.
-        static uint64_t totalTested = 0;
-        static uint64_t totalOccluded = 0;
-        static uint64_t totalViewCulled = 0;
-        totalTested += g_stats.queryTested;
-        totalOccluded += g_stats.queryOccluded;
-        totalViewCulled += g_stats.queryViewCulled;
-
-        // Two independently-toggled log channels:
-        //   - OcclusionLogAggregate: periodic 300-frame sample. Steady
-        //     baseline of cumulative counters; useful for "is the
-        //     culler doing anything" at a glance.
-        //   - OcclusionLogPerFrame: any frame that produced an
-        //     OCCLUDED verdict. Reconciliation channel for "I see
-        //     culling but the counters say 0" - every culling event
-        //     gets a line.
-        // Both default off. Identical line format on both channels.
-        const bool baselineTick = Configuration::OcclusionLogAggregate && (g_frameCounter % 300) == 0;
-        const bool hadOccluded = Configuration::OcclusionLogPerFrame && g_stats.queryOccluded > 0;
-        // Cell-cross channel: fire on the cross frame + the re-population
-        // frames. cellCross=<age> (0 = cross frame). Same line format.
-        const bool cellCrossTick = Configuration::OcclusionLogCellCross && g_cellCrossLogFrames > 0;
-        if (baselineTick || hadOccluded || cellCrossTick) {
-            log::getLog() << "MSOC: frame " << g_frameCounter
-                          << " cellCross=" << (cellCrossTick ? (8 - g_cellCrossLogFrames) : -1)
-                          << " cellWipeUs=" << g_cellWipeUs
-                          << " frameDeltaUs=" << g_lastFrameDeltaUs
-                          << " rasterized=" << g_stats.rasterizedAsOccluder
-                          << " occluderTris=" << g_stats.occluderTriangles
-                          << " queryOccluded=" << g_stats.queryOccluded
-                          << "/" << g_stats.queryTested
-                          << " viewCulled=" << g_stats.queryViewCulled
-                          << " nearClip=" << g_stats.queryNearClip.load(std::memory_order_relaxed)
-                          << " deferred=" << g_stats.deferred
-                          << " inlineTested=" << g_stats.inlineTested
-                          << " recursive=" << g_stats.recursiveCalls
-                          << " appCulled=" << g_stats.recursiveAppCulled
-                          << " frustumCulled=" << g_stats.recursiveFrustumCulled
-                          << " insideSkipped=" << g_stats.skippedInside
-                          << " thinSkipped=" << g_stats.skippedThin
-                          << " alphaSkipped=" << g_stats.skippedAlpha
-                          << " stencilSkipped=" << g_stats.skippedStencil
-                          << " triSkipped=" << g_stats.skippedTriCount
-                          << " tinySkipped=" << g_stats.skippedTesteeTiny
-                          << " terrainSkipped=" << g_stats.skippedTerrain
-                          << " aggTerrainLands=" << g_stats.aggregateTerrainLands
-                          << " aggTerrainTris=" << g_stats.aggregateTerrainTris
-                          << " aggTerrainUs=" << g_stats.aggregateTerrainUs
-                          // Horizon-mode counters; zero unless g_frame.aggregateTerrain == 2.
-                          << " horizonBuildUs=" << g_stats.horizonBuildUs
-                          << " horizonRasterUs=" << g_stats.horizonRasterUs
-                          << " horizonLandsFed=" << g_stats.horizonLandsFed
-                          << " horizonVertsFed=" << g_stats.horizonVertsFed
-                          << " horizonColumnsTouched=" << g_stats.horizonColumnsTouched
-                          << " horizonCurtainTris=" << g_stats.horizonCurtainTris
-                          << " horizonAdaptiveEpsD=" << g_stats.horizonAdaptiveEpsD
-                          << " landMembershipHit=" << g_caches.terrainMembershipHits
-                          << " landMembershipMiss=" << g_caches.terrainMembershipMisses
-                          << " landMembershipSize=" << g_caches.terrainMembership.size()
-                          << " classOccCalls=" << g_stats.classifyOccluderCalls
-                          << " classOccSteps=" << g_stats.classifyOccluderSteps
-                          << " occVertCalls=" << g_stats.occluderVertexCalls
-                          << " occVertVerts=" << g_stats.occluderVertexVerts
-                          << " occCacheHit=" << g_caches.occluderHits
-                          << " occCacheMiss=" << g_caches.occluderMisses
-                          << " occCacheSize=" << g_caches.occluder.size()
-                          << " landCacheHit=" << g_caches.landHits
-                          << " landCacheMiss=" << g_caches.landMisses
-                          << " landCacheEvict=" << g_caches.landEvictions
-                          // Light-cull A/B counters. lightCullMiss == lightsTested
-                          // (every miss runs the MSOC test); kept separate for
-                          // symmetry with other *Hit/Miss pairs.
-                          << " lightCullHit=" << g_caches.lightCullHits
-                          << " lightCullMiss=" << g_caches.lightCullMisses
-                          << " lightOccluded=" << g_caches.lightsOccluded
-                          << " lightCacheSize=" << g_caches.lightCull.size()
-                          // Average per-frame time across this sample window.
-                          // 1e6 / avgFrameUs = average FPS. Reset right after.
-                          << " avgFrameUs=" << (g_windowFrameCount ? (g_windowFrameTimeUs / g_windowFrameCount) : 0)
-                          << " framesInWin=" << g_windowFrameCount
-                          << " tcHit=" << g_caches.drainHits
-                          << " tcMiss=" << g_caches.drainMisses
-                          << " tcSize=" << g_caches.drain.size()
-                          << " cellChanges=" << g_cellChanges
-                          << " sceneGateSkipped=" << g_stats.skippedSceneGate
-                          << " menuModeSkipped=" << g_stats.skippedMenuMode  // cumulative
-                          << " rasterizeUs=" << g_stats.rasterizeTimeUs
-                          << " occXformUs=" << g_stats.occluderTransformUs
-                          << " drainUs=" << g_stats.drainPhaseTimeUs
-                          << " classifyUs=" << g_stats.classifyUs     // phase-1 wall (serial = work; parallel = barrier)
-                          << " displayUs=" << g_stats.drainDisplayUs  // audit
-                          << " asyncFlushUs=" << g_asyncFlushTimeUs
-                          // Hybrid budget diagnostics. *Trip is per-frame (0/1),
-                          // *TripsSess is lifetime sum, *Ema is the predictive-skip metric
-                          // (compared against 2x *BudgetUs). *BudgetUs=0 means the gate
-                          // is disabled for that phase.
-                          //
-                          // Names changed in 0.0.10: was drain*BudgetUs/Ema/Trip; renamed
-                          // to class*BudgetUs/Ema/Trip because the phase being budgeted
-                          // is classifyDrainRange (TestRect work), not the whole drain
-                          // (whose phase 2 display() calls are vanilla render work).
-                          << " rastBudgetUs=" << g_rasterizeBudgetUsEffective
-                          << " rastEmaUs=" << g_rasterizeEmaUs
-                          << " rastTrip=" << g_rasterizeBudgetTrips
-                          << " rastTripsSess=" << g_rasterizeBudgetTripsSession
-                          << " classBudgetUs=" << g_classifyBudgetUsEffective
-                          << " classEmaUs=" << g_classifyEmaUs
-                          << " classTrip=" << g_classifyBudgetTrips
-                          << " classTripsSess=" << g_classifyBudgetTripsSession
-                          << " wakeUs=" << g_wakeThreadsTimeUs                                 // this frame's WakeThreads spin
-                          << " maxWakeUsSess=" << g_maxWakeThreadsUsSession                    // lifetime peak
-                          << " maxDepthFrame=" << g_maxCallDepthThisFrame                      // this frame's recursion peak
-                          << " maxDepthSess=" << g_maxCallDepthSession                         // lifetime peak
-                          << " tp=" << (g_threadpool ? 1 : 0)                                  // threadpool liveness
-                          << " cfgAsync=" << (Configuration::OcclusionAsyncOccluders ? 1 : 0)  // async fires iff tp && cfgAsync
-                          << " topLvlThisScene=" << g_isTopLevelFiresThisScene
-                          << " maxTopLvlSess=" << g_maxIsTopLevelFiresSession
-                          << " mainAttemptsThisScene=" << g_mainCamCullShowAttemptsThisScene
-                          << " maxMainAttemptsSess=" << g_maxMainCamCullShowAttemptsSession
-                          << " cumul=" << totalOccluded << "/" << totalTested
-                          << "(vc=" << totalViewCulled << ")" << std::endl;
-            // Reset the per-window frame-time accumulator so the next
-            // log line reflects its own window only.
-            g_windowFrameTimeUs = 0;
-            g_windowFrameCount = 0;
-        }
-
-        // Count down the cell-cross profiling budget (set to 8 on the
-        // cross); runs every frame so cellCross ages 0..7 then stops.
-        if (g_cellCrossLogFrames > 0) {
-            --g_cellCrossLogFrames;
-        }
+        emitPerFrameStatsLine();
     }
 }
 
@@ -1705,16 +1546,16 @@ static void __cdecl renderMainScene_wrapper() {
     const bool wasActive = g_inRenderMainScene;
     g_inRenderMainScene = true;
     if (!wasActive) {
-        g_isTopLevelFiresThisScene = 0;
-        g_mainCamCullShowAttemptsThisScene = 0;
+        g_diag.isTopLevelFiresThisScene = 0;
+        g_diag.mainCamCullShowAttemptsThisScene = 0;
     }
     renderMainScene_original();
     if (!wasActive) {
-        if (g_isTopLevelFiresThisScene > g_maxIsTopLevelFiresSession) {
-            g_maxIsTopLevelFiresSession = g_isTopLevelFiresThisScene;
+        if (g_diag.isTopLevelFiresThisScene > g_diag.maxIsTopLevelFiresSession) {
+            g_diag.maxIsTopLevelFiresSession = g_diag.isTopLevelFiresThisScene;
         }
-        if (g_mainCamCullShowAttemptsThisScene > g_maxMainCamCullShowAttemptsSession) {
-            g_maxMainCamCullShowAttemptsSession = g_mainCamCullShowAttemptsThisScene;
+        if (g_diag.mainCamCullShowAttemptsThisScene > g_diag.maxMainCamCullShowAttemptsSession) {
+            g_diag.maxMainCamCullShowAttemptsSession = g_diag.mainCamCullShowAttemptsThisScene;
         }
     }
     g_inRenderMainScene = wasActive;

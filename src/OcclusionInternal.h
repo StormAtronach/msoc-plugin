@@ -14,6 +14,8 @@
 #include "ClipMath.h"
 #include "OcclusionCaches.h"  // cache types + extern g_caches
 #include "FrameStats.h"       // per-frame diagnostic counters/timers + g_stats
+#include "BudgetState.h"      // phase-budget controller + g_budget
+#include "FrameDiag.h"        // per-frame + session diagnostic bookkeeping + g_diag
 
 #include "NIPoint3.h"  // NI::Point3 for the testSphereVisible decl
 #include "NICamera.h"  // NI::Camera (cullingPlanes) for the accessors
@@ -109,6 +111,10 @@ bool ensureMSOCResourcesMatchConfig();
 // Drop queued external-occluder submissions. Defined in the core TU (next to
 // the queue); called by destroyMSOCResources on teardown.
 void clearExternalOccluderQueue();
+
+// Emit the per-frame MSOC diagnostic line (DiagnosticsLog.cpp). Called at the
+// tail of the detour; gated internally on the log channels (cold path).
+void emitPerFrameStatsLine();
 
 // Live mask readiness: true once the depth buffer reflects the complete
 // vanilla main-scene occluder set; cleared at the next ClearBuffer.
