@@ -79,6 +79,8 @@ if(MSOC_BUILD_DLL)
         src/plugin.cpp
         src/Log.cpp
         src/Config.cpp
+        # Pure hardware-tier classifier (no Configuration/Lua dep; unit-tested).
+        src/HardwareTier.cpp
         # 1D-horizon → curtain occluder used by the Horizon mode of
         # rasterizeAggregateTerrain. Adapted from MGE-XE's distant-land
         # equivalent; see src/HorizonOccluder.h for the rationale.
@@ -208,8 +210,10 @@ if(MSOC_BUILD_TESTS)
         tests/horizon_occluder_tests.cpp
         tests/clip_math_tests.cpp  # ClipMath.h is header-only — no .cpp to compile
         tests/profiling_tests.cpp  # Profiling.h is header-only too
-        # Unit under test — engine-free, already PCH-free.
+        tests/hardware_tier_tests.cpp
+        # Units under test — engine-free, already PCH-free.
         src/HorizonOccluder.cpp
+        src/HardwareTier.cpp
     )
 
     target_include_directories(msoc_tests PRIVATE

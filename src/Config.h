@@ -3,6 +3,8 @@
 // Plugin config statics. Populated from Lua via msoc.configure(table) -
 // see Config.cpp. Only the slice the occlusion patch reads is exposed.
 
+#include "HardwareTier.h"  // HardwareTier enum + classifyHardwareTier / hardwareTierName
+
 struct lua_State;
 
 namespace msoc {
@@ -87,15 +89,9 @@ public:
 // missing keys leave the static untouched.
 int configure(lua_State* L);
 
-// Hardware tier classifier. On weaker CPUs (no AVX2, <=4 threads)
-// the async occluder path can be net-negative, so the tier maps to
-// a different default set of threadpool/mask knobs. simdImpl values
-// match MaskedOcclusionCulling::Implementation (SSE2=0, SSE41=1,
-// AVX2=2, AVX512=3); negative = probe failed, treat as Low.
-enum class HardwareTier { Low = 0,
-                          Mid = 1,
-                          High = 2 };
-HardwareTier classifyHardwareTier(int simdImpl, unsigned hwConcurrency);
-const char* hardwareTierName(HardwareTier tier);
+// Resolve the tier-sensitive Configuration defaults (threadpool / async / mask
+// / terrain-bypass knobs) for the given tier. The pure HardwareTier enum +
+// classifyHardwareTier / hardwareTierName live in HardwareTier.h; this one
+// writes Configuration:: statics so it stays here.
 void applyHardwareTierDefaults(HardwareTier tier);
 }  // namespace msoc
