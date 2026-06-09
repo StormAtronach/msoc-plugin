@@ -95,6 +95,8 @@ if(MSOC_BUILD_DLL)
         src/QueryApi.cpp
         # CPU light culling (updateLights enabled-read hook + observers).
         src/LightCulling.cpp
+        # Terrain occluder aggregation (Raster + Horizon modes).
+        src/TerrainAggregation.cpp
         # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
         # of the patch TU. Forward to the msoc::patch::occlusion public API.
         src/Exports.cpp

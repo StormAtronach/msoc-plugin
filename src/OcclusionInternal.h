@@ -9,13 +9,51 @@
 // PatchOcclusionCulling.cpp.
 
 #include "MaskedOcclusionCulling.h"
+#include "CullingThreadpool.h" // ::CullingThreadpool for g_threadpool
 #include "FrameConfig.h"
 #include "ClipMath.h"
 #include "OcclusionCaches.h"   // cache types + extern g_caches
+#include "FrameStats.h"        // per-frame diagnostic counters/timers + g_stats
 
 #include "NIPoint3.h"          // NI::Point3 for the testSphereVisible decl
+#include "NICamera.h"          // NI::Camera (cullingPlanes) for the accessors
+#include "NIPoint4.h"          // NI::Point4
+
+#include <chrono>
+#include <cstdint>
 
 namespace msoc::patch::occlusion {
+
+    // NI::Camera accessors for fields upstream MWSE NICamera.h labels
+    // `unknown_*` (countCullingPlanes is always 6 for the main world camera;
+    // usedCullingPlanesBitfield sits just past the inline cullingPlanes[6]).
+    // Shared by the core-TU occluder frustum test and TerrainAggregation.cpp.
+    inline int cameraCountCullingPlanes(const NI::Camera* /*cam*/) {
+        return 6;
+    }
+    inline const NI::Point4* cameraCullingPlane(NI::Camera* cam, int i) {
+        return &cam->cullingPlanes[i];
+    }
+    inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
+        auto* base = reinterpret_cast<char*>(&cam->cullingPlanes[0]);
+        return reinterpret_cast<uint32_t*>(base + sizeof(NI::Point4) * 6);
+    }
+
+    // First-of-type alpha/stencil flags from an occluder's ancestor chain;
+    // alpha/stencil meshes are excluded from the occluder rasterise pass.
+    // Defined in PatchOcclusionCulling.cpp; shared with TerrainAggregation.cpp.
+    struct OccluderPropertyFlags {
+        bool alpha;
+        bool stencil;
+    };
+    OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj);
+
+    // Live per-frame state shared with the subsystem TUs (defined in
+    // PatchOcclusionCulling.cpp).
+    extern float g_worldToClip[16];         // live world-to-clip (column-major)
+    extern ::CullingThreadpool* g_threadpool;
+    extern bool g_asyncThisFrame;           // async submit latched this frame
+    extern NI::Node* g_worldLandscapeRoot;  // DataHandler terrain root
 
     // Snapshot published at the drain-complete buffer swap: the matrix + NDC
     // constants the depth data was built with, plus the capture time. The
@@ -53,5 +91,38 @@ namespace msoc::patch::occlusion {
     // Naked trampoline (NiDX8LightManager::updateLights enabled-read hook),
     // defined in LightCulling.cpp; installPatches() takes its address.
     void updateLights_enabledRead_hook();
+
+    // Terrain aggregation entry points (TerrainAggregation.cpp), called by the
+    // detour. Raster mode merges each near Land into one submission; Horizon
+    // mode rasterizes a 1D silhouette curtain.
+    void rasterizeAggregateTerrain(NI::Camera* camera);
+    void rasterizeAggregateTerrainHorizon(NI::Camera* camera);
+
+    // Live projection forwarder + clip type alias, shared by the query, drain,
+    // and terrain paths. Header-inline so the hot path still inlines fully.
+    // (Declared after the externs above since it binds g_worldToClip.)
+    using ClipXYW = clipmath::ClipXYW;
+    inline ClipXYW projectWorld(float wx, float wy, float wz) {
+        return clipmath::projectWorld(g_worldToClip, wx, wy, wz);
+    }
+
+    // Scoped microsecond accumulator (RAII timer). No-op unless logging is on;
+    // start is read once at construction so a mid-scope MCM toggle can't flip
+    // the dtor onto a still-zero start. Binds g_frame, declared above.
+    struct ScopedUsAccumulator {
+        uint64_t* target;
+        std::chrono::steady_clock::time_point start;
+        explicit ScopedUsAccumulator(uint64_t& t)
+            : target(g_frame.logEnabled ? &t : nullptr) {
+            if (target) start = std::chrono::steady_clock::now();
+        }
+        ~ScopedUsAccumulator() {
+            if (target) {
+                *target += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - start).count());
+            }
+        }
+    };
 
 } // namespace msoc::patch::occlusion
