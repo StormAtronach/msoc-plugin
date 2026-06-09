@@ -103,6 +103,10 @@ if(MSOC_BUILD_DLL)
         src/MaskResources.cpp
         # Per-frame diagnostic stats-line logging (cold path).
         src/DiagnosticsLog.cpp
+        # Leaf helpers extracted to break the core<->subsystem cycle:
+        src/LiveQuery.cpp          # live sphere-vs-mask query
+        src/OccluderClassify.cpp   # ancestor alpha/stencil classification
+        src/ExternalOccluders.cpp  # MGE-XE consumer occluder-injection feature
         # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
         # of the patch TU. Forward to the msoc::patch::occlusion public API.
         src/Exports.cpp

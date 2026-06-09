@@ -44,7 +44,7 @@ inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
 
 // First-of-type alpha/stencil flags from an occluder's ancestor chain;
 // alpha/stencil meshes are excluded from the occluder rasterise pass.
-// Defined in PatchOcclusionCulling.cpp; shared with TerrainAggregation.cpp.
+// Defined in OccluderClassify.cpp (leaf); shared by core-rasterize + Terrain.
 struct OccluderPropertyFlags {
     bool alpha;
     bool stencil;
@@ -54,6 +54,9 @@ OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj);
 // Live per-frame state shared with the subsystem TUs (defined in
 // PatchOcclusionCulling.cpp).
 extern float g_worldToClip[16];  // live world-to-clip (column-major)
+extern float g_ndcRadiusX;       // live sphere-projection metrics, set by
+extern float g_ndcRadiusY;       // uploadCameraTransform; read by LiveQuery
+extern float g_wGradMag;
 extern ::CullingThreadpool* g_threadpool;
 extern bool g_asyncThisFrame;           // async submit latched this frame
 extern NI::Node* g_worldLandscapeRoot;  // DataHandler terrain root
@@ -86,8 +89,8 @@ extern unsigned int kMsocHeight;
 extern uint32_t g_frameCounter;  // top-level frame counter
 
 // Live sphere test against g_msoc (uses the live per-frame projection).
-// Defined in PatchOcclusionCulling.cpp; called by LightCulling.cpp and the
-// drain. Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
+// Defined in LiveQuery.cpp (leaf); called by the drain (core) and
+// LightCulling. Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
 ::MaskedOcclusionCulling::CullingResult testSphereVisible(
     const NI::Point3& center, float radius);
 
@@ -108,8 +111,10 @@ bool createMSOCResources(std::ostream& log);
 void destroyMSOCResources(std::ostream& log);
 bool ensureMSOCResourcesMatchConfig();
 
-// Drop queued external-occluder submissions. Defined in the core TU (next to
-// the queue); called by destroyMSOCResources on teardown.
+// External-occluder injection (ExternalOccluders.cpp). drainPendingOccluders
+// rasterizes queued consumer submissions into the mask (called by the detour);
+// clearExternalOccluderQueue drops them on teardown (called by MaskResources).
+void drainPendingOccluders();
 void clearExternalOccluderQueue();
 
 // Emit the per-frame MSOC diagnostic line (DiagnosticsLog.cpp). Called at the
