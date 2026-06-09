@@ -117,16 +117,19 @@ namespace msoc::patch::occlusion {
 	// into g_msoc each frame and swap at drain-complete so consumers
 	// always see "the mask as of the end of the previous frame".
 	static ::MaskedOcclusionCulling* g_msoc_prev = nullptr;
-	// Matrix + NDC constants snapshotted at the swap, so external queries
-	// project through the same view the depth data was built with.
-	static float g_worldToClip_prev[16] = {};
-	static float g_ndcRadiusX_prev = 0.0f;
-	static float g_ndcRadiusY_prev = 0.0f;
-	static float g_wGradMag_prev   = 0.0f;
-
-	// Freshness gate. External queries reject snapshots older than
-	// kSnapshotMaxAgeMs (alt-tab, menu, loading screen). 0 = never captured.
-	static unsigned long long g_snapshotTickMs = 0;
+	// Snapshot published at the drain-complete buffer swap: the matrix + NDC
+	// constants the depth data was built with, plus the capture time. The
+	// external query API (testOcclusion*) projects through these, not the
+	// live per-frame matrix, and rejects snapshots older than
+	// kSnapshotMaxAgeMs (alt-tab, menu, loading screen).
+	struct MaskSnapshot {
+		float worldToClip[16] = {};
+		float ndcRadiusX = 0.0f;
+		float ndcRadiusY = 0.0f;
+		float wGradMag = 0.0f;
+		unsigned long long tickMs = 0;  // GetTickCount64 at swap; 0 = none yet
+	};
+	static MaskSnapshot g_snapshot;
 	static constexpr unsigned long long kSnapshotMaxAgeMs = 200;
 
 	// External occluder injection. Each PendingOccluder is a self-
@@ -296,10 +299,6 @@ namespace msoc::patch::occlusion {
 		};
 		std::vector<SubcellRange> subcellRanges;
 	};
-	static std::unordered_map<NI::Node*, LandCacheEntry> g_landCache;
-	static uint64_t g_landCacheHits = 0;
-	static uint64_t g_landCacheMisses = 0;
-	static uint64_t g_landCacheEvictions = 0;
 
 	// Temporal coherence cache for drain-phase TestRect verdicts. Keyed
 	// by NI::AVObject*. OcclusionTemporalCoherenceFrames N: 0 disables;
@@ -323,9 +322,6 @@ namespace msoc::patch::occlusion {
 		float boundOriginX, boundOriginY, boundOriginZ;
 		float boundRadius;
 	};
-	static std::unordered_map<NI::AVObject*, DrainCacheEntry> g_drainCache;
-	static uint64_t g_drainCacheHits = 0;
-	static uint64_t g_drainCacheMisses = 0;
 
 	// Terrain-descendant membership cache. Replaces a 7-deep parent-
 	// chain walk (called twice per deferred leaf) with a flat lookup.
@@ -340,9 +336,6 @@ namespace msoc::patch::occlusion {
 		NI::Pointer<NI::AVObject> objPtr;
 		bool isDescendant;
 	};
-	static std::unordered_map<NI::AVObject*, TerrainMembershipEntry> g_terrainMembership;
-	static uint64_t g_terrainMembershipHits   = 0;
-	static uint64_t g_terrainMembershipMisses = 0;
 
 	// Per-instance occluder eligibility cache. Combines (a) ancestor-walked
 	// alpha/stencil classification and (b) world-space vertex/index buffers
@@ -352,7 +345,7 @@ namespace msoc::patch::occlusion {
 	// 50 us/frame caching threshold from MSOC_CACHE_AUDIT.md.
 	//
 	// Invalidation:
-	//   - Cell change wipes the whole map (same hook as g_drainCache).
+	//   - Cell change wipes the whole map (same hook as g_caches.drain).
 	//   - Geometry slot refreshes whenever the worldTransform memcmp differs
 	//     (catches moved pickables, scripted moves; ~no-op for cell statics).
 	//
@@ -378,9 +371,6 @@ namespace msoc::patch::occlusion {
 		// kind of motion without writing a per-field comparator.
 		float xfData[13] = {};
 	};
-	static std::unordered_map<NI::AVObject*, OccluderCacheEntry> g_occluderCache;
-	static uint64_t g_occluderCacheHits = 0;
-	static uint64_t g_occluderCacheMisses = 0;
 
 	// Miss-path workload probes: count walked ancestor steps and transformed
 	// verts on the cache-miss path. Together with hit/miss above these
@@ -390,15 +380,6 @@ namespace msoc::patch::occlusion {
 	static uint64_t g_occluderVertexCalls   = 0;
 	static uint64_t g_occluderVertexVerts   = 0;
 
-	static OccluderCacheEntry& getOccluderCacheEntry(NI::AVObject* obj) {
-		auto it = g_occluderCache.find(obj);
-		if (it != g_occluderCache.end()) {
-			return it->second;
-		}
-		auto& e = g_occluderCache[obj];
-		e.objPtr = NI::Pointer<NI::AVObject>(obj);
-		return e;
-	}
 
 	// Per-light occlusion cache for updateLights (gated by
 	// OcclusionCullLights). Tracks last query frame, last verdict,
@@ -415,11 +396,49 @@ namespace msoc::patch::occlusion {
 		float boundOriginX, boundOriginY, boundOriginZ;
 		float boundRadius;
 	};
-	static std::unordered_map<NI::Light*, LightCullEntry> g_lightCullCache;
-	static uint64_t g_lightsTested = 0;
-	static uint64_t g_lightsOccluded = 0;
-	static uint64_t g_lightCullCacheHits = 0;
-	static uint64_t g_lightCullCacheMisses = 0;
+
+	// ------------------------------------------------------------
+	// Owner for the five per-cell caches + their hit/miss counters.
+	// Single g_caches instance replaces the loose g_*Cache* statics.
+	// ------------------------------------------------------------
+	struct OcclusionCaches {
+		std::unordered_map<NI::Node*, LandCacheEntry> land;
+		uint64_t landHits = 0, landMisses = 0, landEvictions = 0;
+
+		std::unordered_map<NI::AVObject*, DrainCacheEntry> drain;
+		uint64_t drainHits = 0, drainMisses = 0;
+
+		std::unordered_map<NI::AVObject*, TerrainMembershipEntry> terrainMembership;
+		uint64_t terrainMembershipHits = 0, terrainMembershipMisses = 0;
+
+		std::unordered_map<NI::AVObject*, OccluderCacheEntry> occluder;
+		uint64_t occluderHits = 0, occluderMisses = 0;
+
+		std::unordered_map<NI::Light*, LightCullEntry> lightCull;
+		uint64_t lightsTested = 0, lightsOccluded = 0, lightCullHits = 0, lightCullMisses = 0;
+
+		// Get-or-create the occluder entry for obj (refcounts the key).
+		OccluderCacheEntry& occluderEntry(NI::AVObject* obj) {
+			auto it = occluder.find(obj);
+			if (it != occluder.end()) {
+				return it->second;
+			}
+			auto& e = occluder[obj];
+			e.objPtr = NI::Pointer<NI::AVObject>(obj);
+			return e;
+		}
+
+		// Cell-change wipe: release every cached NI::Pointer pin. Clear
+		// order preserved verbatim from the original inline wipe.
+		void wipeForCellChange() {
+			land.clear();
+			drain.clear();
+			lightCull.clear();
+			terrainMembership.clear();
+			occluder.clear();
+		}
+	};
+	static OcclusionCaches g_caches;
 
 	// Light observers - registered by external consumers (MGE-XE) that
 	// want the live renderer-iterated light list without re-patching
@@ -439,8 +458,8 @@ namespace msoc::patch::occlusion {
 	// File-scope frame counter; incremented once per top-level frame.
 	// Used by the drain loop for cache-freshness checks.
 	static uint32_t g_frameCounter = 0;
-	// Cell pointer across frames. Cell change -> wipe g_landCache and
-	// g_drainCache (NI::Node*/NI::AVObject* recycle in the new cell).
+	// Cell pointer across frames. Cell change -> wipe g_caches.land and
+	// g_caches.drain (NI::Node*/NI::AVObject* recycle in the new cell).
 	static TES3::Cell* g_lastCell = nullptr;
 	static uint64_t g_cellChanges = 0;
 	// Cell-cross profiling (Configuration::OcclusionLogCellCross). Set to a
@@ -669,7 +688,7 @@ namespace msoc::patch::occlusion {
 		ViewCulled,     // rect collapsed; treat like Visible for display()
 		SkipTerrain,    // bypassed TestRect (terrain descendant); call display()
 		SkipTiny,       // bypassed TestRect (radius < threshold); call display()
-		CachedOccluded, // g_drainCache hit; verdict OCCLUDED (only cached verdict)
+		CachedOccluded, // g_caches.drain hit; verdict OCCLUDED (only cached verdict)
 	};
 
 	struct DrainSlot {
@@ -743,17 +762,17 @@ namespace msoc::patch::occlusion {
 	// cell; wiped on cell change.
 	static bool isLandscapeDescendant(NI::AVObject* obj, NI::Node* root) {
 		if (!root || !obj) return false;
-		auto it = g_terrainMembership.find(obj);
-		if (it != g_terrainMembership.end()) {
-			++g_terrainMembershipHits;
+		auto it = g_caches.terrainMembership.find(obj);
+		if (it != g_caches.terrainMembership.end()) {
+			++g_caches.terrainMembershipHits;
 			return it->second.isDescendant;
 		}
-		++g_terrainMembershipMisses;
+		++g_caches.terrainMembershipMisses;
 		bool result = false;
 		for (NI::AVObject* cur = obj; cur; cur = cur->parentNode) {
 			if (cur == root) { result = true; break; }
 		}
-		g_terrainMembership.emplace(
+		g_caches.terrainMembership.emplace(
 			obj, TerrainMembershipEntry{ NI::Pointer<NI::AVObject>(obj), result });
 		return result;
 	}
@@ -920,8 +939,8 @@ namespace msoc::patch::occlusion {
 			return true;
 		}
 
-		auto it = g_lightCullCache.find(light);
-		const bool haveValidEntry = (it != g_lightCullCache.end())
+		auto it = g_caches.lightCull.find(light);
+		const bool haveValidEntry = (it != g_caches.lightCull.end())
 			&& it->second.boundOriginX == cx
 			&& it->second.boundOriginY == cy
 			&& it->second.boundOriginZ == cz
@@ -929,17 +948,17 @@ namespace msoc::patch::occlusion {
 
 		// Same-frame cache hit - return latched verdict without re-testing.
 		if (haveValidEntry && it->second.lastQueryFrame == g_frameCounter) {
-			++g_lightCullCacheHits;
+			++g_caches.lightCullHits;
 			return !it->second.cullActive;
 		}
 
 		// Miss (or stale) - run MSOC test.
-		++g_lightCullCacheMisses;
-		++g_lightsTested;
+		++g_caches.lightCullMisses;
+		++g_caches.lightsTested;
 		const NI::Point3 center{ cx, cy, cz };
 		const auto verdict = testSphereVisible(center, cr);
 		const bool occluded = (verdict == ::MaskedOcclusionCulling::OCCLUDED);
-		if (occluded) ++g_lightsOccluded;
+		if (occluded) ++g_caches.lightsOccluded;
 
 		if (haveValidEntry) {
 			auto& e = it->second;
@@ -968,7 +987,7 @@ namespace msoc::patch::occlusion {
 		e.boundOriginY = cy;
 		e.boundOriginZ = cz;
 		e.boundRadius = cr;
-		g_lightCullCache[light] = e;
+		g_caches.lightCull[light] = e;
 		return true;
 	}
 
@@ -1000,7 +1019,7 @@ namespace msoc::patch::occlusion {
 	// Using real triangles instead of the AABB prevents "sign on wall
 	// falsely occluded because it lives inside the wall's AABB."
 	// World-space verts + indices + AABB live in the supplied cache entry
-	// (g_occluderCache); only re-derived when worldTransform changes.
+	// (g_caches.occluder); only re-derived when worldTransform changes.
 	// Returns true on rasterise, false on skip (no data, thin axis,
 	// inside-guard if enabled, or budget gate).
 	static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye, OccluderCacheEntry& cache) {
@@ -1557,7 +1576,7 @@ namespace msoc::patch::occlusion {
 	// Must run inside isTopLevel - after ClearBuffer + uploadCameraTransform,
 	// before cullShowBody - so the drain sees terrain in the depth buffer.
 	//
-	// Uses g_landCache to amortise the per-Land walk + vertex transform.
+	// Uses g_caches.land to amortise the per-Land walk + vertex transform.
 	// Mark-and-sweep evicts entries whose NiNode wasn't seen this frame.
 	static void rasterizeAggregateTerrain(NI::Camera* camera) {
 		if (!g_worldLandscapeRoot) return;
@@ -1567,7 +1586,7 @@ namespace msoc::patch::occlusion {
 
 		// Mark all cached entries unseen; we'll flip this for entries we
 		// touch this frame and evict the remainder below.
-		for (auto& kv : g_landCache) kv.second.seen = false;
+		for (auto& kv : g_caches.land) kv.second.seen = false;
 
 		const auto& landChildren = g_worldLandscapeRoot->children;
 		for (size_t i = 0; i < landChildren.endIndex; ++i) {
@@ -1579,7 +1598,7 @@ namespace msoc::patch::occlusion {
 
 			// Get-or-build the cached buffer. Keyed by NiNode pointer;
 			// a cell-change realloc produces a new key and rebuilds.
-			auto [it, inserted] = g_landCache.try_emplace(landNode);
+			auto [it, inserted] = g_caches.land.try_emplace(landNode);
 			LandCacheEntry& entry = it->second;
 			// Resolution-mismatch on hit forces a rebuild - MCM dropdown
 			// changes propagate lazily. nodePtr stays valid (NI::Pointer
@@ -1588,14 +1607,14 @@ namespace msoc::patch::occlusion {
 			if (inserted) {
 				entry.nodePtr = landNode;
 				buildLandCacheEntry(entry, landNode);
-				++g_landCacheMisses;
+				++g_caches.landMisses;
 			}
 			else if (entry.builtForResolution != curRes) {
 				buildLandCacheEntry(entry, landNode);
-				++g_landCacheMisses;
+				++g_caches.landMisses;
 			}
 			else {
-				++g_landCacheHits;
+				++g_caches.landHits;
 			}
 			entry.seen = true;
 
@@ -1668,10 +1687,10 @@ namespace msoc::patch::occlusion {
 		// Sweep stale entries. Safe to free now because ClearBuffer() at
 		// top-level entry already flushed previous-frame async work that
 		// referenced these pointers.
-		for (auto it = g_landCache.begin(); it != g_landCache.end(); ) {
+		for (auto it = g_caches.land.begin(); it != g_caches.land.end(); ) {
 			if (!it->second.seen) {
-				it = g_landCache.erase(it);
-				++g_landCacheEvictions;
+				it = g_caches.land.erase(it);
+				++g_caches.landEvictions;
 			}
 			else {
 				++it;
@@ -1768,15 +1787,15 @@ namespace msoc::patch::occlusion {
 				if (!skipAsAggregated
 					&& boundRadius >= g_frame.occluderRadiusMin
 					&& boundRadius <= g_frame.occluderRadiusMax) {
-					auto& cacheEntry = getOccluderCacheEntry(self);
+					auto& cacheEntry = g_caches.occluderEntry(self);
 					if (!cacheEntry.propsResolved) {
-						if (g_frame.logEnabled) ++g_occluderCacheMisses;
+						if (g_frame.logEnabled) ++g_caches.occluderMisses;
 						const auto p = classifyOccluderProperties(self);
 						cacheEntry.alpha = p.alpha;
 						cacheEntry.stencil = p.stencil;
 						cacheEntry.propsResolved = true;
 					} else {
-						if (g_frame.logEnabled) ++g_occluderCacheHits;
+						if (g_frame.logEnabled) ++g_caches.occluderHits;
 					}
 					if (cacheEntry.alpha) {
 						++g_skippedAlpha;
@@ -1812,7 +1831,7 @@ namespace msoc::patch::occlusion {
 	// ============================================================
 
 	// Drain phase 1 - classify [lo, hi) of g_pendingDisplays into
-	// g_drainSlots. Read-only on shared state (no g_drainCache writes,
+	// g_drainSlots. Read-only on shared state (no g_caches.drain writes,
 	// no counter increments except the atomic g_queryNearClip, no
 	// display(), no tints) - phase 2 owns all writes. Read-only-ness
 	// is what lets this run on workers once parallel dispatch lands.
@@ -1874,8 +1893,8 @@ namespace msoc::patch::occlusion {
 
 			// Temporal cache: read-only lookup. Inserts happen in phase 2.
 			if (tcFrames > 0) {
-				auto it = g_drainCache.find(p.shape);
-				if (it != g_drainCache.end()) {
+				auto it = g_caches.drain.find(p.shape);
+				if (it != g_caches.drain.end()) {
 					const auto& e = it->second;
 					const auto& o = p.shape->worldBoundOrigin;
 					const float r = p.shape->worldBoundRadius;
@@ -2080,7 +2099,7 @@ namespace msoc::patch::occlusion {
 				continue;
 			}
 			if (s.verdict == DrainVerdict::CachedOccluded) {
-				++g_drainCacheHits;
+				++g_caches.drainHits;
 				handleOccluded(p);
 				continue;
 			}
@@ -2089,12 +2108,12 @@ namespace msoc::patch::occlusion {
 			if (s.ranTestRect) {
 				++g_queryTested;
 				if (g_frame.temporalCoherenceFrames > 0) {
-					++g_drainCacheMisses;
+					++g_caches.drainMisses;
 					// Cache only OCCLUDED - VISIBLE/VIEW_CULLED still call
 					// display() this frame, so caching them adds stale-
 					// pointer surface for no hit-path win.
 					if (s.verdict == DrainVerdict::Occluded) {
-						auto& e = g_drainCache[p.shape];
+						auto& e = g_caches.drain[p.shape];
 						e.shapePtr = p.shape;
 						e.result = ::MaskedOcclusionCulling::OCCLUDED;
 						e.lastQueryFrame = g_frameCounter;
@@ -2239,11 +2258,7 @@ namespace msoc::patch::occlusion {
 					// Time just the wipe - the one cross cost the per-frame
 					// timers don't already capture.
 					ScopedUsAccumulator wipeTimer(g_cellWipeUs);
-					g_landCache.clear();
-					g_drainCache.clear();
-					g_lightCullCache.clear();
-					g_terrainMembership.clear();
-					g_occluderCache.clear();
+					g_caches.wipeForCellChange();
 					// Releases our NI::Pointer refs on outgoing-cell shapes
 					// so they can actually be freed. Surviving shapes
 					// (player, inventory) re-enter on next tint.
@@ -2285,23 +2300,23 @@ namespace msoc::patch::occlusion {
 			g_horizonColumnsTouched = 0;
 			g_horizonCurtainTris    = 0;
 			g_horizonAdaptiveEpsD   = 0.0f;
-			g_terrainMembershipHits   = 0;
-			g_terrainMembershipMisses = 0;
+			g_caches.terrainMembershipHits   = 0;
+			g_caches.terrainMembershipMisses = 0;
 			g_classifyOccluderCalls   = 0;
 			g_classifyOccluderSteps   = 0;
 			g_occluderVertexCalls     = 0;
 			g_occluderVertexVerts     = 0;
-			g_occluderCacheHits       = 0;
-			g_occluderCacheMisses     = 0;
-			g_landCacheHits = 0;
-			g_landCacheMisses = 0;
-			g_landCacheEvictions = 0;
-			g_drainCacheHits = 0;
-			g_drainCacheMisses = 0;
-			g_lightsTested = 0;
-			g_lightsOccluded = 0;
-			g_lightCullCacheHits = 0;
-			g_lightCullCacheMisses = 0;
+			g_caches.occluderHits       = 0;
+			g_caches.occluderMisses     = 0;
+			g_caches.landHits = 0;
+			g_caches.landMisses = 0;
+			g_caches.landEvictions = 0;
+			g_caches.drainHits = 0;
+			g_caches.drainMisses = 0;
+			g_caches.lightsTested = 0;
+			g_caches.lightsOccluded = 0;
+			g_caches.lightCullHits = 0;
+			g_caches.lightCullMisses = 0;
 			++g_frameCounter;
 			g_lastStage = 5;
 			// Age-prune the drain cache. Window 2*N frames - older
@@ -2309,13 +2324,13 @@ namespace msoc::patch::occlusion {
 			{
 				const unsigned int tcFrames = Configuration::OcclusionTemporalCoherenceFrames;
 				if (tcFrames == 0) {
-					if (!g_drainCache.empty()) g_drainCache.clear();
+					if (!g_caches.drain.empty()) g_caches.drain.clear();
 				}
 				else {
 					const uint32_t maxAge = tcFrames * 2;
-					for (auto it = g_drainCache.begin(); it != g_drainCache.end(); ) {
+					for (auto it = g_caches.drain.begin(); it != g_caches.drain.end(); ) {
 						if (g_frameCounter - it->second.lastQueryFrame > maxAge) {
-							it = g_drainCache.erase(it);
+							it = g_caches.drain.erase(it);
 						}
 						else {
 							++it;
@@ -2328,14 +2343,14 @@ namespace msoc::patch::occlusion {
 			// pinned by their NI::Pointer keys until cell change.
 			{
 				if (!Configuration::OcclusionCullLights) {
-					if (!g_lightCullCache.empty()) g_lightCullCache.clear();
+					if (!g_caches.lightCull.empty()) g_caches.lightCull.clear();
 				}
 				else {
 					const uint32_t maxAge =
 						Configuration::OcclusionLightCullHysteresisFrames * 2;
-					for (auto it = g_lightCullCache.begin(); it != g_lightCullCache.end(); ) {
+					for (auto it = g_caches.lightCull.begin(); it != g_caches.lightCull.end(); ) {
 						if (g_frameCounter - it->second.lastQueryFrame > maxAge) {
-							it = g_lightCullCache.erase(it);
+							it = g_caches.lightCull.erase(it);
 						}
 						else {
 							++it;
@@ -2437,11 +2452,11 @@ namespace msoc::patch::occlusion {
 			if (g_threadpool) {
 				g_threadpool->SetBuffer(g_msoc);
 			}
-			std::memcpy(g_worldToClip_prev, g_worldToClip, sizeof(g_worldToClip));
-			g_ndcRadiusX_prev = g_ndcRadiusX;
-			g_ndcRadiusY_prev = g_ndcRadiusY;
-			g_wGradMag_prev   = g_wGradMag;
-			g_snapshotTickMs  = GetTickCount64();
+			std::memcpy(g_snapshot.worldToClip, g_worldToClip, sizeof(g_worldToClip));
+			g_snapshot.ndcRadiusX = g_ndcRadiusX;
+			g_snapshot.ndcRadiusY = g_ndcRadiusY;
+			g_snapshot.wGradMag   = g_wGradMag;
+			g_snapshot.tickMs  = GetTickCount64();
 
 			g_maskReady = true;
 			if (g_asyncThisFrame) {
@@ -2561,34 +2576,34 @@ namespace msoc::patch::occlusion {
 					<< " horizonColumnsTouched=" << g_horizonColumnsTouched
 					<< " horizonCurtainTris=" << g_horizonCurtainTris
 					<< " horizonAdaptiveEpsD=" << g_horizonAdaptiveEpsD
-					<< " landMembershipHit=" << g_terrainMembershipHits
-					<< " landMembershipMiss=" << g_terrainMembershipMisses
-					<< " landMembershipSize=" << g_terrainMembership.size()
+					<< " landMembershipHit=" << g_caches.terrainMembershipHits
+					<< " landMembershipMiss=" << g_caches.terrainMembershipMisses
+					<< " landMembershipSize=" << g_caches.terrainMembership.size()
 					<< " classOccCalls=" << g_classifyOccluderCalls
 					<< " classOccSteps=" << g_classifyOccluderSteps
 					<< " occVertCalls=" << g_occluderVertexCalls
 					<< " occVertVerts=" << g_occluderVertexVerts
-					<< " occCacheHit=" << g_occluderCacheHits
-					<< " occCacheMiss=" << g_occluderCacheMisses
-					<< " occCacheSize=" << g_occluderCache.size()
-					<< " landCacheHit=" << g_landCacheHits
-					<< " landCacheMiss=" << g_landCacheMisses
-					<< " landCacheEvict=" << g_landCacheEvictions
+					<< " occCacheHit=" << g_caches.occluderHits
+					<< " occCacheMiss=" << g_caches.occluderMisses
+					<< " occCacheSize=" << g_caches.occluder.size()
+					<< " landCacheHit=" << g_caches.landHits
+					<< " landCacheMiss=" << g_caches.landMisses
+					<< " landCacheEvict=" << g_caches.landEvictions
 					// Light-cull A/B counters. lightCullMiss == lightsTested
 					// (every miss runs the MSOC test); kept separate for
 					// symmetry with other *Hit/Miss pairs.
-					<< " lightCullHit=" << g_lightCullCacheHits
-					<< " lightCullMiss=" << g_lightCullCacheMisses
-					<< " lightOccluded=" << g_lightsOccluded
-					<< " lightCacheSize=" << g_lightCullCache.size()
+					<< " lightCullHit=" << g_caches.lightCullHits
+					<< " lightCullMiss=" << g_caches.lightCullMisses
+					<< " lightOccluded=" << g_caches.lightsOccluded
+					<< " lightCacheSize=" << g_caches.lightCull.size()
 					// Average per-frame time across this sample window.
 					// 1e6 / avgFrameUs = average FPS. Reset right after.
 					<< " avgFrameUs=" << (g_windowFrameCount
 						? (g_windowFrameTimeUs / g_windowFrameCount) : 0)
 					<< " framesInWin=" << g_windowFrameCount
-					<< " tcHit=" << g_drainCacheHits
-					<< " tcMiss=" << g_drainCacheMisses
-					<< " tcSize=" << g_drainCache.size()
+					<< " tcHit=" << g_caches.drainHits
+					<< " tcMiss=" << g_caches.drainMisses
+					<< " tcSize=" << g_caches.drain.size()
 					<< " cellChanges=" << g_cellChanges
 					<< " sceneGateSkipped=" << g_skippedSceneGate
 					<< " menuModeSkipped=" << g_skippedMenuMode // cumulative
@@ -2714,7 +2729,7 @@ namespace msoc::patch::occlusion {
 			g_msoc_prev->SetResolution(kMsocWidth, kMsocHeight);
 			g_msoc_prev->SetNearClipPlane(kNearClipW);
 			g_msoc_prev->ClearBuffer();
-			g_snapshotTickMs = 0;
+			g_snapshot.tickMs = 0;
 		}
 
 		if (!g_threadpool) {
@@ -2834,10 +2849,10 @@ namespace msoc::patch::occlusion {
 			::MaskedOcclusionCulling::Destroy(g_msoc_prev);
 			g_msoc_prev = nullptr;
 		}
-		g_snapshotTickMs = 0;
+		g_snapshot.tickMs = 0;
 		// Release NI::Pointer refcounts on every cached static, drop the
 		// world-vert/index buffers; re-enable rebuilds from scratch.
-		g_occluderCache.clear();
+		g_caches.occluder.clear();
 		// External occluder queue: drop pending submissions so re-enable
 		// doesn't replay stale ones against the fresh mask.
 		{
@@ -2983,11 +2998,11 @@ namespace msoc::patch::occlusion {
 	// snapshots older than ~200ms so paused/load/alt-tab states don't
 	// serve a frozen mask.
 	bool isOcclusionMaskReady() {
-		if (!g_msoc_prev || g_snapshotTickMs == 0) {
+		if (!g_msoc_prev || g_snapshot.tickMs == 0) {
 			return false;
 		}
 		const unsigned long long now = GetTickCount64();
-		return (now - g_snapshotTickMs) <= kSnapshotMaxAgeMs;
+		return (now - g_snapshot.tickMs) <= kSnapshotMaxAgeMs;
 	}
 
 	// Sphere test against the SNAPSHOT buffer using the _prev matrix +
@@ -2998,9 +3013,9 @@ namespace msoc::patch::occlusion {
 	{
 		// Project center through last frame's world-to-clip.
 		const clipmath::ClipXYW c =
-			clipmath::projectWorld(g_worldToClip_prev, center.x, center.y, center.z);
+			clipmath::projectWorld(g_snapshot.worldToClip, center.x, center.y, center.z);
 
-		const float wMin = c.w - (radius + g_frame.depthSlackWorldUnits) * g_wGradMag_prev;
+		const float wMin = c.w - (radius + g_frame.depthSlackWorldUnits) * g_snapshot.wGradMag;
 		if (wMin <= kNearClipW) {
 			return ::MaskedOcclusionCulling::VISIBLE;
 		}
@@ -3008,8 +3023,8 @@ namespace msoc::patch::occlusion {
 		const float invW = 1.0f / c.w;
 		const float cxNdc = c.x * invW;
 		const float cyNdc = c.y * invW;
-		const float rxNdc = radius * g_ndcRadiusX_prev * invW;
-		const float ryNdc = radius * g_ndcRadiusY_prev * invW;
+		const float rxNdc = radius * g_snapshot.ndcRadiusX * invW;
+		const float ryNdc = radius * g_snapshot.ndcRadiusY * invW;
 
 		float ndcMinX = std::max(cxNdc - rxNdc, -1.0f);
 		float ndcMinY = std::max(cyNdc - ryNdc, -1.0f);
@@ -3052,12 +3067,12 @@ namespace msoc::patch::occlusion {
 
 	void getSnapshotViewProj(float outMatrix[16]) {
 		if (!outMatrix) return;
-		std::memcpy(outMatrix, g_worldToClip_prev, sizeof(g_worldToClip_prev));
+		std::memcpy(outMatrix, g_snapshot.worldToClip, sizeof(g_snapshot.worldToClip));
 	}
 
 	unsigned long long getSnapshotAgeMs() {
-		if (g_snapshotTickMs == 0) return 0;
-		return GetTickCount64() - g_snapshotTickMs;
+		if (g_snapshot.tickMs == 0) return 0;
+		return GetTickCount64() - g_snapshot.tickMs;
 	}
 
 	void getMaskResolution(int* outWidth, int* outHeight) {
@@ -3280,10 +3295,10 @@ namespace msoc::patch::occlusion {
 			return false;
 		}
 		if (!isOcclusionMaskReady()) {
-			const unsigned long long ageMs = g_snapshotTickMs
-				? (GetTickCount64() - g_snapshotTickMs) : 0;
+			const unsigned long long ageMs = g_snapshot.tickMs
+				? (GetTickCount64() - g_snapshot.tickMs) : 0;
 			log::getLog() << "MSOC dump: mask not ready (snapshotTick="
-				<< g_snapshotTickMs << ", ageMs=" << ageMs
+				<< g_snapshot.tickMs << ", ageMs=" << ageMs
 				<< ", prevPtr=" << (g_msoc_prev ? "ok" : "null") << ")" << std::endl;
 			return false;
 		}
@@ -3383,7 +3398,7 @@ namespace msoc::patch::occlusion {
 		const float sx[8] = { -1, +1, +1, -1, -1, +1, +1, -1 };
 		const float sy[8] = { -1, -1, +1, +1, -1, -1, +1, +1 };
 		const float sz[8] = { -1, -1, -1, -1, +1, +1, +1, +1 };
-		const float* m = g_worldToClip_prev;
+		const float* m = g_snapshot.worldToClip;
 		float ndcMinX = +FLT_MAX;
 		float ndcMinY = +FLT_MAX;
 		float ndcMaxX = -FLT_MAX;
@@ -3410,7 +3425,7 @@ namespace msoc::patch::occlusion {
 			wMin = std::min(wMin, clip.w);
 		}
 
-		wMin -= g_frame.depthSlackWorldUnits * g_wGradMag_prev;
+		wMin -= g_frame.depthSlackWorldUnits * g_snapshot.wGradMag;
 		if (wMin <= kNearClipW) {
 			return kMaskQueryVisible;
 		}
@@ -3433,128 +3448,4 @@ namespace msoc::patch::occlusion {
 		return kMaskQueryVisible;
 	}
 
-}
-
-// ============================================================
-// C-ABI exports (out-of-tree consumers: MGE-XE etc.)
-// ============================================================
-
-// C-ABI shims. void*/NI::Light* share representation on x86 and both
-// callback pointers are __cdecl, so the reinterpret_cast is an ABI
-// formality. Consumers look up by name (not ordinal) - names are
-// frozen.
-extern "C" __declspec(dllexport)
-void __cdecl mwse_registerLightObservedCallback(void(__cdecl* cb)(void* niLight)) {
-	using Typed = msoc::patch::occlusion::LightObservedCallback;
-	msoc::patch::occlusion::registerLightObservedCallback(
-		reinterpret_cast<Typed>(cb));
-}
-
-extern "C" __declspec(dllexport)
-void __cdecl mwse_unregisterLightObservedCallback(void(__cdecl* cb)(void* niLight)) {
-	using Typed = msoc::patch::occlusion::LightObservedCallback;
-	msoc::patch::occlusion::unregisterLightObservedCallback(
-		reinterpret_cast<Typed>(cb));
-}
-
-extern "C" __declspec(dllexport)
-void __cdecl mwse_registerVisibleGeomCallback(
-		void(__cdecl* cb)(void* const*, const float*, int)) {
-	using Typed = msoc::patch::occlusion::VisibleGeomCallback;
-	msoc::patch::occlusion::registerVisibleGeomCallback(reinterpret_cast<Typed>(cb));
-}
-
-extern "C" __declspec(dllexport)
-void __cdecl mwse_unregisterVisibleGeomCallback(
-		void(__cdecl* cb)(void* const*, const float*, int)) {
-	using Typed = msoc::patch::occlusion::VisibleGeomCallback;
-	msoc::patch::occlusion::unregisterVisibleGeomCallback(reinterpret_cast<Typed>(cb));
-}
-
-// Mask query exports. Returns MWSE_OCC_* codes (0=Visible, 1=Occluded,
-// 2=ViewCulled, 3=NotReady) - frozen ABI independent of Intel's enum.
-// Gate with mwse_isOcclusionMaskReady() if unsure about timing.
-extern "C" __declspec(dllexport)
-int __cdecl mwse_isOcclusionMaskReady() {
-	return msoc::patch::occlusion::isOcclusionMaskReady() ? 1 : 0;
-}
-
-extern "C" __declspec(dllexport)
-int __cdecl mwse_testOcclusionSphere(float worldX, float worldY, float worldZ, float radius) {
-	return static_cast<int>(
-		msoc::patch::occlusion::testOcclusionSphere(worldX, worldY, worldZ, radius));
-}
-
-extern "C" __declspec(dllexport)
-int __cdecl mwse_testOcclusionAABB(
-	float minX, float minY, float minZ,
-	float maxX, float maxY, float maxZ)
-{
-	return static_cast<int>(
-		msoc::patch::occlusion::testOcclusionAABB(minX, minY, minZ, maxX, maxY, maxZ));
-}
-
-extern "C" __declspec(dllexport)
-int __cdecl mwse_testOcclusionOBB(
-	float cx, float cy, float cz,
-	float vxX, float vxY, float vxZ,
-	float vyX, float vyY, float vyZ,
-	float vzX, float vzY, float vzZ)
-{
-	return static_cast<int>(
-		msoc::patch::occlusion::testOcclusionOBB(
-			cx, cy, cz,
-			vxX, vxY, vxZ,
-			vyX, vyY, vyZ,
-			vzX, vzY, vzZ));
-}
-
-extern "C" __declspec(dllexport)
-void __cdecl mwse_testOcclusionSphereBatch(
-	const float* centersAndRadii, int count, int* resultsOut)
-{
-	msoc::patch::occlusion::testOcclusionSphereBatch(
-		centersAndRadii, count, resultsOut);
-}
-
-extern "C" __declspec(dllexport)
-void __cdecl mwse_getSnapshotViewProj(float outMatrix[16]) {
-	msoc::patch::occlusion::getSnapshotViewProj(outMatrix);
-}
-
-extern "C" __declspec(dllexport)
-unsigned long long __cdecl mwse_getSnapshotAgeMs() {
-	return msoc::patch::occlusion::getSnapshotAgeMs();
-}
-
-extern "C" __declspec(dllexport)
-void __cdecl mwse_getMaskResolution(int* outWidth, int* outHeight) {
-	msoc::patch::occlusion::getMaskResolution(outWidth, outHeight);
-}
-
-extern "C" __declspec(dllexport)
-int __cdecl mwse_dumpOcclusionMask(const char* path) {
-	return msoc::patch::occlusion::dumpOcclusionMask(path) ? 1 : 0;
-}
-
-extern "C" __declspec(dllexport)
-int __cdecl mwse_addOccluder(
-	const float* verts, int vtxCount, int stride, int offY, int offW,
-	const unsigned int* tris, int triCount,
-	const float* modelMatrix16)
-{
-	return msoc::patch::occlusion::addOccluder(
-		verts, vtxCount, stride, offY, offW,
-		tris, triCount,
-		modelMatrix16) ? 1 : 0;
-}
-
-extern "C" __declspec(dllexport)
-int __cdecl mwse_addPreTransformedOccluder(
-	const float* verts, int vtxCount, int stride, int offY, int offW,
-	const unsigned int* tris, int triCount)
-{
-	return msoc::patch::occlusion::addPreTransformedOccluder(
-		verts, vtxCount, stride, offY, offW,
-		tris, triCount) ? 1 : 0;
 }

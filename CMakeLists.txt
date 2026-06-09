@@ -90,6 +90,9 @@ if(MSOC_BUILD_DLL)
         # forensics::captureSnapshot() defined in PatchOcclusionCulling.cpp.
         src/PatchForensicsWatchdog.cpp
         src/PatchOcclusionCulling.cpp
+        # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
+        # of the patch TU. Forward to the msoc::patch::occlusion public API.
+        src/Exports.cpp
         # Local forwarders for the NI/TES3 engine methods the patch calls.
         # UIE-style: each body is a one-liner reinterpret_cast to a fixed
         # Morrowind.exe address. Pure engine thunks, no MWSE runtime dep.
