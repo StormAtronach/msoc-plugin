@@ -12,7 +12,7 @@
 //                                        pre-transformed clip-space layout
 //
 // Output is ~120 triangles submitted to MOC via RenderTriangles with
-// modelToClip=nullptr — replaces a much larger raw terrain rasterization
+// modelToClip=nullptr - replaces a much larger raw terrain rasterization
 // while preserving conservative occlusion semantics.
 //
 // Coordinate conventions:
@@ -22,7 +22,7 @@
 // Adapted from MGE-XE's terrain_horizon_occluder. Notable adaptations:
 //   - Order-independent update (no front-to-back prune); near-terrain
 //     iteration order is not guaranteed front-to-back.
-//   - d[c] is updated only when y_upper STRICTLY exceeds h[c] — the depth
+//   - d[c] is updated only when y_upper STRICTLY exceeds h[c] - the depth
 //     written tracks the silhouette winner, matching the FAR-depth
 //     occluder semantic required for correctness.
 //   - simplify() takes an ADAPTIVE epsD from computeAdaptiveEpsD(), not
@@ -47,9 +47,9 @@ struct CurtainVertex {
 
 // One simplified horizon sample. col is the source column; ndcX/h/d are
 // pre-computed by the simplifier so the emit phase doesn't need the
-// column→ndc map.
+// column->ndc map.
 struct Sample {
-    int   col;
+    int col;
     float ndcX;
     float h;
     float d;
@@ -73,7 +73,7 @@ public:
     //   HorizonOccluder::fixupForMOC(verts, n*3*2);
     static HorizonOccluder& getInstance();
 
-    // Allocate horizon arrays + simplify workspace. Idempotent — same
+    // Allocate horizon arrays + simplify workspace. Idempotent - same
     // args are a no-op, different args reallocate. Returns true on success.
     bool init(int resolution = 512, int maxSamples = 60);
 
@@ -112,8 +112,8 @@ public:
     float computeAdaptiveEpsD(float fraction = 0.05f, float floor_ = 100.0f) const;
 
     // Emit curtain triangles in NDC layout. Per segment [s_i, s_{i+1}]:
-    //   y_top    = min(s_i.h, s_{i+1}.h)   conservative — below silhouette
-    //   z        = max(s_i.d, s_{i+1}.d)   conservative — at/behind terrain
+    //   y_top    = min(s_i.h, s_{i+1}.h)   conservative - below silhouette
+    //   z        = max(s_i.d, s_{i+1}.d)   conservative - at/behind terrain
     //   y_bottom = ndcYBottom              typically -1.1f, extends past screen
     //
     // Output: w=1.0, depth in z slot. Caller MUST run fixupForMOC()
@@ -136,16 +136,16 @@ public:
     // call at most once per frame.
     int columnsTouched() const;
 
-    // Diagnostic accessors — validation use only, not for hot path.
+    // Diagnostic accessors - validation use only, not for hot path.
     float heightAt(int c) const { return m_h[static_cast<size_t>(c)]; }
-    float depthAt (int c) const { return m_d[static_cast<size_t>(c)]; }
+    float depthAt(int c) const { return m_d[static_cast<size_t>(c)]; }
 
 private:
     int m_resolution = 0;
     int m_maxSamples = 0;
-    std::vector<float>   m_h;
-    std::vector<float>   m_d;
+    std::vector<float> m_h;
+    std::vector<float> m_d;
     std::vector<uint8_t> m_workspace;  // simplify scratch (keep[] + heap[])
 };
 
-} // namespace msoc::horizon
+}  // namespace msoc::horizon

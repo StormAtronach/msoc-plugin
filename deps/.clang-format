@@ -1,0 +1,5 @@
+# Vendored dependencies (Intel MSOC, MWSE upstream) keep their own upstream
+# formatting. This guard ensures a recursive `clang-format -i` from the repo
+# root never rewrites third-party code under deps/.
+DisableFormat: true
+SortIncludes: Never

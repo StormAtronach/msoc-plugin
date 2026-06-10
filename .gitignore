@@ -6,6 +6,7 @@
 
 # CMake build trees
 /build/
+/build-tests/
 /out/
 
 # Build artifacts
