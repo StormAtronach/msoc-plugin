@@ -1287,6 +1287,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.queryTested = 0;
         g_stats.queryOccluded = 0;
         g_stats.queryViewCulled = 0;
+        g_stats.boxOccluded = 0;
         g_stats.queryNearClip.store(0, std::memory_order_relaxed);
         g_stats.deferred = 0;
         g_stats.inlineTested = 0;
@@ -1313,6 +1314,8 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.occluderVertexVerts = 0;
         g_caches.occluderHits = 0;
         g_caches.occluderMisses = 0;
+        g_caches.occludeeBoxHits = 0;
+        g_caches.occludeeBoxMisses = 0;
         g_caches.landHits = 0;
         g_caches.landMisses = 0;
         g_caches.landEvictions = 0;
