@@ -34,13 +34,18 @@ struct LandCacheEntry {
     // a global cache flush. 0xff = uninitialised.
     uint8_t builtForResolution = 0xff;
 
-    // Per-subcell ranges into `indices` for per-subcell frustum-cull
-    // at submit time. `node` is the subcell NiNode used per frame
-    // as the frustumCulledSphere argument.
+    // Per-subcell ranges for per-subcell frustum-cull. `node` is the
+    // subcell NiNode used per frame as the frustumCulledSphere argument.
+    // (firstIdx, triCount) index into `indices` for the Raster submit
+    // path; (firstVert, vertCount) index into `verts` for the Horizon
+    // path, which projects the unique world-space verts directly rather
+    // than walking the index list.
     struct SubcellRange {
         NI::Node* node;
         unsigned int firstIdx;
         unsigned int triCount;
+        unsigned int firstVert;
+        unsigned int vertCount;
     };
     std::vector<SubcellRange> subcellRanges;
 };

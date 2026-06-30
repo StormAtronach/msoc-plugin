@@ -184,9 +184,11 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
         if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
         auto* subNode = static_cast<NI::Node*>(sub);
 
-        // Bracket this subcell's index-buffer range so the submit
-        // path can frustum-cull at subcell granularity.
+        // Bracket this subcell's index- AND vertex-buffer ranges so the
+        // submit path (indices) and the horizon-project path (verts) can
+        // both frustum-cull at subcell granularity.
         const unsigned int firstIdxBefore = static_cast<unsigned int>(entry.indices.size());
+        const unsigned int firstVertBefore = static_cast<unsigned int>(entry.verts.size() / 3);
 
         const auto& shapes = subNode->children;
         for (size_t k = 0; k < shapes.endIndex; ++k) {
@@ -200,10 +202,13 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
 
         const unsigned int firstIdxAfter = static_cast<unsigned int>(entry.indices.size());
         if (firstIdxAfter > firstIdxBefore) {
+            const unsigned int firstVertAfter = static_cast<unsigned int>(entry.verts.size() / 3);
             LandCacheEntry::SubcellRange r;
             r.node = subNode;
             r.firstIdx = firstIdxBefore;
             r.triCount = (firstIdxAfter - firstIdxBefore) / 3;
+            r.firstVert = firstVertBefore;
+            r.vertCount = firstVertAfter - firstVertBefore;
             entry.subcellRanges.push_back(r);
         }
     }
@@ -211,20 +216,87 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
     entry.builtForResolution = static_cast<uint8_t>(g_frame.terrainResolution);
 }
 
-// Horizon-mode terrain occluder. Walks WorldLandscape, projects each
-// vertex to clip space, bins into a 1D max-y/max-w horizon, simplifies
-// to ~60 adaptive samples, emits ~120 curtain triangles, submits those
-// to MOC via sync RenderTriangles. No land cache (fresh projection
-// each frame). Frustum-cull at land granularity only. epsD is adaptive
-// (do NOT pass 1e30 like MGE-XE's distant path - see HorizonOccluder.h).
+// Mark-and-sweep refresh of the per-Land world-space occluder cache.
+// Walks WorldLandscape, get-or-builds an entry per Land (rebuilding when
+// the terrain-resolution dropdown changed), and evicts entries whose
+// NiNode wasn't seen this frame.
+//
+// Shared by both terrain modes so neither re-walks the scene graph for
+// geometry it has already transformed: Raster submits the cached verts;
+// Horizon projects them into the 1D silhouette. Precondition:
+// g_worldLandscapeRoot is non-null (both callers guard).
+static void refreshLandCache() {
+    for (auto& kv : g_caches.land) kv.second.seen = false;
+
+    const auto& landChildren = g_worldLandscapeRoot->children;
+    for (size_t i = 0; i < landChildren.endIndex; ++i) {
+        auto* land = landChildren.storage[i].get();
+        if (!land) continue;
+        if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
+
+        auto* landNode = static_cast<NI::Node*>(land);
+
+        // Get-or-build the cached buffer. Keyed by NiNode pointer;
+        // a cell-change realloc produces a new key and rebuilds.
+        auto [it, inserted] = g_caches.land.try_emplace(landNode);
+        LandCacheEntry& entry = it->second;
+        // Resolution-mismatch on hit forces a rebuild - MCM dropdown
+        // changes propagate lazily. nodePtr stays valid (NI::Pointer
+        // pins the NiNode); only verts/indices redo.
+        const uint8_t curRes = static_cast<uint8_t>(g_frame.terrainResolution);
+        if (inserted) {
+            entry.nodePtr = landNode;
+            buildLandCacheEntry(entry, landNode);
+            ++g_caches.landMisses;
+        } else if (entry.builtForResolution != curRes) {
+            buildLandCacheEntry(entry, landNode);
+            ++g_caches.landMisses;
+        } else {
+            ++g_caches.landHits;
+        }
+        entry.seen = true;
+    }
+
+    // Sweep stale entries. Safe to free now because ClearBuffer() at
+    // top-level entry already flushed previous-frame async work that
+    // referenced these pointers.
+    for (auto it = g_caches.land.begin(); it != g_caches.land.end();) {
+        if (!it->second.seen) {
+            it = g_caches.land.erase(it);
+            ++g_caches.landEvictions;
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Horizon-mode terrain occluder. Builds the 1D max-y/max-w horizon by
+// projecting the shared per-Land world-space cache (the same buffers the
+// Raster path submits), then simplifies to ~60 adaptive samples, emits
+// ~120 curtain triangles, and submits those to MOC via sync
+// RenderTriangles. epsD is adaptive (do NOT pass 1e30 like MGE-XE's
+// distant path - see HorizonOccluder.h).
+//
+// Reusing the cache means the per-vertex world transform and the per-
+// shape getModelData/RTTI/alpha-stencil classification are paid once per
+// cell (on cache miss) instead of every frame; the per-frame cost here is
+// just projectWorld + divide + bin. The cache is already downsampled per
+// the terrain-resolution dropdown (Full/Half/Corners), so coarser
+// settings cut the projection count too - the min-z fold in the cache
+// build keeps the silhouette conservative (it can only sink, never rise).
 void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
     if (!g_worldLandscapeRoot) return;
     if (g_worldLandscapeRoot->getAppCulled()) return;
 
-    // Outer bucket: build = project + simplify + emit + submit.
+    // Outer bucket: build = cache refresh + project + simplify + emit.
     // The inner RenderTriangles also accumulates into g_stats.horizonRasterUs
     // and g_stats.rasterizeTimeUs.
     ScopedUsAccumulator timer(g_stats.horizonBuildUs);
+
+    // Build/refresh the shared per-Land cache (mark-and-sweep). The
+    // alpha/stencil gate is applied at cache-build time, so the cached
+    // verts already exclude transparent terrain patches.
+    refreshLandCache();
 
     auto& horizon = msoc::horizon::HorizonOccluder::getInstance();
     // 512 cols / 60 samples matches MGE-XE's distant-land path.
@@ -246,85 +318,66 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
         if (frustumCulledSphere(land, camera)) continue;
 
         auto* landNode = static_cast<NI::Node*>(land);
+        auto it = g_caches.land.find(landNode);
+        if (it == g_caches.land.end()) continue;  // refresh guarantees presence
+        const LandCacheEntry& entry = it->second;
+        if (entry.verts.empty()) continue;
+
+        const float* verts = entry.verts.data();
         bool landFedAny = false;
 
-        const auto& subcells = landNode->children;
-        for (size_t j = 0; j < subcells.endIndex; ++j) {
-            auto* sub = subcells.storage[j].get();
-            if (!sub) continue;
-            if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
-            auto* subNode = static_cast<NI::Node*>(sub);
+        // Project one cached world-space vertex range into the horizon.
+        // The cache verts are already world-space, so this is just the
+        // clip projection + divide + column bin.
+        const auto projectRange = [&](unsigned int firstVert, unsigned int vertCount) {
+            const unsigned int end = firstVert + vertCount;
+            for (unsigned int vi = firstVert; vi < end; ++vi) {
+                const float wx = verts[vi * 3 + 0];
+                const float wy = verts[vi * 3 + 1];
+                const float wz = verts[vi * 3 + 2];
 
-            // Per-subcell frustum cull. A Land covers 8192x8192;
-            // typically ~5-8 of its 16 subcells are in-frustum.
-            // Skipping invisible ones avoids the per-vertex
-            // transform - the dominant cost. Quality is unchanged
-            // (the c.w / ndcX guards below would've rejected these
-            // post-projection anyway).
-            if (frustumCulledSphere(subNode, camera)) continue;
+                const ClipXYW c = projectWorld(wx, wy, wz);
+                // Near-plane straddling - projection unstable.
+                if (c.w <= kNearClipW) continue;
 
-            const auto& shapes = subNode->children;
-            for (size_t k = 0; k < shapes.endIndex; ++k) {
-                auto* shape = shapes.storage[k].get();
-                if (!shape) continue;
-                if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
+                const float invW = 1.0f / c.w;
+                const float ndcX = c.x * invW;
+                const float ndcY = c.y * invW;
 
-                // Skip alpha/stencil shapes - same gate as the raster
-                // path. A transparent terrain patch shouldn't write
-                // occlusion regardless of mode.
-                const auto props = classifyOccluderProperties(shape);
-                if (props.alpha || props.stencil) continue;
+                // Off-screen X clamps would contaminate column-
+                // boundary sentinels; drop. Below-screen doesn't
+                // occlude anything; drop. Above-screen clamps up
+                // (terrain past the top still defines silhouette).
+                if (ndcX < -1.0f || ndcX > 1.0f) continue;
+                if (ndcY < -1.0f) continue;
+                const float clampedY = (ndcY > 1.0f) ? 1.0f : ndcY;
 
-                auto* tri = static_cast<NI::TriShape*>(shape);
-                // getModelData returns a smart Pointer<TriShapeData>,
-                // not a raw pointer - use auto, not auto*. Matches
-                // appendTerrainShape's pattern at line ~1614.
-                auto data = tri->getModelData();
-                if (!data) continue;
-                const unsigned short vcount = data->getActiveVertexCount();
-                if (vcount == 0 || data->vertex == nullptr) continue;
+                int col = static_cast<int>((ndcX + 1.0f) * halfSpan);
+                if (col < 0) col = 0;
+                if (col >= resolution) col = resolution - 1;
 
-                const auto& xf = tri->worldTransform;
-                const auto& R = xf.rotation;
-                const auto& T = xf.translation;
-                const float s = xf.scale;
-
-                // Mirrors appendTerrainShape's transform.
-                for (unsigned short v = 0; v < vcount; ++v) {
-                    const auto& vp = data->vertex[v];
-                    const float rx = R.m0.x * vp.x + R.m0.y * vp.y + R.m0.z * vp.z;
-                    const float ry = R.m1.x * vp.x + R.m1.y * vp.y + R.m1.z * vp.z;
-                    const float rz = R.m2.x * vp.x + R.m2.y * vp.y + R.m2.z * vp.z;
-                    const float wx = rx * s + T.x;
-                    const float wy = ry * s + T.y;
-                    const float wz = rz * s + T.z;
-
-                    const ClipXYW c = projectWorld(wx, wy, wz);
-                    // Near-plane straddling - projection unstable.
-                    if (c.w <= kNearClipW) continue;
-
-                    const float invW = 1.0f / c.w;
-                    const float ndcX = c.x * invW;
-                    const float ndcY = c.y * invW;
-
-                    // Off-screen X clamps would contaminate column-
-                    // boundary sentinels; drop. Below-screen doesn't
-                    // occlude anything; drop. Above-screen clamps up
-                    // (terrain past the top still defines silhouette).
-                    if (ndcX < -1.0f || ndcX > 1.0f) continue;
-                    if (ndcY < -1.0f) continue;
-                    const float clampedY = (ndcY > 1.0f) ? 1.0f : ndcY;
-
-                    int col = static_cast<int>((ndcX + 1.0f) * halfSpan);
-                    if (col < 0) col = 0;
-                    if (col >= resolution) col = resolution - 1;
-
-                    horizon.update(col, clampedY, c.w);
-                    ++vertsProjected;
-                    landFedAny = true;
-                }
+                horizon.update(col, clampedY, c.w);
+                ++vertsProjected;
+                landFedAny = true;
             }
+        };
+
+        // Per-subcell frustum cull. A Land covers 8192x8192; typically
+        // ~5-8 of its 16 subcells are in-frustum. Skipping invisible
+        // ones avoids the projection. Quality is unchanged (the c.w /
+        // ndcX guards above would've rejected these post-projection).
+        if (!entry.subcellRanges.empty()) {
+            for (const auto& range : entry.subcellRanges) {
+                if (range.vertCount == 0) continue;
+                if (range.node && frustumCulledSphere(range.node, camera)) continue;
+                projectRange(range.firstVert, range.vertCount);
+            }
+        } else {
+            // Stale entry built before vertex ranges existed: project
+            // the whole Land at land-frustum granularity.
+            projectRange(0, static_cast<unsigned int>(entry.verts.size() / 3));
         }
+
         if (landFedAny) ++landsContributed;
     }
 
@@ -415,9 +468,9 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
 
     ScopedUsAccumulator timer(g_stats.aggregateTerrainUs);
 
-    // Mark all cached entries unseen; we'll flip this for entries we
-    // touch this frame and evict the remainder below.
-    for (auto& kv : g_caches.land) kv.second.seen = false;
+    // Build/refresh the shared per-Land cache (mark-and-sweep). After
+    // this every live Land has an up-to-date entry in g_caches.land.
+    refreshLandCache();
 
     const auto& landChildren = g_worldLandscapeRoot->children;
     for (size_t i = 0; i < landChildren.endIndex; ++i) {
@@ -427,25 +480,10 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
 
         auto* landNode = static_cast<NI::Node*>(land);
 
-        // Get-or-build the cached buffer. Keyed by NiNode pointer;
-        // a cell-change realloc produces a new key and rebuilds.
-        auto [it, inserted] = g_caches.land.try_emplace(landNode);
+        // refreshLandCache guarantees presence for every live Land.
+        auto it = g_caches.land.find(landNode);
+        if (it == g_caches.land.end()) continue;
         LandCacheEntry& entry = it->second;
-        // Resolution-mismatch on hit forces a rebuild - MCM dropdown
-        // changes propagate lazily. nodePtr stays valid (NI::Pointer
-        // pins the NiNode); only verts/indices redo.
-        const uint8_t curRes = static_cast<uint8_t>(g_frame.terrainResolution);
-        if (inserted) {
-            entry.nodePtr = landNode;
-            buildLandCacheEntry(entry, landNode);
-            ++g_caches.landMisses;
-        } else if (entry.builtForResolution != curRes) {
-            buildLandCacheEntry(entry, landNode);
-            ++g_caches.landMisses;
-        } else {
-            ++g_caches.landHits;
-        }
-        entry.seen = true;
 
         // Per-frame submit gates. Shape-level filters are intentionally
         // omitted from cache build - they'd bake view-specific state
@@ -510,18 +548,6 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
         if (submittedTris > 0) {
             ++g_stats.aggregateTerrainLands;
             g_stats.aggregateTerrainTris += submittedTris;
-        }
-    }
-
-    // Sweep stale entries. Safe to free now because ClearBuffer() at
-    // top-level entry already flushed previous-frame async work that
-    // referenced these pointers.
-    for (auto it = g_caches.land.begin(); it != g_caches.land.end();) {
-        if (!it->second.seen) {
-            it = g_caches.land.erase(it);
-            ++g_caches.landEvictions;
-        } else {
-            ++it;
         }
     }
 }
