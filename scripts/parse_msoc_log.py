@@ -44,7 +44,7 @@ def main(path):
         if bh + bm:
             print(f"  box-AABB cache: {100*bh/(bh+bm):.1f}% hit  (hits={int(bh)} miss={int(bm)})")
     print(f"  occluders rasterized/frame: {avg('rasterized'):.0f}   viewCulled/frame: {avg('viewCulled'):.0f}")
-    print(f"  terrain lands aggregated/frame: {avg('aggTerrainLands'):.0f}")
+    print(f"  terrain lands/frame: {avg('aggTerrainLands'):.0f} raster + {avg('horizonLandsFed'):.0f} horizon")
 
     print("\n-- cache hit rates (steady state) --")
     for label, h, m in [('occluder', 'occCacheHit', 'occCacheMiss'),
@@ -58,6 +58,7 @@ def main(path):
     print("\n-- per-frame timing (us, steady-state avg) --")
     for k, lbl in [('rasterizeUs','rasterize'),('occXformUs','occ-xform'),('drainUs','drain'),
                    ('classifyUs','classify'),('displayUs','display'),('aggTerrainUs','agg-terrain'),
+                   ('horizonBuildUs','horizon-build'),('horizonRasterUs','horizon-raster'),
                    ('asyncFlushUs','async-flush'),('wakeUs','wake-threads')]:
         print(f"  {lbl:14s} {avg(k):8.0f}")
 
