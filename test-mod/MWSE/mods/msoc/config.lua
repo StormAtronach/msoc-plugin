@@ -221,10 +221,28 @@ local kRetiredKeys = {
     "OcclusionDrainBudgetUs", -- 0.0.10: renamed to OcclusionClassifyBudgetUs
 }
 
+-- _Claude_ Default-value retunes. Keys whose shipped default changed in a
+-- release and should reach upgrading users, whose saved JSON would otherwise
+-- pin the old default forever (same footgun as the tier keys, different cause:
+-- a tuning refinement rather than a hardware heuristic). Force-re-applied from
+-- default_config on a version change. Same trade-off as kTierMigratedKeys: a
+-- user who manually tuned one of these loses that override once per release,
+-- then it sticks until the next bump.
+--   1.3.0: enable the occludee box test, widen the exterior occluder max
+--          radius (4096 -> 7040), lower depth slack (128 -> 64).
+local kRetunedKeys = {
+    "OcclusionOccludeeBoxTest",
+    "OcclusionOccluderRadiusMaxExterior",
+    "OcclusionDepthSlackWorldUnits",
+}
+
 local pluginVersion = mscPlugin and mscPlugin.version or "unknown"
 if config.lastSeenVersion ~= pluginVersion then
     local oldVer = config.lastSeenVersion
     for _, k in ipairs(kTierMigratedKeys) do
+        config[k] = default_config[k]
+    end
+    for _, k in ipairs(kRetunedKeys) do
         config[k] = default_config[k]
     end
     -- Remove keys that have been renamed or dropped in this or a
@@ -239,11 +257,14 @@ if config.lastSeenVersion ~= pluginVersion then
     end
     config.lastSeenVersion = pluginVersion
     mwse.saveConfig("msoc", config)
-    mwse.log("[msoc] tier defaults migrated: lastSeen=%s -> %s; async=%s bins=%dx%d mask=%dx%d; retired=[%s]",
+    mwse.log("[msoc] defaults migrated: lastSeen=%s -> %s; async=%s bins=%dx%d mask=%dx%d; boxTest=%s radiusMaxExt=%s depthSlack=%s; retired=[%s]",
         tostring(oldVer), tostring(pluginVersion),
         tostring(config.OcclusionAsyncOccluders),
         config.OcclusionThreadpoolBinsW, config.OcclusionThreadpoolBinsH,
         config.OcclusionMaskWidth, config.OcclusionMaskHeight,
+        tostring(config.OcclusionOccludeeBoxTest),
+        tostring(config.OcclusionOccluderRadiusMaxExterior),
+        tostring(config.OcclusionDepthSlackWorldUnits),
         table.concat(removed, ","))
 end
 
