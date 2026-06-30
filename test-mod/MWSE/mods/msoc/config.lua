@@ -18,7 +18,7 @@ local default_config = {
     OcclusionEnableExterior             = true,
     OcclusionSkipTerrainOccludees       = true,
     -- Optional tighter occludee test (object-space box after the sphere).
-    OcclusionOccludeeBoxTest            = false,
+    OcclusionOccludeeBoxTest            = true,
     -- LAYER-A-HORIZON: tri-state. 0=Off, 1=Raster (default), 2=Horizon.
     -- Default Raster — on multi-core CPUs with async occluders enabled
     -- (the medium/high hardware tiers), the threadpool parallelizes the
@@ -42,14 +42,14 @@ local default_config = {
     OcclusionOccluderRadiusMinInterior    = 128.0,
     OcclusionOccluderRadiusMinExterior    = 256.0,
     OcclusionOccluderRadiusMaxInterior    = 2048.0,
-    OcclusionOccluderRadiusMaxExterior    = 4096.0,
+    OcclusionOccluderRadiusMaxExterior    = 7040.0,
     OcclusionOccluderMinDimensionInterior = 64.0,
     OcclusionOccluderMinDimensionExterior = 128.0,
     OcclusionInsideOccluderMarginInterior = 64.0,
     OcclusionInsideOccluderMarginExterior = 64.0,
 
     -- Shared (cost / geometry, not scene-dependent).
-    OcclusionDepthSlackWorldUnits       = 128.0,
+    OcclusionDepthSlackWorldUnits       = 64.0,
     OcclusionOccluderMaxTriangles       = 4096,
     OcclusionOccludeeMinRadius          = 1,
 
