@@ -106,7 +106,7 @@ extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     const auto tier = msoc::classifyHardwareTier(probe.impl, hwConcurrency);
     msoc::applyHardwareTierDefaults(tier);
 
-    setStringField(L, "version", "1.2.0");
+    setStringField(L, "version", "1.3.0");
     setStringField(L, "mocLink", probe.linkText);
     setStringField(L, "simdLevel", simdLevelName(probe.impl));
     setStringField(L, "hardwareTier", msoc::hardwareTierName(tier));

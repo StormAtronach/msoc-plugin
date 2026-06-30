@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.3.0 - 2026-06-30
+
+Source decomposition, an occludee box test, a Horizon terrain perf rework, and
+tuned exterior occluder defaults.
+
+- **Decomposed the occlusion monolith into subsystem translation units.**
+  `PatchOcclusionCulling.cpp` (~3800 lines) is replaced by `OcclusionPass.cpp`
+  (core: CullShow detour, occluder rasterization, drain) plus per-subsystem TUs
+  (QueryApi, LightCulling, TerrainAggregation, MaskResources, DiagnosticsLog,
+  ExternalOccluders, DebugTint), six state-owner structs reached through the
+  `OcclusionInternal.h` seam, and pure-leaf modules (ClipMath, Profiling,
+  HardwareTier, HorizonOccluder) with doctest unit tests. No behaviour change.
+  Module map in `ARCHITECTURE.md`. AVX512 capped to AVX2 pending a revisit.
+
+- **Occludee bounding-box test (`OcclusionOccludeeBoxTest`, now default on).**
+  After a sphere-VISIBLE verdict, re-tests the occludee's object-space vertex
+  AABB (8 corners) against the mask. Tighter than the loose bounding sphere for
+  long/flat meshes; only ever upgrades Visible -> Occluded. Cached per geometry.
+
+- **Horizon terrain projects the shared per-Land cache.** The Horizon-mode
+  curtain now projects the same cached world-space per-Land verts the Raster
+  path submits, instead of re-walking WorldLandscape and re-transforming every
+  vertex each frame. The per-vertex transform + RTTI/alpha-stencil classify is
+  paid once per cell on cache miss; the per-frame cost is projection + bin.
+
+- **Tuned exterior occluder defaults.** Exterior occluder max radius
+  4096 -> 7040 (admits larger architecture as occluders); depth slack
+  128 -> 64 world units.
+
+- **Fix: per-frame reset of the box-test counters.** `boxOccluded` /
+  `occludeeBoxHits` / `occludeeBoxMisses` were never zeroed in the per-frame
+  reset, so the stats line and `parse_msoc_log.py` read them as lifetime
+  cumulative totals. Reset like every other counter; `parse_msoc_log.py` also
+  now surfaces Horizon-mode terrain timing (`horizonBuildUs`/`horizonRasterUs`).
+
 ## 1.2.0 - 2026-06-09
 
 Build against the unified-NI MWSE/SharedSE, a cell-cross profiler, and a
