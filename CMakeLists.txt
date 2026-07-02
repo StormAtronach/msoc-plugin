@@ -183,10 +183,11 @@ if(MSOC_BUILD_DLL)
         _SILENCE_CXX17_ITERATOR_BASE_CLASS_DEPRECATION_WARNING
     )
 
-    # Match MWSE's runtime so we can share heap allocations later (CRT mismatch
-    # would crash on cross-module new/delete once we move the patch over).
+    # Static CRT, matching MWSE proper. Drops the VC++ redist requirement for
+    # end users (the most common missing-msvcp140 failure mode). The export
+    # surface is pure C ABI - nothing CRT-owned crosses the module boundary.
     set_property(TARGET msoc PROPERTY
-        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
     # Link-time optimization for Release. Maps to MSVC /GL (compile) + /LTCG
     # (link). Lets the back-end optimizer see across translation units —
@@ -239,7 +240,7 @@ if(MSOC_BUILD_TESTS)
 
     # Keep the CRT consistent with the DLL so a future shared build matches.
     set_property(TARGET msoc_tests PROPERTY
-        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
     add_test(NAME msoc_tests COMMAND msoc_tests)
 endif()
