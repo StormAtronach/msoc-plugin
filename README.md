@@ -17,20 +17,24 @@ the work lives on a development branch and will land in a future MGE-XE
 release. Until then the plugin's distant-statics path is dormant, and the
 near-scene culling is what you get.
 
-## What's new in 1.1.0
+## What's new in 1.4.0
 
-- **NiTriStrips are now valid occluders.** Vivec architecture and large
-  swathes of vanilla statics ship as NiTriStrips rather than NiTriShape —
-  in 1.0 they were silently skipped and contributed nothing to the mask.
-- **The inside-AABB occluder guard is opt-in now** via the new
-  `OcclusionInsideOccluderGuard` setting (default off). The old rejection
-  rule was over-eager and ate close-up walls; turning it off raises the
-  lifetime cull rate by ~7 percentage points without visual regressions.
-  Set it back to `true` in `msoc.json` if you want the 1.0 behavior.
-- **Per-instance occluder eligibility cache** removes a ~1.2–1.8 ms/frame
-  hidden cost on dense scenes (the per-vertex world-transform that ran on
-  every static mesh every frame). After cell warmup the cache hits at
-  ≥99.9% and rebuilds on cell change.
+- **Fixed: objects vanishing at steep view angles.** The sphere occludee
+  query under-estimated the screen footprint of off-axis objects, so
+  geometry close to large architecture (Vivec cantons and the like) could
+  be wrongly culled near the screen edges, flipping with small camera
+  movements. The screen-rect math is now exactly conservative at any
+  angle, pinned by unit tests.
+- **CCW-only occluder winding (default on)** roughly halves occluder
+  rasterization work by keeping front faces only; the rare CW-wound mesh
+  drops out of the mask as a safe under-occlude.
+- **Front-to-back occluder submission (default on)** sorts occluders
+  near-to-far so the rasterizer early-rejects triangles already behind
+  the accumulating mask.
+- **Threadpool workers now sleep instead of spinning** while waiting for
+  work — previously ~20% of a core per worker across the whole frame;
+  the freed CPU goes back to the game and the rest of your system.
+- **No VC++ redistributable needed anymore** — the DLL is self-contained.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the longer write-up.
 
@@ -59,8 +63,10 @@ applied automatically. The MCM lets you override if needed.
 - **Morrowind** (vanilla `Morrowind.exe`). OpenMW is **not** supported — the
   plugin links against MWSE which only targets the original engine.
 - **MWSE** (recent build). The plugin loads via the MWSE Lua loader.
+- **Windows 8 or newer** (worker-thread parking uses `WaitOnAddress`).
 - **CPU** with at least SSE4.1. AVX2 / AVX-512 paths are auto-selected when
   available. Fallback path exists below SSE4.1 but isn't recommended.
+- No Visual C++ redistributable required — the runtime is linked in.
 
 Optional, for the additional distant-statics culling layer:
 

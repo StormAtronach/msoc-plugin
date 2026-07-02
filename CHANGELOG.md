@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.4.0 - 2026-07-02
+
+A query correctness fix, two occluder-throughput features, and threadpool /
+build improvements.
+
+- **Fixed: false occlusion at steep view angles.** The sphere occludee query
+  divided its clip-space extents by the center w only; a sphere's near half
+  has smaller w, so off-axis close objects got undersized screen rects and
+  could be wrongly culled near screen edges - visible as buildings vanishing
+  when looking up close to large architecture (Vivec cantons), flipping with
+  small camera movements. The rect is now an exact-conservative interval
+  bound at any angle (`clipmath::conservativeSphereNdcRect`), applied to both
+  the drain query and the external-consumer snapshot query, with a
+  sphere-surface property test and a regression case pinning the old failure.
+- **CCW-only occluder winding** (`OcclusionOccluderCCWOnly`, default on).
+  Occluders rasterize front (counter-clockwise) faces only, roughly halving
+  occluder raster work across per-instance occluders, aggregate terrain, the
+  horizon curtain, and external-consumer occluders. The rare CW-wound mesh
+  drops out of the mask as a safe under-occlude, never a wrong cull.
+- **Front-to-back occluder submission** (`OcclusionOccluderFrontToBack`,
+  default on). Per-instance occluders collected during traversal are sorted
+  near-to-far and submitted before the flush, letting the rasterizer
+  early-reject occluder triangles already behind the accumulating mask.
+- **Threadpool workers park instead of yield-spinning.** Idle workers used to
+  spin through the entire per-frame wake window (~20% of a core each, mostly
+  syscall churn); they now sleep on a work signal (`WaitOnAddress`) and wake
+  on job submission. Verified ~4x less worker CPU with unchanged mask timing.
+  This makes **Windows 8 the minimum supported OS**.
+- **Static CRT.** The DLL no longer requires the Visual C++ redistributable.
+- Release builds now emit full debugging symbols (PDB, kept out of the
+  shipped archive) so profilers can resolve plugin frames.
+
 ## 1.3.0 - 2026-06-30
 
 Source decomposition, an occludee box test, a Horizon terrain perf rework, and
