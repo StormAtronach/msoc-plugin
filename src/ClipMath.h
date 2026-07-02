@@ -68,4 +68,30 @@ inline RowNorms clipRowNorms(const float* m) {
     };
 }
 
+// Conservative NDC rect of a sphere from its projected center and clip-space
+// extent bounds (rX/rY/rW = radius * the matching row norm).
+//
+// Dividing the clip extents by the CENTER w alone is not conservative: the
+// sphere's near half has smaller w, so that rect under-covers off-axis
+// spheres - worst for close spheres near the screen edge, where the missing
+// margin false-culls objects whose visible sliver lies just outside the rect
+// (and makes the verdict flip with small camera rotations). Every (x, w) pair
+// on the sphere lies inside [cx-rX, cx+rX] x [cw-rW, cw+rW], and x/w over
+// that box attains its extremes at the corners, so evaluating each rect edge
+// against both w bounds yields a true outer bound at any view angle.
+//
+// Caller contract: cw - rW > 0 (both query paths near-clip-bail first).
+struct NdcRect {
+    float minX, minY, maxX, maxY;
+};
+inline NdcRect conservativeSphereNdcRect(float cx, float cy, float cw, float rX, float rY, float rW) {
+    const float invNear = 1.0f / (cw - rW);
+    const float invFar = 1.0f / (cw + rW);
+    const float xLo = cx - rX, xHi = cx + rX;
+    const float yLo = cy - rY, yHi = cy + rY;
+    const auto lo = [&](float n) { return n < 0.0f ? n * invNear : n * invFar; };
+    const auto hi = [&](float n) { return n > 0.0f ? n * invNear : n * invFar; };
+    return { lo(xLo), lo(yLo), hi(xHi), hi(yHi) };
+}
+
 }  // namespace msoc::clipmath

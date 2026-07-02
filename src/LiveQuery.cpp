@@ -25,16 +25,16 @@ namespace msoc::patch::occlusion {
         return ::MaskedOcclusionCulling::VISIBLE;
     }
 
-    const float invW = 1.0f / c.w;
-    const float cxNdc = c.x * invW;
-    const float cyNdc = c.y * invW;
-    const float rxNdc = radius * g_ndcRadiusX * invW;
-    const float ryNdc = radius * g_ndcRadiusY * invW;
+    // Interval-bounded rect: dividing by the center w alone under-covers
+    // off-axis spheres and false-culls near screen edges (angle-sensitive).
+    const clipmath::NdcRect rect = clipmath::conservativeSphereNdcRect(
+        c.x, c.y, c.w,
+        radius * g_ndcRadiusX, radius * g_ndcRadiusY, radius * g_wGradMag);
 
-    float ndcMinX = std::max(cxNdc - rxNdc, -1.0f);
-    float ndcMinY = std::max(cyNdc - ryNdc, -1.0f);
-    float ndcMaxX = std::min(cxNdc + rxNdc, 1.0f);
-    float ndcMaxY = std::min(cyNdc + ryNdc, 1.0f);
+    float ndcMinX = std::max(rect.minX, -1.0f);
+    float ndcMinY = std::max(rect.minY, -1.0f);
+    float ndcMaxX = std::min(rect.maxX, 1.0f);
+    float ndcMaxY = std::min(rect.maxY, 1.0f);
     if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY) {
         return ::MaskedOcclusionCulling::VIEW_CULLED;
     }

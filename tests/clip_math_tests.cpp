@@ -143,3 +143,67 @@ TEST_CASE("clipRowNorms are the per-row operator norms (translation excluded)") 
         CHECK(n.ndcRadiusX == doctest::Approx(5.0f));
     }
 }
+
+TEST_CASE("conservativeSphereNdcRect bounds every sphere surface point") {
+    // Perspective matrix, column-major: clip.x = fx*x, clip.y = fy*y,
+    // clip.w = z (view depth). fx/fy approximate a wide Morrowind FOV.
+    const float fx = 1.2f;
+    const float fy = 1.6f;
+    std::array<float, 16> m = {};
+    m[0] = fx;   // x row
+    m[5] = fy;   // y row
+    m[11] = 1;   // w row picks up view z
+
+    const RowNorms norms = msoc::clipmath::clipRowNorms(m.data());
+
+    // Sphere centers across the frustum, including hard off-axis close-range
+    // cases (the regime where dividing by the center w under-covers).
+    const float centers[][3] = {
+        {0, 0, 100},   {50, 30, 100},  {-70, 45, 110}, {80, -60, 120},
+        {30, 20, 40},  {-25, 18, 35},  {15, -12, 25},  {-9, 8, 20},
+    };
+    const float radii[] = {1.0f, 5.0f, 12.0f};
+
+    for (const auto& ctr : centers) {
+        for (const float r : radii) {
+            if (ctr[2] - r * norms.wGradMag <= 1.0f) continue;  // near bail, as callers do
+
+            const ClipXYW c = msoc::clipmath::projectWorld(m.data(), ctr[0], ctr[1], ctr[2]);
+            const auto rect = msoc::clipmath::conservativeSphereNdcRect(
+                c.x, c.y, c.w, r * norms.ndcRadiusX, r * norms.ndcRadiusY, r * norms.wGradMag);
+
+            // Sample the sphere surface; every projected point must be inside.
+            const float kEps = 1e-4f;
+            for (int i = 0; i < 400; ++i) {
+                const float t = 3.8832221f * static_cast<float>(i);   // golden angle
+                const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / 400.0f;
+                const float s = std::sqrt(1.0f - z * z);
+                const float px = ctr[0] + r * s * std::cos(t);
+                const float py = ctr[1] + r * s * std::sin(t);
+                const float pz = ctr[2] + r * z;
+                const ClipXYW p = msoc::clipmath::projectWorld(m.data(), px, py, pz);
+                REQUIRE(p.w > 0.0f);
+                const float nx = p.x / p.w;
+                const float ny = p.y / p.w;
+                REQUIRE(nx >= rect.minX - kEps);
+                REQUIRE(nx <= rect.maxX + kEps);
+                REQUIRE(ny >= rect.minY - kEps);
+                REQUIRE(ny <= rect.maxY + kEps);
+            }
+        }
+    }
+
+    // Regression: the pre-fix rect (clip extents divided by the CENTER w)
+    // fails to cover an off-axis close sphere - the bug this helper replaces.
+    {
+        const float ctr[3] = {30, 20, 40};
+        const float r = 12.0f;
+        const ClipXYW c = msoc::clipmath::projectWorld(m.data(), ctr[0], ctr[1], ctr[2]);
+        const float invW = 1.0f / c.w;
+        const float naiveMaxX = (c.x + r * norms.ndcRadiusX) * invW;
+        // Nearest-and-outermost surface point exceeds the naive bound.
+        const ClipXYW p = msoc::clipmath::projectWorld(
+            m.data(), ctr[0] + r * 0.7071f, ctr[1], ctr[2] - r * 0.7071f);
+        CHECK(p.x / p.w > naiveMaxX);
+    }
+}
