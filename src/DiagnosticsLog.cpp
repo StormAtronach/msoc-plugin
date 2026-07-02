@@ -133,6 +133,10 @@ void emitPerFrameStatsLine() {
                       << " maxDepthSess=" << g_diag.maxCallDepthSession                    // lifetime peak
                       << " tp=" << (g_threadpool ? 1 : 0)                                  // threadpool liveness
                       << " cfgAsync=" << (Configuration::OcclusionAsyncOccluders ? 1 : 0)  // async fires iff tp && cfgAsync
+                      // Effective occluder winding this frame (latched in g_frame).
+                      // 1 = CCW-only (back faces culled); 0 = BACKFACE_NONE (both
+                      // faces). Lets the log parser attribute an A/B to the option.
+                      << " ccwOnly=" << (g_frame.occluderWinding == ::MaskedOcclusionCulling::BACKFACE_CW ? 1 : 0)
                       << " topLvlThisScene=" << g_diag.isTopLevelFiresThisScene
                       << " maxTopLvlSess=" << g_diag.maxIsTopLevelFiresSession
                       << " mainAttemptsThisScene=" << g_diag.mainCamCullShowAttemptsThisScene

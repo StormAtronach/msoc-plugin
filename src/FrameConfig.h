@@ -11,6 +11,8 @@
 
 #include "Config.h"
 
+#include "MaskedOcclusionCulling.h"  // BackfaceWinding
+
 namespace msoc::patch::occlusion {
 
 struct FrameConfig {
@@ -29,6 +31,12 @@ struct FrameConfig {
     bool occludeeBoxTest = false;
     int aggregateTerrain = 1;
     unsigned int terrainResolution = 1;
+    // Backface mode for every occluder submission, resolved from the
+    // OcclusionOccluderCCWOnly bool. BACKFACE_NONE rasterizes both faces.
+    ::MaskedOcclusionCulling::BackfaceWinding occluderWinding =
+        ::MaskedOcclusionCulling::BACKFACE_NONE;
+    // Sort occluders near-to-far and submit after traversal (see Config.h). Off.
+    bool occluderFrontToBack = false;
     unsigned int temporalCoherenceFrames = 4;
     bool cullLights = true;
     unsigned int lightCullHysteresisFrames = 3;
@@ -59,6 +67,12 @@ struct FrameConfig {
         occludeeBoxTest = C::OcclusionOccludeeBoxTest;
         aggregateTerrain = C::OcclusionAggregateTerrain;
         terrainResolution = C::OcclusionTerrainResolution;
+        // CCW-only intent maps to BACKFACE_CW: MOC's bfWinding names the
+        // winding to CULL, so culling CW keeps the CCW front faces.
+        occluderWinding = C::OcclusionOccluderCCWOnly
+                              ? ::MaskedOcclusionCulling::BACKFACE_CW
+                              : ::MaskedOcclusionCulling::BACKFACE_NONE;
+        occluderFrontToBack = C::OcclusionOccluderFrontToBack;
         temporalCoherenceFrames = C::OcclusionTemporalCoherenceFrames;
         cullLights = C::OcclusionCullLights;
         lightCullHysteresisFrames = C::OcclusionLightCullHysteresisFrames;

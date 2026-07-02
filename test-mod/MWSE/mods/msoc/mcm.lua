@@ -230,6 +230,20 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
+    occluder:createOnOffButton({
+        label       = i18n("OcclusionOccluderFrontToBack.label"),
+        description = i18n("OcclusionOccluderFrontToBack.description"),
+        configKey   = "OcclusionOccluderFrontToBack",
+        callback    = applyChange,
+    })
+
+    occluder:createOnOffButton({
+        label       = i18n("OcclusionOccluderCCWOnly.label"),
+        description = i18n("OcclusionOccluderCCWOnly.description"),
+        configKey   = "OcclusionOccluderCCWOnly",
+        callback    = applyChange,
+    })
+
     ----------------------------------------------------------------
     -- Occludee / query
     ----------------------------------------------------------------

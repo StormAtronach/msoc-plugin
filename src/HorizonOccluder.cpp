@@ -291,7 +291,11 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
         const CurtainVertex BL = makeNDCVert(s0.ndcX, ndcYBottom, z);
         const CurtainVertex BR = makeNDCVert(s1.ndcX, ndcYBottom, z);
 
-        // CCW winding for y-up; MOC accepts BACKFACE_NONE so it's cosmetic.
+        // CCW winding for y-up. Cosmetic under BACKFACE_NONE, but load-
+        // bearing when the caller submits with OcclusionOccluderCCWOnly:
+        // the curtain must read as a front face or it gets culled. If the
+        // curtain ever vanishes under that option, swap the two triangles'
+        // vertex order here.
         outVerts[w++] = TL;
         outVerts[w++] = BL;
         outVerts[w++] = BR;

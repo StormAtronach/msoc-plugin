@@ -50,6 +50,31 @@ public:
     static int OcclusionAggregateTerrain;
     static unsigned int OcclusionTerrainResolution;
 
+    // When true (default), occluders are submitted with backface culling that
+    // keeps only counter-clockwise (front) faces; clockwise faces are culled
+    // and not rasterized. When false, both faces are rasterized
+    // (BACKFACE_NONE) - correct regardless of winding.
+    //
+    // No vertex data is touched - winding is decided by MOC from screen-
+    // space area; we never reorder vertices. The assumption is that ~99%
+    // of NIFs are CCW-wound, so this halves occluder raster work at the
+    // cost of dropping the rare CW-wound mesh from the depth buffer. That
+    // loss is a safe under-occlude (the object behind it just isn't
+    // culled), never a wrong-cull. Global: applies to per-instance
+    // occluders, aggregate terrain, the horizon curtain, and external-
+    // consumer occluders. See FrameConfig::occluderWinding for the
+    // (deliberately counter-intuitive) MOC enum mapping.
+    static bool OcclusionOccluderCCWOnly;
+
+    // Submit per-instance occluders sorted near-to-far instead of in scene-graph
+    // order. Lets MOC early-reject occluded-occluder triangles against the
+    // accumulating HiZ, cutting rasterization on depth-overlapping scenes. Cost:
+    // occluders can only be submitted after the full traversal (they must all be
+    // collected to sort), forfeiting the async traverse/rasterize overlap - so
+    // it's a clear win in sync mode and a measure-it in async (default on;
+    // A/B via rasterizeUs + asyncFlushUs in a dense scene).
+    static bool OcclusionOccluderFrontToBack;
+
     static bool OcclusionCullLights;
     static unsigned int OcclusionLightCullHysteresisFrames;
 

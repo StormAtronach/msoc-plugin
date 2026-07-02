@@ -30,6 +30,10 @@ local default_config = {
     -- disables terrain in the mask entirely.
     OcclusionAggregateTerrain           = 1,
     OcclusionTerrainResolution          = 1,
+    -- Cull non-CCW occluder faces (assumes ~99% of NIFs are CCW-wound).
+    -- Roughly halves occluder rasterisation work; the rare CW-wound mesh
+    -- is dropped from the mask (safe under-occlude, never a wrong-cull).
+    OcclusionOccluderCCWOnly            = true,
 
     -- Light culling. Default off in 1.1.0; A/B showed the feature is
     -- net-negative on the tested hardware. Hidden from the MCM; native
@@ -52,6 +56,10 @@ local default_config = {
     OcclusionDepthSlackWorldUnits       = 64.0,
     OcclusionOccluderMaxTriangles       = 4096,
     OcclusionOccludeeMinRadius          = 1,
+    -- Submit occluders sorted near-to-far (MOC early-rejects occluded
+    -- occluders). Clear win in sync mode; in async it trades the
+    -- traverse/rasterize overlap for the ordering.
+    OcclusionOccluderFrontToBack        = true,
 
     -- Threadpool. The three fields below get overridden by hardware
     -- tier (see applyTierDefaults) before mwse.loadConfig — first-run

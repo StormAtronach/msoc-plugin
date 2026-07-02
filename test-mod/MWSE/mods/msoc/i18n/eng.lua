@@ -143,6 +143,25 @@ return {
         .. "occluder, regardless of scene type. Rasterisation cost scales linearly with "
         .. "triangles, so very dense meshes cost more than they pay back in occlusion.",
 
+    ["OcclusionOccluderFrontToBack.label"] = "Front-to-back occluders",
+    ["OcclusionOccluderFrontToBack.description"] = "Submit occluders sorted nearest-first so the "
+        .. "rasteriser can reject the parts of far occluders already hidden by near ones, cutting "
+        .. "raster work in scenes where occluders overlap in depth. The catch: occluders can only "
+        .. "be submitted after the whole scene is walked, which on multi-core setups gives up the "
+        .. "overlap between walking the scene and rasterising in the background. A clear win on "
+        .. "single-threaded (low-tier) setups; on multi-core, compare rasterize/async-flush timing "
+        .. "in the log with it on vs off before keeping it. Default off.",
+
+    ["OcclusionOccluderCCWOnly.label"] = "Cull back faces (CCW only)",
+    ["OcclusionOccluderCCWOnly.description"] = "Rasterise only counter-clockwise (front) "
+        .. "occluder faces and cull clockwise ones, roughly halving occluder rasterisation "
+        .. "cost. Assumes meshes are CCW-wound, which holds for the vast majority of NIFs; "
+        .. "a rare clockwise-wound mesh is simply dropped from the occlusion mask. That can "
+        .. "only under-occlude (the object behind it stays visible) and never hides something "
+        .. "that should be drawn. Applies to all occluders - cell meshes, terrain, the "
+        .. "horizon curtain, and external occluders. Default off (both faces rasterised, "
+        .. "correct regardless of winding); enable to A/B test the throughput gain.",
+
     -- ----------------------------------------------------------------
     -- Occludee page
     -- ----------------------------------------------------------------

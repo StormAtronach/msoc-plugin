@@ -84,14 +84,16 @@ void drainPendingOccluders() {
         }
 
         const ::MaskedOcclusionCulling::VertexLayout layout(p.stride, p.offY, p.offW);
-        // BACKFACE_NONE: consumers typically submit closed convex
-        // hulls. Hi-Z tiles store minimum depth so back faces of a
-        // convex shape can't tighten the mask. Bonus: removes the
-        // winding-direction footgun.
+        // Winding from g_frame.occluderWinding: BACKFACE_NONE (default)
+        // rasterizes both faces - consumers typically submit closed convex
+        // hulls, and since Hi-Z tiles store minimum depth a back face can't
+        // tighten the mask, so culling it is a pure throughput choice. When
+        // OcclusionOccluderCCWOnly is set, a CW-wound consumer hull is
+        // dropped (safe under-occlude).
         g_msoc->RenderTriangles(
             p.verts.data(), p.tris.data(), p.triCount,
             modelToClip,
-            ::MaskedOcclusionCulling::BACKFACE_NONE,
+            g_frame.occluderWinding,
             ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
             layout);
         // Folds into g_stats.occluderTriangles so the per-frame log line

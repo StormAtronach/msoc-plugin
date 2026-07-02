@@ -37,6 +37,9 @@ bool Configuration::OcclusionSkipTerrainOccludees = true;
 int Configuration::OcclusionAggregateTerrain = 1;
 // 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). See currentTerrainStep().
 unsigned int Configuration::OcclusionTerrainResolution = 1;
+// Keep only CCW (front) occluder faces.
+bool Configuration::OcclusionOccluderCCWOnly = true;
+bool Configuration::OcclusionOccluderFrontToBack = true;
 
 // Default off in 1.1.0: A/B in a Vivec canton at night showed the
 // feature is net-negative (~12% FPS regression). Bracketed savings
@@ -207,6 +210,8 @@ int configure(lua_State* L) {
     readBool(L, 1, "OcclusionOccludeeBoxTest", Configuration::OcclusionOccludeeBoxTest);
     readTerrainOcclusionMode(L, 1, "OcclusionAggregateTerrain", Configuration::OcclusionAggregateTerrain);
     readUInt(L, 1, "OcclusionTerrainResolution", Configuration::OcclusionTerrainResolution);
+    readBool(L, 1, "OcclusionOccluderCCWOnly", Configuration::OcclusionOccluderCCWOnly);
+    readBool(L, 1, "OcclusionOccluderFrontToBack", Configuration::OcclusionOccluderFrontToBack);
 
     readBool(L, 1, "OcclusionCullLights", Configuration::OcclusionCullLights);
     readUInt(L, 1, "OcclusionLightCullHysteresisFrames", Configuration::OcclusionLightCullHysteresisFrames);

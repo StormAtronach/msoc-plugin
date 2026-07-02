@@ -109,7 +109,8 @@ static void appendTerrainShape(std::vector<float>& aggVerts,
             }
         }
 
-        // (n-1)*(n-1)*2 triangles. BACKFACE_NONE so winding is moot.
+        // (n-1)*(n-1)*2 triangles. Winding set at submit time via
+        // g_frame.occluderWinding; this builder leaves index order as-is.
         const unsigned int qN = n - 1;
         aggIdx.reserve(aggIdx.size() + static_cast<size_t>(qN * qN) * 6);
         for (unsigned int qr = 0; qr < qN; ++qr) {
@@ -438,7 +439,7 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
             reinterpret_cast<const float*>(curtainVerts.data()),
             curtainIdx.data(), triCount,
             /*modelToClip=*/nullptr,
-            ::MaskedOcclusionCulling::BACKFACE_NONE,
+            g_frame.occluderWinding,
             ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
             ::MaskedOcclusionCulling::VertexLayout(16, 4, 12));
     }
@@ -511,7 +512,7 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
                         entry.verts.data(),
                         entry.indices.data() + range.firstIdx,
                         static_cast<int>(range.triCount),
-                        ::MaskedOcclusionCulling::BACKFACE_NONE,
+                        g_frame.occluderWinding,
                         ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
                 } else {
                     ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
@@ -520,7 +521,7 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
                         entry.indices.data() + range.firstIdx,
                         static_cast<int>(range.triCount),
                         g_worldToClip,
-                        ::MaskedOcclusionCulling::BACKFACE_NONE,
+                        g_frame.occluderWinding,
                         ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
                         ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
                 }
@@ -532,13 +533,13 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
                 ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
                 g_threadpool->RenderTriangles(entry.verts.data(), entry.indices.data(),
                                               static_cast<int>(entry.triCount),
-                                              ::MaskedOcclusionCulling::BACKFACE_NONE,
+                                              g_frame.occluderWinding,
                                               ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
             } else {
                 ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
                 g_msoc->RenderTriangles(entry.verts.data(), entry.indices.data(),
                                         static_cast<int>(entry.triCount), g_worldToClip,
-                                        ::MaskedOcclusionCulling::BACKFACE_NONE,
+                                        g_frame.occluderWinding,
                                         ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
                                         ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
             }

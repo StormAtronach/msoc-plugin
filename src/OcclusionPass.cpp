@@ -339,6 +339,23 @@ struct PendingDisplay {
 };
 static std::vector<PendingDisplay> g_pendingDisplays;
 
+// Deferred-occluder queue for the optional front-to-back submission order
+// (OcclusionOccluderFrontToBack). When enabled, rasterizeTriShape builds the
+// world geometry during traversal but records the ready-to-submit occluder here
+// instead of rasterising inline; the detour then sorts near-to-far and submits
+// after traversal. Front-to-back lets MOC early-reject occluded-occluder
+// triangles against the accumulating HiZ. Trade-off: it forfeits the async
+// traverse/rasterize overlap (workers can only start after traversal), so it is
+// a measure-it in async mode and a clear win in sync mode. cache points into
+// g_caches.occluder (unordered_map node addresses are stable across insertions,
+// valid until cell-change wipe - same lifetime guarantee the threadpool relies
+// on). Reused across frames; cleared after the submit loop.
+struct PendingOccluder {
+    const OccluderCacheEntry* cache;
+    float dist2;  // squared eye->worldBoundOrigin distance, sort key
+};
+static std::vector<PendingOccluder> g_pendingOccluders;
+
 // Drain phase-1 verdict slots, populated by classifyDrainRange and
 // consumed by phase 2. Phase 1 stays read-only on shared state -
 // prerequisite for moving it to worker threads.
@@ -608,24 +625,71 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
         return false;
     }
 
+    // Front-to-back: geometry is built (above); defer the submit so the detour
+    // can sort near-to-far and rasterise after traversal. occluderTriangles is
+    // counted at submit time so the budget-clipped tail isn't over-counted.
+    if (g_frame.occluderFrontToBack) {
+        const auto& o = shape->worldBoundOrigin;
+        const float dx = o.x - eye.x, dy = o.y - eye.y, dz = o.z - eye.z;
+        g_pendingOccluders.push_back({&cache, dx * dx + dy * dy + dz * dz});
+        return true;
+    }
+
     // VertexLayout(12, 4, 8): stride 12, y@4, z@8 - packed float[3].
-    // BACKFACE_NONE: NIF winding isn't guaranteed consistent.
+    // Winding from g_frame.occluderWinding. Default BACKFACE_NONE because
+    // NIF winding isn't guaranteed consistent; OcclusionOccluderCCWOnly
+    // trades the ~1% CW-wound meshes (dropped, safe) for half the raster.
     if (g_asyncThisFrame) {
         ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
         g_threadpool->RenderTriangles(cache.worldVerts.data(), cache.indices.data(),
                                       static_cast<int>(cache.outTriCount),
-                                      ::MaskedOcclusionCulling::BACKFACE_NONE,
+                                      g_frame.occluderWinding,
                                       ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
     } else {
         ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
         g_msoc->RenderTriangles(cache.worldVerts.data(), cache.indices.data(),
                                 static_cast<int>(cache.outTriCount), g_worldToClip,
-                                ::MaskedOcclusionCulling::BACKFACE_NONE,
+                                g_frame.occluderWinding,
                                 ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
                                 ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
     }
     g_stats.occluderTriangles += cache.outTriCount;
     return true;
+}
+
+// Drain the deferred front-to-back occluder queue: sort near-to-far and submit.
+// Called by the detour after cullShowBody, before the threadpool Flush. Mirrors
+// rasterizeTriShape's submit (winding, layout, async vs direct) exactly; the
+// budget spike-clip still applies so a dense frame bails the tail. Occluders
+// are counted here (not at record time) so the counter matches what rasterised.
+static void submitPendingOccluders() {
+    if (g_pendingOccluders.empty()) return;
+    std::sort(g_pendingOccluders.begin(), g_pendingOccluders.end(),
+              [](const PendingOccluder& a, const PendingOccluder& b) { return a.dist2 < b.dist2; });
+    for (const auto& po : g_pendingOccluders) {
+        if (g_budget.skipRasterizeThisFrame) break;
+        if (profiling::spikeClipTripped(g_stats.rasterizeTimeUs, g_budget.rasterizeBudgetUsEffective)) {
+            g_budget.rasterizeBudgetTrips = 1;
+            break;
+        }
+        const OccluderCacheEntry& c = *po.cache;
+        if (g_asyncThisFrame) {
+            ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
+            g_threadpool->RenderTriangles(c.worldVerts.data(), c.indices.data(),
+                                          static_cast<int>(c.outTriCount),
+                                          g_frame.occluderWinding,
+                                          ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+        } else {
+            ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
+            g_msoc->RenderTriangles(c.worldVerts.data(), c.indices.data(),
+                                    static_cast<int>(c.outTriCount), g_worldToClip,
+                                    g_frame.occluderWinding,
+                                    ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
+                                    ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
+        }
+        g_stats.occluderTriangles += c.outTriCount;
+    }
+    g_pendingOccluders.clear();
 }
 
 // ============================================================
@@ -1424,6 +1488,11 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
     cullShowBody(self, edx, camera);
 
     if (isTopLevel) {
+        // Front-to-back: submit the occluders deferred during traversal, sorted
+        // near-to-far, before the Flush. No-op unless OcclusionOccluderFrontToBack
+        // is on (the queue stays empty otherwise).
+        submitPendingOccluders();
+
         // Aggregate-terrain also goes through the threadpool, so
         // the Flush gate must include it. Otherwise a terrain-only
         // frame would SuspendThreads() with queued work in the
