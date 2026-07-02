@@ -169,6 +169,12 @@ protected:
 	// happens-before relationship the design assumes.
 	std::atomic<bool>           mSuspendThreads;
 	std::atomic_uint            mNumSuspendedThreads;
+	// _Claude_ Work-availability epoch. Bumped (with WakeByAddressAll) by
+	// every event that can make new work visible to workers: job submission,
+	// binning completion, suspend requests, teardown. Awake workers with no
+	// work park on it via WaitOnAddress instead of yield-spinning, which
+	// previously burned ~20% of a core per worker for the whole wake window.
+	std::atomic<unsigned int>   mWorkEpoch{ 0 };
 	// _Claude_ jthread (not std::thread). Worker shutdown was Intel's
 	// dance: WakeThreads() to unpark, set mKillThreads, then loop-join.
 	// The dance had three latent bugs: a `||` typo in the dtor's nullity
@@ -191,6 +197,7 @@ protected:
 	MaskedOcclusionCulling  *mMOC;
 
 	void SetupScissors();
+	void SignalWork();
 
 	static void ThreadRun(std::stop_token stop, CullingThreadpool *threadPool, unsigned int threadId);
 	void ThreadMain(std::stop_token stop, unsigned int threadIdx);

@@ -21,6 +21,9 @@
 #include <assert.h>
 #include <chrono>
 #include <fstream>
+// _Claude_ WaitOnAddress / WakeByAddressAll for worker idle parking.
+// WIN32_LEAN_AND_MEAN / NOMINMAX come from the target's compile definitions.
+#include <windows.h>
 #include "CullingThreadpool.h"
 
 #define SAFE_DELETE(X) {if (X != nullptr) delete X; X = nullptr;}
@@ -308,11 +311,22 @@ void CullingThreadpool::ThreadMain(std::stop_token stop, unsigned int threadIdx)
 
 		if (stop.stop_requested()) return;
 
+		// _Claude_ Brief pre-park spin keeps latency for back-to-back job
+		// bursts; after that, park on mWorkEpoch. The 1ms wait timeout is a
+		// backstop against any unsignaled work path (this pool has freeze
+		// history) - it bounds a missed wake instead of hanging Flush().
+		constexpr unsigned int kIdleSpinIterations = 32;
+		unsigned int idleSpins = 0;
+
 		// Loop until suspended again
 		while (!mSuspendThreads || !threadIsIdle)
 		{
 			if (stop.stop_requested())
 				return;
+
+			// Captured before the work scan: if a producer signals after this
+			// load, WaitOnAddress below returns immediately (no lost wake).
+			unsigned int observedEpoch = mWorkEpoch.load(std::memory_order_acquire);
 
 			threadIsIdle = false;
 
@@ -326,6 +340,7 @@ void CullingThreadpool::ThreadMain(std::stop_token stop, unsigned int threadIdx)
 					mMOC->RenderTrilist(job->mRenderJobs[binIdx], &mRects[binIdx]);
 
 				mRenderQueue->AdvanceRenderJob(binIdx);
+				idleSpins = 0;
 				continue;
 			}
 
@@ -341,6 +356,10 @@ void CullingThreadpool::ThreadMain(std::stop_token stop, unsigned int threadIdx)
 						job->mRenderJobs[i].mTriIdx = 0;
 					mMOC->BinTriangles(sjob.mVerts, sjob.mTris, sjob.nTris, job->mRenderJobs, mBinsW, mBinsH, sjob.mMatrix, sjob.mBfWinding, sjob.mClipPlanes, *sjob.mVtxLayout);
 					mRenderQueue->FinishedBinningJob(job);
+					// Render jobs are now visible across all bins - wake
+					// parked siblings.
+					SignalWork();
+					idleSpins = 0;
 				}
 				continue;
 			}
@@ -358,14 +377,22 @@ void CullingThreadpool::ThreadMain(std::stop_token stop, unsigned int threadIdx)
 							mMOC->RenderTrilist(job->mRenderJobs[binIdx], &mRects[binIdx]);
 
 						mRenderQueue->AdvanceRenderJob(binIdx);
+						idleSpins = 0;
 					}
 					continue;
 				}
 			}
 
-			// No work available: Yield this thread
-			std::this_thread::yield();
+			// No work available: yield briefly, then park until signaled.
 			threadIsIdle = true;
+			if (++idleSpins <= kIdleSpinIterations)
+			{
+				std::this_thread::yield();
+			}
+			else if (!mSuspendThreads)
+			{
+				WaitOnAddress(&mWorkEpoch, &observedEpoch, sizeof(observedEpoch), 1);
+			}
 		}
 	}
 }
@@ -414,9 +441,25 @@ CullingThreadpool::~CullingThreadpool()
 	// ThreadMain decrements on stop-induced wakeup before exit, so any
 	// concurrent observer would still see consistent counts (though we
 	// rely on caller serialisation for that — single-threaded teardown).
+	//
+	// Workers parked in WaitOnAddress are not reached by the stop_callback;
+	// request stops up front and signal once so none of them ride out the
+	// wait timeout during join.
+	if (mThreads != nullptr)
+	{
+		for (unsigned int i = 0; i < mNumThreads; ++i)
+			mThreads[i].request_stop();
+		SignalWork();
+	}
 	SAFE_DELETE_ARRAY(mThreads);
 	SAFE_DELETE(mRenderQueue);
 	SAFE_DELETE_ARRAY(mRects);
+}
+
+void CullingThreadpool::SignalWork()
+{
+	mWorkEpoch.fetch_add(1, std::memory_order_release);
+	WakeByAddressAll(&mWorkEpoch);
 }
 
 void CullingThreadpool::WakeThreads()
@@ -436,6 +479,8 @@ void CullingThreadpool::SuspendThreads()
 {
 	// Signal threads to go into suspended mode (after finishing all outstanding work)
 	mSuspendThreads = true;
+	// Wake workers parked in WaitOnAddress so they observe the suspend request.
+	SignalWork();
 }
 
 void CullingThreadpool::Flush()
@@ -615,6 +660,7 @@ void CullingThreadpool::RenderTriangles(const float *inVtx, const unsigned int *
 		job->mBinningJob.mBfWinding = bfWinding;
 		job->mBinningJob.mVtxLayout = mVertexLayouts.GetData();
 		mRenderQueue->AdvanceWriteJob();
+		SignalWork();
 	}
 }
 

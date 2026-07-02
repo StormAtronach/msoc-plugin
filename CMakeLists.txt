@@ -165,7 +165,14 @@ if(MSOC_BUILD_DLL)
 
     target_link_libraries(msoc PRIVATE
         "${MWSE_ROOT}/deps/luajit2/src/lua51.lib"
+        # WaitOnAddress / WakeByAddressAll (threadpool worker parking).
+        synchronization
     )
+
+    # Full debug info in every config so profilers can resolve symbols. The
+    # PDB stays in the build tree; it is not part of the shipped mod.
+    target_compile_options(msoc PRIVATE /Zi)
+    target_link_options(msoc PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 
     target_compile_definitions(msoc PRIVATE
         _CRT_SECURE_NO_WARNINGS

@@ -36,6 +36,22 @@ Summary of changes:
     visible difference is shutdown semantics (no polling latency) and
     slightly simplified call-site code. No public API changes.
 
+  * Worker idle parking. The original worker loop yield-spun
+    (std::this_thread::yield) whenever no bin work was available for the
+    entire awake window, burning a large fraction of a core per worker and
+    generating cache-coherence traffic against productive threads. Workers
+    now spin briefly, then park on a work-availability epoch via
+    WaitOnAddress (1 ms timeout as a lost-wake backstop); job submission,
+    binning completion, suspend requests and teardown signal the epoch via
+    WakeByAddressAll. Affected files:
+
+      - CullingThreadpool.cpp
+      - CullingThreadpool.h
+
+    No public API changes; latency behavior is preserved by the pre-park
+    spin and the immediate-return semantics of WaitOnAddress when the
+    epoch has already advanced.
+
 The original Apache 2.0 copyright headers in each source file are
 preserved unchanged. A short "Modified by" notice has been added below
 the original header in each file we changed, per Apache 2.0 §4(b).
