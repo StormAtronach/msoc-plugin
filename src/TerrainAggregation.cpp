@@ -402,10 +402,42 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
     const int nSamples = horizon.simplify(samples, kMaxSamples, kEpsH, adaptiveEpsD, kTileAlign);
     if (nSamples < 2) return;
 
-    // Pull the curtain top down by the safety margin. Skip sentinel
-    // rows (those columns will be skipped by emit anyway).
+    // Conservative erosion pass. simplify() keeps ~60 sparse samples whose
+    // h is the per-column MAX (upper envelope) - emit then bridges the gaps
+    // between samples with a flat top at min(endpoints). That flat top can
+    // sit ABOVE the true silhouette wherever a skyline notch falls between
+    // two samples (over-occluding whatever shows through the gap), and the
+    // amount it sits above shifts frame-to-frame as the winning vertex per
+    // bin and the tile-snap phase change - the source of the flicker.
+    //
+    // Fix: lower each sample's height to the MIN touched height over the
+    // span to its neighbours, and raise its depth to the MAX. Then for any
+    // segment [i, i+1], emit's min(s_i.h, s_{i+1}.h) is <= the raw horizon
+    // at every column in the segment (s_i.h already spans [col_{i-1},
+    // col_{i+1}] >= [col_i, col_{i+1}]), so the curtain is conservative
+    // against the full silhouette regardless of how coarsely simplify()
+    // placed the samples. Sentinel (untouched) columns are skipped so a
+    // see-through gap does not drag a real segment down; a sample whose
+    // whole neighbourhood is sentinel keeps its sentinel h and emit skips
+    // it. The safety margin folds into the same pass.
     for (int i = 0; i < nSamples; ++i) {
-        if (samples[i].h > -1.0e29f) samples[i].h -= kYSafetyMargin;
+        const int cLo = (i > 0) ? samples[i - 1].col : samples[i].col;
+        const int cHi = (i + 1 < nSamples) ? samples[i + 1].col : samples[i].col;
+        float hMin = std::numeric_limits<float>::infinity();
+        float dMax = 0.0f;
+        bool found = false;
+        for (int c = cLo; c <= cHi; ++c) {
+            const float hc = horizon.heightAt(c);
+            if (hc <= -1.0e29f) continue;  // untouched column
+            if (hc < hMin) hMin = hc;
+            const float dc = horizon.depthAt(c);
+            if (dc > dMax) dMax = dc;
+            found = true;
+        }
+        if (found) {
+            samples[i].h = hMin - kYSafetyMargin;
+            samples[i].d = dMax;
+        }
     }
 
     // Per-frame scratch - function-static so allocations amortise.
