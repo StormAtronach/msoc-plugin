@@ -74,6 +74,13 @@ if(MSOC_BUILD_DLL)
     # sets; SE_USE_LUA / SE_IS_MWSE left off) drives the engine-address thunks
     # and gates out the Lua / MWSE-private surface. MemoryUtil.cpp is in here too.
     file(GLOB SHAREDSE_SOURCES CONFIGURE_DEPENDS "${MWSE_ROOT}/SharedSE/*.cpp")
+    # Exclude application-level subsystems that assume MWSE's own PCH
+    # environment (fmt, /utf-8, psapi, dbghelp) rather than the engine-
+    # mirror prelude in src/stdafx.h. The crash logger is self-contained -
+    # no other SharedSE source references it - and the plugin never calls
+    # it. The NI/TES3 engine mirrors are the reason we compile SharedSE;
+    # app features that grow around them get excluded here.
+    list(FILTER SHAREDSE_SOURCES EXCLUDE REGEX "CrashLog")
 
     add_library(msoc SHARED
         src/plugin.cpp
