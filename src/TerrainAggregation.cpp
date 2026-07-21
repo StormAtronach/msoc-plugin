@@ -39,6 +39,19 @@ static bool frustumCulledSphere(NI::AVObject* obj, NI::Camera* camera) {
     return false;
 }
 
+// Consistent bound for walking a live NITArray of scene-graph children.
+// During a cell (re)populate the engine can briefly leave endIndex ahead
+// of the (re)allocated storage; clamping to storageCount (and requiring
+// storage) turns that window into a short walk instead of an
+// out-of-bounds read. Steady-state cost: two loads and a compare.
+template <typename TArrayT>
+static size_t safeChildCount(const TArrayT& children) {
+    if (!children.storage) return 0;
+    const size_t endIndex = children.endIndex;
+    const size_t capacity = children.storageCount;
+    return (endIndex <= capacity) ? endIndex : capacity;
+}
+
 // Append one terrain TriShape (25v/32t) to the aggregate buffers,
 // transforming to world space and offsetting indices. Mirrors
 // rasterizeTriShape's vertex math without the gates/skinning/thin-
@@ -179,7 +192,7 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
     entry.subcellRanges.clear();
     const unsigned int step = currentTerrainStep();
     const auto& subcells = landNode->children;
-    for (size_t j = 0; j < subcells.endIndex; ++j) {
+    for (size_t j = 0, jn = safeChildCount(subcells); j < jn; ++j) {
         auto* sub = subcells.storage[j].get();
         if (!sub) continue;
         if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
@@ -192,7 +205,7 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
         const unsigned int firstVertBefore = static_cast<unsigned int>(entry.verts.size() / 3);
 
         const auto& shapes = subNode->children;
-        for (size_t k = 0; k < shapes.endIndex; ++k) {
+        for (size_t k = 0, kn = safeChildCount(shapes); k < kn; ++k) {
             auto* shape = shapes.storage[k].get();
             if (!shape) continue;
             if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
@@ -230,7 +243,7 @@ static void refreshLandCache() {
     for (auto& kv : g_caches.land) kv.second.seen = false;
 
     const auto& landChildren = g_worldLandscapeRoot->children;
-    for (size_t i = 0; i < landChildren.endIndex; ++i) {
+    for (size_t i = 0, in = safeChildCount(landChildren); i < in; ++i) {
         auto* land = landChildren.storage[i].get();
         if (!land) continue;
         if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
@@ -311,7 +324,7 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
     uint64_t vertsProjected = 0;
 
     const auto& landChildren = g_worldLandscapeRoot->children;
-    for (size_t i = 0; i < landChildren.endIndex; ++i) {
+    for (size_t i = 0, in = safeChildCount(landChildren); i < in; ++i) {
         auto* land = landChildren.storage[i].get();
         if (!land) continue;
         if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
@@ -506,7 +519,7 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
     refreshLandCache();
 
     const auto& landChildren = g_worldLandscapeRoot->children;
-    for (size_t i = 0; i < landChildren.endIndex; ++i) {
+    for (size_t i = 0, in = safeChildCount(landChildren); i < in; ++i) {
         auto* land = landChildren.storage[i].get();
         if (!land) continue;
         if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;

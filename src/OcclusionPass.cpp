@@ -422,16 +422,37 @@ static bool isLandscapeDescendant(NI::AVObject* obj, NI::Node* root) {
 // Transpose NI::Camera::worldToCamera into Intel's column-major v*M
 // layout. NI stores row-major M*v: clip[r] = sum_c ni[r*4+c]*v[c].
 // Intel reads mtx[c*4+r] for the same out[r]. So mtx[c*4+r] = ni[r*4+c].
-static void uploadCameraTransform(NI::Camera* cam) {
+//
+// Returns false if the camera transform is non-finite (a cell-load
+// transition frame can present a not-yet-valid camera). A non-finite
+// matrix poisons every projection downstream - occluder rasterization,
+// sphere metrics, the published snapshot - so the caller skips mask
+// population for the frame instead.
+static bool uploadCameraTransform(NI::Camera* cam) {
+    // Stage into locals and commit only on success - a rejected frame
+    // must not leave non-finite values in the globals for ungated
+    // readers (diagnostics, later partial frames) to trip over.
+    float staged[16];
     const float* ni = reinterpret_cast<const float*>(&cam->worldToCamera);
-    clipmath::transposeRowToColumnMajor(ni, g_worldToClip);
+    clipmath::transposeRowToColumnMajor(ni, staged);
+
+    for (int i = 0; i < 16; ++i) {
+        if (!std::isfinite(staged[i])) {
+            return false;
+        }
+    }
 
     // Per-frame sphere-projection metrics (upper bounds on
     // |d(clip)/d(pos)|), derived from the transposed matrix rows.
-    const clipmath::RowNorms norms = clipmath::clipRowNorms(g_worldToClip);
+    const clipmath::RowNorms norms = clipmath::clipRowNorms(staged);
+    if (!std::isfinite(norms.ndcRadiusX) || !std::isfinite(norms.ndcRadiusY) || !std::isfinite(norms.wGradMag)) {
+        return false;
+    }
+    std::memcpy(g_worldToClip, staged, sizeof(g_worldToClip));
     g_ndcRadiusX = norms.ndcRadiusX;
     g_ndcRadiusY = norms.ndcRadiusY;
     g_wGradMag = norms.wGradMag;
+    return true;
 }
 
 // Sphere -> NDC-rect + wmin -> TestRect. Projects only the center and
@@ -1448,39 +1469,46 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_budget.rasterizeBudgetTrips = 0;
         g_budget.classifyBudgetTrips = 0;
         g_lastStage = 6;
-        uploadCameraTransform(camera);
-        if (g_asyncThisFrame) {
-            g_lastStage = 7;
-            // Must run after uploadCameraTransform - copies the
-            // matrix into the threadpool's state ring buffer.
-            g_threadpool->SetMatrix(g_worldToClip);
-        }
-        g_msocActive = true;
+        // On a non-finite camera (cell-load transition frame), skip
+        // population entirely: g_msocActive stays false so cullShowBody
+        // traverses vanilla, and the cleared mask is never published
+        // (g_maskReady stays false, gated below), so external consumers
+        // read NotReady and render conservatively. External submissions
+        // stay queued for the next valid frame.
+        if (uploadCameraTransform(camera)) {
+            if (g_asyncThisFrame) {
+                g_lastStage = 7;
+                // Must run after uploadCameraTransform - copies the
+                // matrix into the threadpool's state ring buffer.
+                g_threadpool->SetMatrix(g_worldToClip);
+            }
+            g_msocActive = true;
 
-        // External occluder drain. Must run AFTER ClearBuffer (so
-        // it isn't stomped), AFTER uploadCameraTransform (so
-        // g_worldToClip is live for direct-MOC), and BEFORE any
-        // threadpool work queues.
-        drainPendingOccluders();
+            // External occluder drain. Must run AFTER ClearBuffer (so
+            // it isn't stomped), AFTER uploadCameraTransform (so
+            // g_worldToClip is live for direct-MOC), and BEFORE any
+            // threadpool work queues.
+            drainPendingOccluders();
 
-        // Aggregate terrain. Submit merged per-Land occluders so
-        // hill silhouettes are in the buffer before non-terrain
-        // leaves reach the drain. Individual 25v/32t patches fail
-        // the thin-axis gate; merging reclaims terrain as a useful
-        // occluder. Reads the latched g_frame.aggregateTerrain
-        // so the mode can't change mid-frame.
-        switch (g_frame.aggregateTerrain) {
-            case 1:
-                g_lastStage = 8;
-                rasterizeAggregateTerrain(camera);
-                break;
-            case 2:
-                g_lastStage = 8;
-                rasterizeAggregateTerrainHorizon(camera);
-                break;
-            case 0:
-            default:
-                break;
+            // Aggregate terrain. Submit merged per-Land occluders so
+            // hill silhouettes are in the buffer before non-terrain
+            // leaves reach the drain. Individual 25v/32t patches fail
+            // the thin-axis gate; merging reclaims terrain as a useful
+            // occluder. Reads the latched g_frame.aggregateTerrain
+            // so the mode can't change mid-frame.
+            switch (g_frame.aggregateTerrain) {
+                case 1:
+                    g_lastStage = 8;
+                    rasterizeAggregateTerrain(camera);
+                    break;
+                case 2:
+                    g_lastStage = 8;
+                    rasterizeAggregateTerrainHorizon(camera);
+                    break;
+                case 0:
+                default:
+                    break;
+            }
         }
     }
 
@@ -1515,22 +1543,27 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         //   g_msoc      = stale, will be cleared next frame
         // Freshness tick guards against culling against a frozen
         // mask during pauses / loading / alt-tab.
-        std::swap(g_msoc, g_msoc_prev);
-        // CRITICAL: CullingThreadpool caches the target buffer at
-        // init via SetBuffer; it does NOT follow g_msoc. Without
-        // this re-point, the threadpool keeps rasterising into the
-        // init-time buffer and the snapshot ends up empty every
-        // other frame.
-        if (g_threadpool) {
-            g_threadpool->SetBuffer(g_msoc);
-        }
-        std::memcpy(g_snapshot.worldToClip, g_worldToClip, sizeof(g_worldToClip));
-        g_snapshot.ndcRadiusX = g_ndcRadiusX;
-        g_snapshot.ndcRadiusY = g_ndcRadiusY;
-        g_snapshot.wGradMag = g_wGradMag;
-        g_snapshot.tickMs = GetTickCount64();
+        // Gated on g_msocActive: a frame whose camera failed
+        // validation never populated the cleared mask, so publishing
+        // it (or its non-finite matrix) would hand consumers garbage.
+        if (g_msocActive) {
+            std::swap(g_msoc, g_msoc_prev);
+            // CRITICAL: CullingThreadpool caches the target buffer at
+            // init via SetBuffer; it does NOT follow g_msoc. Without
+            // this re-point, the threadpool keeps rasterising into the
+            // init-time buffer and the snapshot ends up empty every
+            // other frame.
+            if (g_threadpool) {
+                g_threadpool->SetBuffer(g_msoc);
+            }
+            std::memcpy(g_snapshot.worldToClip, g_worldToClip, sizeof(g_worldToClip));
+            g_snapshot.ndcRadiusX = g_ndcRadiusX;
+            g_snapshot.ndcRadiusY = g_ndcRadiusY;
+            g_snapshot.wGradMag = g_wGradMag;
+            g_snapshot.tickMs = GetTickCount64();
 
-        g_maskReady = true;
+            g_maskReady = true;
+        }
         if (g_asyncThisFrame) {
             g_lastStage = 12;
             // Workers back to low-overhead sleep until next frame.

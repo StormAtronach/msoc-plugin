@@ -244,18 +244,39 @@ local kRetunedKeys = {
     "OcclusionDepthSlackWorldUnits",
 }
 
+-- Parse "a.b.c" into a comparable triple. Unparseable versions return
+-- nil so they never compare as newer - a dev build with a nonstandard
+-- string can't trigger a migration. Field-wise comparison (not packed
+-- arithmetic) so no component magnitude can alias another release.
+local function versionTuple(s)
+    local a, b, c = tostring(s):match("^(%d+)%.(%d+)%.(%d+)")
+    if not a then return nil end
+    return { tonumber(a), tonumber(b), tonumber(c) }
+end
+
+local function versionNewer(a, b)  -- a > b, both non-nil triples
+    for i = 1, 3 do
+        if a[i] ~= b[i] then return a[i] > b[i] end
+    end
+    return false
+end
+
 local pluginVersion = mscPlugin and mscPlugin.version or "unknown"
 if config.lastSeenVersion ~= pluginVersion then
     local oldVer = config.lastSeenVersion
-    for _, k in ipairs(kTierMigratedKeys) do
-        config[k] = default_config[k]
-    end
-    for _, k in ipairs(kRetunedKeys) do
-        config[k] = default_config[k]
-    end
-    -- Remove keys that have been renamed or dropped in this or a
-    -- prior version. Setting to nil drops the entry from the table,
-    -- so the next mwse.saveConfig won't write it back to JSON.
+    local newT = versionTuple(pluginVersion)
+    local oldT = versionTuple(oldVer)
+
+    -- Upgrade-only gate. A version-flapping install (two msoc.dll
+    -- copies alternating - observed 2026-07-21 with a stale Root
+    -- Builder copy vs the MO2 mod copy) used to re-run the migration
+    -- EVERY launch, silently re-forcing tier defaults over user
+    -- settings. Downgrades and unparseable versions now skip with a
+    -- log line and leave both settings and lastSeenVersion untouched,
+    -- so restoring the newer DLL doesn't re-migrate either.
+    -- Retired-key scrub runs on ANY version mismatch (including
+    -- downgrades/flaps) so a resurrected dead key can't linger; only
+    -- the tier/retune migration below is upgrade-gated.
     local removed = {}
     for _, k in ipairs(kRetiredKeys) do
         if config[k] ~= nil then
@@ -263,17 +284,51 @@ if config.lastSeenVersion ~= pluginVersion then
             table.insert(removed, k)
         end
     end
-    config.lastSeenVersion = pluginVersion
-    mwse.saveConfig("msoc", config)
-    mwse.log("[msoc] defaults migrated: lastSeen=%s -> %s; async=%s bins=%dx%d mask=%dx%d; boxTest=%s radiusMaxExt=%s depthSlack=%s; retired=[%s]",
-        tostring(oldVer), tostring(pluginVersion),
-        tostring(config.OcclusionAsyncOccluders),
-        config.OcclusionThreadpoolBinsW, config.OcclusionThreadpoolBinsH,
-        config.OcclusionMaskWidth, config.OcclusionMaskHeight,
-        tostring(config.OcclusionOccludeeBoxTest),
-        tostring(config.OcclusionOccluderRadiusMaxExterior),
-        tostring(config.OcclusionDepthSlackWorldUnits),
-        table.concat(removed, ","))
+    if #removed > 0 then
+        mwse.saveConfig("msoc", config)
+        mwse.log("[msoc] retired config keys scrubbed: [%s]", table.concat(removed, ","))
+    end
+
+    if newT == nil or (oldT ~= nil and not versionNewer(newT, oldT)) then
+        mwse.log("[msoc] plugin version %s vs lastSeen %s: not an upgrade - skipping defaults migration, settings preserved",
+            tostring(pluginVersion), tostring(oldVer))
+    else
+        -- Per-key override preservation. tierBaseline records the
+        -- default each managed key had when it was last migrated; a
+        -- key whose current value still equals that baseline was never
+        -- touched by the user and follows the new default. A diverged
+        -- key is a deliberate user override and is preserved.
+        -- First migration under this scheme has no baseline: managed
+        -- keys are force-applied once (the old behaviour), then
+        -- tracked from there on.
+        local baseline = config.tierBaseline or {}
+        local applied, preserved = {}, {}
+        local function migrateKey(k)
+            if baseline[k] == nil or config[k] == baseline[k] then
+                if config[k] ~= default_config[k] then
+                    table.insert(applied, string.format("%s=%s", k, tostring(default_config[k])))
+                end
+                config[k] = default_config[k]
+            else
+                -- Log the retained value AND the new default it shadows,
+                -- so "why is async still on after upgrade" is answerable
+                -- from this line alone.
+                table.insert(preserved, string.format("%s=%s(default %s)",
+                    k, tostring(config[k]), tostring(default_config[k])))
+            end
+            baseline[k] = default_config[k]
+        end
+        for _, k in ipairs(kTierMigratedKeys) do migrateKey(k) end
+        for _, k in ipairs(kRetunedKeys) do migrateKey(k) end
+        config.tierBaseline = baseline
+
+        config.lastSeenVersion = pluginVersion
+        mwse.saveConfig("msoc", config)
+        mwse.log("[msoc] defaults migrated: lastSeen=%s -> %s; applied=[%s] preserved-user-overrides=[%s]",
+            tostring(oldVer), tostring(pluginVersion),
+            table.concat(applied, ","),
+            table.concat(preserved, ","))
+    end
 end
 
 -- Push the live config table into the native plugin. `plugin` is the

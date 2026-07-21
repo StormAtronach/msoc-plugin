@@ -147,6 +147,23 @@ bool createMSOCResources(std::ostream& log) {
     return true;
 }
 
+// Raw config inputs the threadpool decision was last made with. Lets
+// the per-frame reconciler detect a live MCM change to the pool knobs
+// and rebuild through the same safe destroy/create path EnableMSOC
+// toggling already uses - previously these were silently restart-only
+// (HANDOVER-config-lifecycle-async-toggle.md, issue 3). Mask dimensions
+// stay restart-only: the detour's tile buffer is sized at patch-install
+// time and cannot follow a live resize.
+namespace {
+struct ThreadpoolConfigInputs {
+    unsigned int threadCount = 0;
+    unsigned int binsW = 0;
+    unsigned int binsH = 0;
+    bool valid = false;
+};
+ThreadpoolConfigInputs g_poolCreatedWith;
+}  // namespace
+
 // Free g_msoc + g_threadpool and release cached state. Caller must
 // ensure no async work is in flight (between frames, g_msocActive
 // false). Threadpool dtor joins all workers - bounded but blocking,
@@ -175,6 +192,7 @@ void destroyMSOCResources(std::ostream& log) {
     clearExternalOccluderQueue();
     g_asyncThisFrame = false;
     g_maskReady = false;
+    g_poolCreatedWith.valid = false;
 
     log << "MSOC: resources freed (threadpool joined, mask buffer destroyed)." << std::endl;
 }
@@ -185,7 +203,29 @@ void destroyMSOCResources(std::ostream& log) {
 bool ensureMSOCResourcesMatchConfig() {
     auto& log = log::getLog();
     if (Configuration::EnableMSOC) {
-        return createMSOCResources(log);
+        // Live threadpool-knob change (MCM slider / configure() push):
+        // rebuild through the full destroy/create path. Runs at the
+        // same safe point as the EnableMSOC toggle, so no async work is
+        // in flight.
+        if (g_poolCreatedWith.valid &&
+            (g_poolCreatedWith.threadCount != Configuration::OcclusionThreadpoolThreadCount ||
+             g_poolCreatedWith.binsW != Configuration::OcclusionThreadpoolBinsW ||
+             g_poolCreatedWith.binsH != Configuration::OcclusionThreadpoolBinsH)) {
+            log << "MSOC: threadpool config changed (threads "
+                << g_poolCreatedWith.threadCount << "->" << Configuration::OcclusionThreadpoolThreadCount
+                << ", bins " << g_poolCreatedWith.binsW << "x" << g_poolCreatedWith.binsH
+                << "->" << Configuration::OcclusionThreadpoolBinsW << "x" << Configuration::OcclusionThreadpoolBinsH
+                << "); recreating resources." << std::endl;
+            destroyMSOCResources(log);
+        }
+        const bool ok = createMSOCResources(log);
+        if (ok && !g_poolCreatedWith.valid) {
+            g_poolCreatedWith.threadCount = Configuration::OcclusionThreadpoolThreadCount;
+            g_poolCreatedWith.binsW = Configuration::OcclusionThreadpoolBinsW;
+            g_poolCreatedWith.binsH = Configuration::OcclusionThreadpoolBinsH;
+            g_poolCreatedWith.valid = true;
+        }
+        return ok;
     } else {
         destroyMSOCResources(log);
         return false;

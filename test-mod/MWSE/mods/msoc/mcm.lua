@@ -11,6 +11,34 @@ local i18n = mwse.loadTranslations("msoc")
 -- Lua config table across the FFI boundary so the native statics
 -- (msoc::Configuration::Foo) match the edited Lua table the same
 -- frame. Cheap — one lua_getfield per field per change.
+-- Close-time saves are gated on an actual value diff against a snapshot
+-- taken at load / after each save, so an MCM session that only browsed
+-- pages doesn't rewrite msoc.json - an unconditional rewrite clobbers
+-- any manual file edit made while the game was running (see
+-- HANDOVER-config-lifecycle-async-toggle.md, issue 2). Snapshot-compare
+-- rather than a callback-set dirty flag because MCM "Reset" controls
+-- write config values without routing through widget callbacks.
+local function deepCopy(t)
+    if type(t) ~= "table" then return t end
+    local out = {}
+    for k, v in pairs(t) do out[k] = deepCopy(v) end
+    return out
+end
+
+local function deepEquals(a, b)
+    if a == b then return true end
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    for k, v in pairs(a) do
+        if not deepEquals(v, b[k]) then return false end
+    end
+    for k in pairs(b) do
+        if a[k] == nil then return false end
+    end
+    return true
+end
+
+local configSnapshot = nil
+
 local function applyChange()
     cfg.syncToNative(msoc)
 end
@@ -69,7 +97,20 @@ local function registerModConfig()
         showDefaultSetting = true,
     })
     template:register()
-    template:saveOnClose(cfg.config.confPath, cfg.config)
+    configSnapshot = deepCopy(cfg.config)
+    -- Diff-gated replacement for template:saveOnClose - only write the
+    -- file when a value actually changed this session, and say so in
+    -- the log so an unexpected rewrite is at least visible. Also pushes
+    -- the config to the native side on diff, covering MCM "Reset"
+    -- controls that bypass widget callbacks.
+    template.onClose = function()
+        if not deepEquals(cfg.config, configSnapshot) then
+            mwse.saveConfig(cfg.config.confPath, cfg.config)
+            cfg.syncToNative(msoc)
+            configSnapshot = deepCopy(cfg.config)
+            mwse.log("[msoc] config saved by MCM (settings changed)")
+        end
+    end
 
     ----------------------------------------------------------------
     -- Main

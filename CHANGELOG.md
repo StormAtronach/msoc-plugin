@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.6.0 - 2026-07-21
+
+A crash-immunity release for the external-occluder path, plus config
+lifecycle fixes. Driven by a multi-day forensic hunt into intermittent
+exterior-transition crashes reported on 1.4/1.5: the process hosts a
+still-unidentified heap corrupter (writes recycled mesh/instance data
+through stale pointers; every threaded suspect in this plugin and MGE-XE
+was individually eliminated), and this plugin's external-occluder queue -
+CRT-heap `std::vector`s, hot-allocated every frame - was its most
+frequent victim, faulting inside MOC's SIMD vertex gather during the
+drain.
+
+- **External-occluder queue moved to a page-protected arena.** Consumer
+  submissions (MGE-XE's horizon curtain) now live in a dedicated
+  `VirtualAlloc` arena kept `PAGE_READONLY` except during this module's
+  own bracketed writes - outside the contested CRT heap entirely, so a
+  stray heap-recycling writer can't land on it, and a writer that
+  targets it anyway faults at *their* instruction, naming themselves in
+  the crash log. Entries are canary-bracketed PODs revalidated at drain
+  time and rasterized under SEH; a corrupt entry becomes one dropped
+  submission plus a diagnostic log line instead of a process crash.
+  Verified in-game: sessions that previously logged 100k+ corrupted
+  entries and crashed now run clean with zero corruption detections.
+- **Boundary validation hardened.** `mwse_addOccluder` /
+  `mwse_addPreTransformedOccluder` now reject out-of-range triangle
+  indices (MOC's gather has no bounds check) and non-float-multiple
+  strides (previously a heap overrun in the copy sizing), per-submission
+  vertex payloads are capped, and the shared triangle budget is enforced
+  before arena append.
+- **Cell-transition safety.** Camera transforms are validated for
+  finiteness before mask population (a mid-load frame no longer poisons
+  projections or publishes a garbage snapshot; consumers see NotReady
+  and render conservatively). Terrain-cache subcell nodes are
+  `NI::Pointer`-pinned, and all live landscape-graph walks clamp
+  `endIndex` against `storageCount` so a mid-populate array can't be
+  walked out of bounds.
+- **Config lifecycle fixes.** Version migration now runs on genuine
+  upgrades only (a downgraded or version-flapping install no longer
+  re-forces tier defaults every launch) and preserves user-overridden
+  keys via a per-key baseline, logging exactly what was applied vs
+  preserved. The MCM only rewrites `msoc.json` when a setting actually
+  changed, so manual file edits survive a browsing session. Threadpool
+  thread-count/bin changes now apply live through a safe resource
+  rebuild instead of silently requiring a restart (mask dimensions
+  remain restart-only by design).
+- **Build.** MWSE submodule pin bumped to current upstream master
+  (`de84eea`, 2026-07-16); SharedSE's new crash-logger TUs (which assume
+  MWSE's own PCH environment) are excluded from the compile-all glob.
+
+## 1.5.0 - 2026-07-05
+
+Single fix release (published on Nexus; this changelog entry was added
+retroactively in 1.6.0).
+
+- **Fixed: distant statics flickering just above ridgelines**
+  (Horizon-mode terrain). The curtain top was min(endpoint heights) over
+  sparse simplified samples of a per-column MAX envelope, so it sat above
+  the true silhouette wherever a skyline notch fell between samples, and
+  the error shifted per frame with bin-winner and tile-snap phase
+  changes. Replaced the blunt global y-margin with a conservative
+  erosion pass: each sample's height drops to the min touched horizon
+  height over the span to its neighbours (depth rises to the max),
+  making the emitted curtain conservative against the full 512-column
+  horizon at every column.
+
 ## 1.4.0 - 2026-07-02
 
 A query correctness fix, two occluder-throughput features, and threadpool /

@@ -35,13 +35,16 @@ struct LandCacheEntry {
     uint8_t builtForResolution = 0xff;
 
     // Per-subcell ranges for per-subcell frustum-cull. `node` is the
-    // subcell NiNode used per frame as the frustumCulledSphere argument.
+    // subcell NiNode used per frame as the frustumCulledSphere argument;
+    // NI::Pointer-pinned like the Land key above - the parent pin alone
+    // doesn't keep a detached subcell alive, and this pointer is
+    // dereferenced every frame until the entry is swept.
     // (firstIdx, triCount) index into `indices` for the Raster submit
     // path; (firstVert, vertCount) index into `verts` for the Horizon
     // path, which projects the unique world-space verts directly rather
     // than walking the index list.
     struct SubcellRange {
-        NI::Node* node;
+        NI::Pointer<NI::Node> node;
         unsigned int firstIdx;
         unsigned int triCount;
         unsigned int firstVert;
