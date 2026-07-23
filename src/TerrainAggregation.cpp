@@ -209,7 +209,7 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
             auto* shape = shapes.storage[k].get();
             if (!shape) continue;
             if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
-            const auto p = classifyOccluderProperties(shape);
+            const auto p = classify::occluderProperties(shape);
             if (p.alpha || p.stencil) continue;
             appendTerrainShape(entry.verts, entry.indices, static_cast<NI::TriShape*>(shape), step);
         }

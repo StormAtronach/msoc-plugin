@@ -45,11 +45,13 @@ inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
 // First-of-type alpha/stencil flags from an occluder's ancestor chain;
 // alpha/stencil meshes are excluded from the occluder rasterise pass.
 // Defined in OccluderClassify.cpp (leaf); shared by core-rasterize + Terrain.
-struct OccluderPropertyFlags {
+namespace classify {
+struct PropertyFlags {
     bool alpha;
     bool stencil;
 };
-OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj);
+PropertyFlags occluderProperties(NI::AVObject* obj);
+}  // namespace classify
 
 // Live per-frame state shared with the subsystem TUs (defined in
 // OcclusionPass.cpp).

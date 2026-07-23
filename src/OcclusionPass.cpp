@@ -811,7 +811,7 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
                 auto& cacheEntry = g_caches.occluderEntry(self);
                 if (!cacheEntry.propsResolved) {
                     if (g_frame.logEnabled) ++g_caches.occluderMisses;
-                    const auto p = classifyOccluderProperties(self);
+                    const auto p = classify::occluderProperties(self);
                     cacheEntry.alpha = p.alpha;
                     cacheEntry.stencil = p.stencil;
                     cacheEntry.propsResolved = true;
