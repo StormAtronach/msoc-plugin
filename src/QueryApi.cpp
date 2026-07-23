@@ -28,10 +28,14 @@ bool isOcclusionMaskReady() {
     return (now - g_snapshot.tickMs) <= kSnapshotMaxAgeMs;
 }
 
-// Sphere test against the SNAPSHOT buffer using the _prev matrix +
-// NDC constants captured at swap time. Math mirrors live::testSphere;
-// kept separate so the in-progress-mask path stays untouched.
-static ::MaskedOcclusionCulling::CullingResult testSphereVisiblePrev(
+// Queries against the SNAPSHOT buffer (g_msoc_prev, projected through
+// the matrix + NDC constants captured at the swap). Deliberately
+// namespaced as the counterpart to live:: in LiveQuery.cpp - the math
+// mirrors live::testSphere, but the buffer does not, and testing the
+// wrong one yields verdicts that look reasonable and are wrong.
+namespace snapshot {
+
+::MaskedOcclusionCulling::CullingResult testSphere(
     const NI::Point3& center, float radius) {
     // Project center through last frame's world-to-clip.
     const clipmath::ClipXYW c =
@@ -59,12 +63,14 @@ static ::MaskedOcclusionCulling::CullingResult testSphereVisiblePrev(
     return g_msoc_prev->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
 }
 
+}  // namespace snapshot
+
 MaskQueryResult testOcclusionSphere(float worldX, float worldY, float worldZ, float radius) {
     if (!isOcclusionMaskReady()) {
         return kMaskQueryNotReady;
     }
     const NI::Point3 center(worldX, worldY, worldZ);
-    const auto result = testSphereVisiblePrev(center, radius);
+    const auto result = snapshot::testSphere(center, radius);
     switch (result) {
         case ::MaskedOcclusionCulling::VISIBLE:
             return kMaskQueryVisible;
@@ -128,7 +134,7 @@ void testOcclusionSphereBatch(
     for (int i = 0; i < count; ++i) {
         const float* s = centersAndRadii + i * 4;
         const NI::Point3 center(s[0], s[1], s[2]);
-        const auto result = testSphereVisiblePrev(center, s[3]);
+        const auto result = snapshot::testSphere(center, s[3]);
         switch (result) {
             case ::MaskedOcclusionCulling::VISIBLE:
                 resultsOut[i] = kMaskQueryVisible;
