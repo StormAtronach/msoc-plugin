@@ -9,8 +9,9 @@
 ## Context
 
 Surfaced during the exterior heap-corruption investigation (see
-`HANDOVER-external-occluder-stale-tail-fix.md` for that thread — note its
-stale-tail diagnosis was later disproven; the corruption hunt is ongoing).
+`HANDOVER-external-occluder-stale-tail-fix.md` for that thread; it has since
+been resolved — the cause was an ODR violation in this plugin, not an external
+corrupter. The config-lifecycle findings below are independent of it).
 A diagnostic run required the threadpool disabled
 (`OcclusionThreadpoolThreadCount=1`). The user disabled async / edited the
 config, yet the crash-session logs showed

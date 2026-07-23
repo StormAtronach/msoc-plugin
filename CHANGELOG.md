@@ -75,15 +75,21 @@
 
 ## 1.6.0 - 2026-07-21
 
+> **Retrospective - the diagnosis in this entry was wrong.** There was no
+> external heap corrupter. The corruption came from an ODR violation in
+> this plugin: two different `PendingOccluder` structs sharing a name, so
+> `emplace_back` allocated 8 bytes and constructed a 116-byte object into
+> it. The external-occluder queue was the source, not a victim. The arena
+> did stop the crash, but by deleting the `std::vector` that carried the
+> folded template - not by page-protecting anything. See Unreleased for
+> the root cause and fix. The entry is kept below as a record of what
+> 1.6.0 actually shipped.
+
 A crash-immunity release for the external-occluder path, plus config
 lifecycle fixes. Driven by a multi-day forensic hunt into intermittent
-exterior-transition crashes reported on 1.4/1.5: the process hosts a
-still-unidentified heap corrupter (writes recycled mesh/instance data
-through stale pointers; every threaded suspect in this plugin and MGE-XE
-was individually eliminated), and this plugin's external-occluder queue -
-CRT-heap `std::vector`s, hot-allocated every frame - was its most
-frequent victim, faulting inside MOC's SIMD vertex gather during the
-drain.
+exterior-transition crashes reported on 1.4/1.5, which had been traced -
+incorrectly, as it turned out - to a process-wide heap corrupter
+overwriting the external-occluder queue between intake and drain.
 
 - **External-occluder queue moved to a page-protected arena.** Consumer
   submissions (MGE-XE's horizon curtain) now live in a dedicated

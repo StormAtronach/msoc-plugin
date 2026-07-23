@@ -1,5 +1,12 @@
 # SUPERSEDED — diagnosis was wrong
 
+**Resolved.** The investigation this document belongs to has concluded. The
+cause was an ODR violation in this plugin — two different `PendingOccluder`
+structs sharing a name, so `emplace_back` allocated 8 bytes and constructed a
+116-byte object into it. There was no external corrupter. See `CHANGELOG.md`
+(Unreleased) and the Conventions section of `ARCHITECTURE.md`. Retained only as
+a record of the investigation.
+
 **Do not apply the patch this document originally described.** The stale-tail /
 SIMD-gather theory it proposed is **incorrect** and has been refuted:
 
