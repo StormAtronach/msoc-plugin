@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- **External-occluder arena reverted; queue back on the CRT heap.** The
+  page-protected arena shipped in 1.6.0 cost more per frame than the
+  budget allows: every intake and drain crossed a `VirtualProtect` pair
+  to flip the queue pages between `PAGE_READONLY` and `PAGE_READWRITE`,
+  on top of canary bracketing and drain-time revalidation, and that
+  protection churn dominated the queue path in exterior cells where the
+  queue is busiest. `src/ExternalOccluders.cpp` is restored to its
+  pre-1.6.0 state.
+
+  The approach was also wrong in kind. Armouring one consumer against a
+  process-wide heap corrupter hardens that consumer and nothing else
+  while the writer keeps running, and charges every user a recurring
+  frame cost whether or not a corrupter is present in their load order.
+  Identifying the writer is the actual fix; that forensic work
+  continues.
+
+  **This re-exposes the 1.6.0 crash.** Installs that saw intermittent
+  exterior-transition crashes on 1.4/1.5 should expect them to return
+  until the corrupter is root-caused.
+
+  Everything else from 1.6.0 stands: boundary validation, the
+  camera-transform finiteness gate, `NI::Pointer`-pinned subcell nodes,
+  clamped landscape walks, and the config/MCM lifecycle fixes. Tag
+  `v1.6.0` is unchanged and still carries the arena.
+
 ## 1.6.0 - 2026-07-21
 
 A crash-immunity release for the external-occluder path, plus config
