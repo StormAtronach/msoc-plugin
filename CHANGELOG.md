@@ -2,30 +2,76 @@
 
 ## Unreleased
 
-- **External-occluder arena reverted; queue back on the CRT heap.** The
-  page-protected arena shipped in 1.6.0 cost more per frame than the
-  budget allows: every intake and drain crossed a `VirtualProtect` pair
-  to flip the queue pages between `PAGE_READONLY` and `PAGE_READWRITE`,
-  on top of canary bracketing and drain-time revalidation, and that
-  protection churn dominated the queue path in exterior cells where the
-  queue is busiest. `src/ExternalOccluders.cpp` is restored to its
-  pre-1.6.0 state.
+- **Exterior-transition crash root-caused and fixed.** The corruption
+  that 1.4 through 1.6 chased as a "process-wide heap corrupter" was
+  this plugin. `OcclusionPass.cpp` and `ExternalOccluders.cpp` each
+  defined a different `struct PendingOccluder` in the same namespace -
+  8 bytes and 116 bytes - and neither was in an unnamed namespace. Both
+  globals were correctly `static` and stayed distinct; the *types* could
+  not be, because C++ has no `static struct`. So
+  `std::vector<PendingOccluder>` mangled identically in both translation
+  units and the linker folded it to a single instantiation.
 
-  The approach was also wrong in kind. Armouring one consumer against a
-  process-wide heap corrupter hardens that consumer and nothing else
-  while the writer keeps running, and charges every user a recurring
-  frame cost whether or not a corrupter is present in their load order.
-  Identifying the writer is the actual fix; that forensic work
-  continues.
+  Two consequences, both confirmed against a crash minidump:
 
-  **This re-exposes the 1.6.0 crash.** Installs that saw intermittent
-  exterior-transition crashes on 1.4/1.5 should expect them to return
-  until the corrupter is root-caused.
+  - `emplace_back` ran the 8-byte instantiation: it allocated an 8-byte
+    block and constructed a 116-byte object into it. **A 108-byte heap
+    overflow on every external occluder submission** - which is to say,
+    every frame outdoors with MGE-XE's horizon curtain enabled. That is
+    the corrupter. It damaged whatever allocation happened to follow,
+    which is why every threaded suspect inside the plugin was
+    investigated and cleared.
+  - The drain's range-`for` walked in 116-byte strides from a `_Mylast`
+    only 8 bytes above `_Myfirst`, so its `!=` end check could never
+    match. The loop ran off the end of the committed heap region and
+    faulted.
+
+  An ODR violation is ill-formed-no-diagnostic-required, so no compiler
+  or linker warning was ever coming, and MSVC ships no ODR checker.
+
+  The types are renamed - `PendingExternalOccluder` and
+  `DeferredOccluderRef` - and every translation-unit-local type in the
+  plugin now sits in an unnamed namespace, which is the only mechanism
+  that gives a *type* internal linkage. `ARCHITECTURE.md` records this
+  as a convention.
+
+- **External-occluder arena removed.** The page-protected arena shipped
+  in 1.6.0 crossed a `VirtualProtect` pair on every intake and drain to
+  flip the queue between `PAGE_READONLY` and `PAGE_READWRITE`, plus
+  canary bracketing and drain-time revalidation. That protection churn
+  dominated the queue path in exterior cells, where the queue is
+  busiest, and the cost was paid by every user on every frame.
+
+  It appeared to fix the crash because it deleted
+  `std::vector<PendingOccluder>`, which removed the folded template. The
+  page protection was incidental. Armouring one data structure against a
+  corrupter that is still running was the wrong shape of fix, and in
+  this case the corrupter was the armour's own author.
 
   Everything else from 1.6.0 stands: boundary validation, the
   camera-transform finiteness gate, `NI::Pointer`-pinned subcell nodes,
   clamped landscape walks, and the config/MCM lifecycle fixes. Tag
   `v1.6.0` is unchanged and still carries the arena.
+
+- **Namespaces reorganised.** `msoc::patch::occlusion` is now
+  `msoc::occlusion` - "patch" was an MWSE-ism from when this code lived
+  inside MWSE.dll. Each subsystem moved into its own child namespace
+  (`external`, `terrain`, `resources`, `live`, `snapshot`, `lights`,
+  `diag`, `classify`, `debugtint`), with the core orchestrator and the
+  shared seam remaining in the parent. Names shed the prefixes the flat
+  namespace had forced on them: `rasterizeAggregateTerrain` is now
+  `terrain::rasterizeAggregate`, `drainPendingOccluders` is
+  `external::drain`, and so on.
+
+  `live::testSphere` and `snapshot::testSphere` are the notable pair -
+  identical math against the live write buffer and the published
+  snapshot respectively, previously distinguished only by a `Prev`
+  suffix.
+
+  No ABI impact. The `mwse_*` exports are `extern "C"` and unmangled;
+  all 15 are unchanged. `OcclusionApi.h` is untouched, and where a
+  subsystem owns public API the frozen name stays in the parent
+  namespace as a thin adapter.
 
 ## 1.6.0 - 2026-07-21
 
