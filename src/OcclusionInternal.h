@@ -108,8 +108,12 @@ namespace live {
 }  // namespace live
 
 // Naked trampoline (NiDX8LightManager::updateLights enabled-read hook),
-// defined in LightCulling.cpp; installPatches() takes its address.
-void updateLights_enabledRead_hook();
+// defined in LightCulling.cpp; installPatches() takes its address. The
+// public register/unregisterLightObservedCallback in OcclusionApi.h are
+// adapters over register/unregisterObserver in this namespace.
+namespace lights {
+void enabledReadHook();
+}  // namespace lights
 
 // Terrain aggregation entry points (TerrainAggregation.cpp), called by the
 // detour. Raster mode merges each near Land into one submission; Horizon

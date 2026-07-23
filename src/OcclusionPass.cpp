@@ -1778,7 +1778,7 @@ void installPatches() {
     // unconditionally; the detour short-circuits when the feature
     // is off or MSOC failed to init.
     se::memory::genCallUnprotected(0x6bb7d4,
-                                   reinterpret_cast<DWORD>(updateLights_enabledRead_hook), 6);
+                                   reinterpret_cast<DWORD>(lights::enabledReadHook), 6);
     log << "MSOC: light cull hook installed at 0x6bb7d4 (gated by "
         << "Configuration::OcclusionCullLights, default off)." << std::endl;
 }

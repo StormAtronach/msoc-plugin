@@ -14,7 +14,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace msoc::occlusion {
+namespace msoc::occlusion::lights {
 
 // Light observers - external consumers (MGE-XE) snapshotting the live
 // renderer-iterated light list. Iterated lock-free from the render thread.
@@ -23,14 +23,14 @@ namespace msoc::occlusion {
 // 0x6BB7D4. Iterated lock-free from the render thread.
 static std::vector<LightObservedCallback> g_lightObservers;
 
-void registerLightObservedCallback(LightObservedCallback cb) {
+void registerObserver(LightObservedCallback cb) {
     if (cb == nullptr) return;
     const auto it = std::find(g_lightObservers.begin(), g_lightObservers.end(), cb);
     if (it != g_lightObservers.end()) return;
     g_lightObservers.push_back(cb);
 }
 
-void unregisterLightObservedCallback(LightObservedCallback cb) {
+void unregisterObserver(LightObservedCallback cb) {
     const auto it = std::find(g_lightObservers.begin(), g_lightObservers.end(), cb);
     if (it != g_lightObservers.end()) {
         g_lightObservers.erase(it);
@@ -156,7 +156,7 @@ extern "C" bool __cdecl shouldLightBeEnabled(NI::Light* light) {
 // at 0x6bb7d4. Entry: ebx = NiLight*. Exit: AL = effective enabled
 // byte. Upper EAX is don't-care (matches the mov-al semantics; the
 // followup `test al, al` only reads AL).
-__declspec(naked) void updateLights_enabledRead_hook() {
+__declspec(naked) void enabledReadHook() {
     __asm {
         // ecx/edx are nominally caller-save but the surrounding
         // loop doesn't preserve them across our site.
@@ -170,6 +170,20 @@ __declspec(naked) void updateLights_enabledRead_hook() {
 			pop ecx
 			retn
     }
+}
+
+}  // namespace msoc::occlusion::lights
+
+// Public consumer API (OcclusionApi.h). Adapters over the module above -
+// same pattern as ExternalOccluders.
+namespace msoc::occlusion {
+
+void registerLightObservedCallback(LightObservedCallback cb) {
+    lights::registerObserver(cb);
+}
+
+void unregisterLightObservedCallback(LightObservedCallback cb) {
+    lights::unregisterObserver(cb);
 }
 
 }  // namespace msoc::occlusion
