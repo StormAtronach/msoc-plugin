@@ -29,7 +29,7 @@ bool isOcclusionMaskReady() {
 }
 
 // Sphere test against the SNAPSHOT buffer using the _prev matrix +
-// NDC constants captured at swap time. Math mirrors testSphereVisible;
+// NDC constants captured at swap time. Math mirrors live::testSphere;
 // kept separate so the in-progress-mask path stays untouched.
 static ::MaskedOcclusionCulling::CullingResult testSphereVisiblePrev(
     const NI::Point3& center, float radius) {

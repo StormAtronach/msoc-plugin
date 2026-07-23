@@ -105,7 +105,7 @@ MaskSnapshot g_snapshot;
 // CullShow_detour entry.
 float g_worldToClip[16];  // extern in OcclusionInternal.h
 
-// Per-frame matrix metrics for testSphereVisible:
+// Per-frame matrix metrics for live::testSphere:
 //   g_ndcRadiusX/Y: L2 norm of clip.x/y coefficients. NDC half-extent
 //                   of a sphere of radius r at clip-w cw is r*X/cw.
 //   g_wGradMag:     L2 norm of clip.w coefficients. Worst-case clip-w
@@ -379,7 +379,7 @@ enum class DrainVerdict : uint8_t {
 
 struct DrainSlot {
     DrainVerdict verdict;
-    // True only when testSphereVisible actually ran. False for
+    // True only when live::testSphere actually ran. False for
     // Skip*/CachedOccluded. Phase 2 uses this to gate counter
     // increments that fired only on the !reused branch pre-refactor.
     bool ranTestRect;
@@ -927,7 +927,7 @@ static bool occludeeBoxOccluded(NI::AVObject* shape) {
         corners[c * 3 + 1] = ry * s + T.y;
         corners[c * 3 + 2] = rz * s + T.z;
     }
-    return testBoxVisible(corners) == ::MaskedOcclusionCulling::OCCLUDED;
+    return live::testBox(corners) == ::MaskedOcclusionCulling::OCCLUDED;
 }
 
 static void classifyDrainRange(size_t lo, size_t hi) {
@@ -1009,7 +1009,7 @@ static void classifyDrainRange(size_t lo, size_t hi) {
         // Phase-1 wall time is bracketed once on the main thread; no
         // per-call timing here (worker CPU time != wall time).
         ::MaskedOcclusionCulling::CullingResult r;
-        r = testSphereVisible(
+        r = live::testSphere(
             p.shape->worldBoundOrigin, p.shape->worldBoundRadius);
         slot.ranTestRect = true;
         switch (r) {

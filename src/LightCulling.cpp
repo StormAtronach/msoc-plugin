@@ -118,7 +118,7 @@ extern "C" bool __cdecl shouldLightBeEnabled(NI::Light* light) {
     ++g_caches.lightCullMisses;
     ++g_caches.lightsTested;
     const NI::Point3 center{cx, cy, cz};
-    const auto verdict = testSphereVisible(center, cr);
+    const auto verdict = live::testSphere(center, cr);
     const bool occluded = (verdict == ::MaskedOcclusionCulling::OCCLUDED);
     if (occluded) ++g_caches.lightsOccluded;
 

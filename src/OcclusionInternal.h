@@ -17,7 +17,7 @@
 #include "BudgetState.h"      // phase-budget controller + g_budget
 #include "FrameDiag.h"        // per-frame + session diagnostic bookkeeping + g_diag
 
-#include "NIPoint3.h"  // NI::Point3 for the testSphereVisible decl
+#include "NIPoint3.h"  // NI::Point3 for the live::testSphere decl
 #include "NICamera.h"  // NI::Camera (cullingPlanes) for the accessors
 #include "NIPoint4.h"  // NI::Point4
 
@@ -90,15 +90,22 @@ extern unsigned int kMsocWidth;                // mask resolution (latched at in
 extern unsigned int kMsocHeight;
 extern uint32_t g_frameCounter;  // top-level frame counter
 
-// Live sphere test against g_msoc (uses the live per-frame projection).
-// Defined in LiveQuery.cpp (leaf); called by the drain (core) and
-// LightCulling. Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
-::MaskedOcclusionCulling::CullingResult testSphereVisible(
+// Queries against the LIVE mask (g_msoc, current frame's projection).
+// The snapshot equivalents - which read g_msoc_prev through the
+// published projection - live in QueryApi.cpp; keeping the two behind
+// distinct namespaces is deliberate, since confusing them means
+// culling against the wrong buffer.
+namespace live {
+// Sphere test against g_msoc. Defined in LiveQuery.cpp (leaf); called
+// by the drain (core) and LightCulling. Returns Intel's CullingResult
+// (VISIBLE / OCCLUDED / VIEW_CULLED).
+::MaskedOcclusionCulling::CullingResult testSphere(
     const NI::Point3& center, float radius);
 
-// Live OBB test against g_msoc: corners is 8 world-space (x, y, z) triples.
-// Defined in LiveQuery.cpp; used by the drain's optional occludee box test.
-::MaskedOcclusionCulling::CullingResult testBoxVisible(const float* corners);
+// OBB test against g_msoc: corners is 8 world-space (x, y, z) triples.
+// Used by the drain's optional occludee box test.
+::MaskedOcclusionCulling::CullingResult testBox(const float* corners);
+}  // namespace live
 
 // Naked trampoline (NiDX8LightManager::updateLights enabled-read hook),
 // defined in LightCulling.cpp; installPatches() takes its address.
