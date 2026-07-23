@@ -27,11 +27,14 @@ namespace msoc::occlusion::external {
 //
 // g_externalOccluderTrisQueued enforces external-first rejection
 // against OcclusionOccluderMaxTriangles, preserving the native budget.
-// Unnamed namespace: TU-local type. `static` cannot be applied to a
-// type, so this is the only way to keep it out of reach of an
-// identically-named type in another TU - which is exactly how this
-// struct and OcclusionPass.cpp's DeferredOccluderRef (then also called
-// PendingOccluder) silently merged. See CHANGELOG.
+//
+// Unnamed namespace: `static` cannot be applied to a type, so this is
+// the only way to keep PendingExternalOccluder out of reach of an
+// identically-named type in another TU - which is exactly how it and
+// OcclusionPass.cpp's DeferredOccluderRef (when both were called
+// PendingOccluder) silently merged. See CHANGELOG. The variables take
+// their internal linkage from the namespace as well, so `static` on
+// them would be redundant.
 namespace {
 struct PendingExternalOccluder {
     std::vector<float> verts;
@@ -47,9 +50,9 @@ struct PendingExternalOccluder {
     bool preTransformed = false;
 };
 
-static std::vector<PendingExternalOccluder> g_pendingExternalOccluders;
-static std::mutex g_pendingExternalOccludersMutex;
-static int g_externalOccluderTrisQueued = 0;
+std::vector<PendingExternalOccluder> g_pendingExternalOccluders;
+std::mutex g_pendingExternalOccludersMutex;
+int g_externalOccluderTrisQueued = 0;
 }  // namespace
 
 // Drop queued external-occluder submissions on teardown (OcclusionInternal.h).

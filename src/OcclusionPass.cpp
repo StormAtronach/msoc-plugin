@@ -336,7 +336,8 @@ forensics::Snapshot forensics::captureSnapshot() {
 // Only NiTriShape leaves defer; NiNodes stay inline so their subtree
 // keeps contributing occluders during the main pass.
 // Unnamed namespace: these four types and their queues are TU-local.
-// See the note on CallDepthGuard above.
+// See the note on CallDepthGuard above. The queues take their internal
+// linkage from the namespace, so `static` on them would be redundant.
 namespace {
 struct PendingDisplay {
     NI::AVObject* shape;
@@ -346,7 +347,7 @@ struct PendingDisplay {
     // TestRect still runs.
     bool rasterisedAsOccluder;
 };
-static std::vector<PendingDisplay> g_pendingDisplays;
+std::vector<PendingDisplay> g_pendingDisplays;
 
 // Deferred-occluder queue for the optional front-to-back submission order
 // (OcclusionOccluderFrontToBack). When enabled, rasterizeTriShape builds the
@@ -363,7 +364,7 @@ struct DeferredOccluderRef {
     const OccluderCacheEntry* cache;
     float dist2;  // squared eye->worldBoundOrigin distance, sort key
 };
-static std::vector<DeferredOccluderRef> g_deferredOccluders;
+std::vector<DeferredOccluderRef> g_deferredOccluders;
 
 // Drain phase-1 verdict slots, populated by classifyDrainRange and
 // consumed by phase 2. Phase 1 stays read-only on shared state -
@@ -385,7 +386,7 @@ struct DrainSlot {
     bool ranTestRect;
 };
 
-static std::vector<DrainSlot> g_drainSlots;
+std::vector<DrainSlot> g_drainSlots;
 }  // namespace
 
 // ============================================================
