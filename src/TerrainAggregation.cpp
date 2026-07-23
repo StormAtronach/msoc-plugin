@@ -20,7 +20,7 @@
 #include <cstring>
 #include <vector>
 
-namespace msoc::occlusion {
+namespace msoc::occlusion::terrain {
 
 // ============================================================
 // Terrain aggregation
@@ -298,7 +298,7 @@ static void refreshLandCache() {
 // the terrain-resolution dropdown (Full/Half/Corners), so coarser
 // settings cut the projection count too - the min-z fold in the cache
 // build keeps the silhouette conservative (it can only sink, never rise).
-void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
+void rasterizeAggregateHorizon(NI::Camera* camera) {
     if (!g_worldLandscapeRoot) return;
     if (g_worldLandscapeRoot->getAppCulled()) return;
 
@@ -508,7 +508,7 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
 //
 // Uses g_caches.land to amortise the per-Land walk + vertex transform.
 // Mark-and-sweep evicts entries whose NiNode wasn't seen this frame.
-void rasterizeAggregateTerrain(NI::Camera* camera) {
+void rasterizeAggregate(NI::Camera* camera) {
     if (!g_worldLandscapeRoot) return;
     if (g_worldLandscapeRoot->getAppCulled()) return;
 
@@ -598,4 +598,4 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
     }
 }
 
-}  // namespace msoc::occlusion
+}  // namespace msoc::occlusion::terrain

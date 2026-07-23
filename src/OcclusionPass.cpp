@@ -18,7 +18,7 @@
 // the extracted subsystem TUs (QueryApi.cpp, ...).
 #include "OcclusionInternal.h"
 // LAYER-A-HORIZON: 1D horizon -> curtain occluder used by the Horizon
-// mode of rasterizeAggregateTerrain. See src/HorizonOccluder.h.
+// mode of terrain::rasterizeAggregate. See src/HorizonOccluder.h.
 #include "HorizonOccluder.h"
 // Freeze-forensics watchdog. Owns the watchdog thread, its stage-name
 // table, and the spawn gate. This TU implements the read accessor
@@ -1509,11 +1509,11 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             switch (g_frame.aggregateTerrain) {
                 case 1:
                     g_lastStage = 8;
-                    rasterizeAggregateTerrain(camera);
+                    terrain::rasterizeAggregate(camera);
                     break;
                 case 2:
                     g_lastStage = 8;
-                    rasterizeAggregateTerrainHorizon(camera);
+                    terrain::rasterizeAggregateHorizon(camera);
                     break;
                 case 0:
                 default:

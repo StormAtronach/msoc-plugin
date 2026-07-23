@@ -114,8 +114,10 @@ void updateLights_enabledRead_hook();
 // Terrain aggregation entry points (TerrainAggregation.cpp), called by the
 // detour. Raster mode merges each near Land into one submission; Horizon
 // mode rasterizes a 1D silhouette curtain.
-void rasterizeAggregateTerrain(NI::Camera* camera);
-void rasterizeAggregateTerrainHorizon(NI::Camera* camera);
+namespace terrain {
+void rasterizeAggregate(NI::Camera* camera);
+void rasterizeAggregateHorizon(NI::Camera* camera);
+}  // namespace terrain
 
 // Mask resource lifecycle (MaskResources.cpp). create/ensure are called by
 // installPatches and the detour's top-of-frame reconcile; destroy by the
