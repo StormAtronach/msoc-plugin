@@ -16,7 +16,7 @@ namespace NI {
 struct AVObject;
 }
 
-namespace msoc::debugtint {
+namespace msoc::occlusion::debugtint {
 
 // Tint a classified leaf. No-op on non-NiTriBasedGeom nodes - tinting a
 // NiNode would stain its whole inheriting subtree.
@@ -32,4 +32,4 @@ void resetFrameTints();
 // Call on cell change, where the outgoing cell's shapes are torn down.
 void clearClones();
 
-}  // namespace msoc::debugtint
+}  // namespace msoc::occlusion::debugtint

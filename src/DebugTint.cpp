@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <unordered_map>
 
-namespace msoc::debugtint {
+namespace msoc::occlusion::debugtint {
 namespace {
 
 // Tint hues. Persistent-clone lifetime: first tint on a shape clones the
@@ -180,4 +180,4 @@ void clearClones() {
     g_tintClones.clear();
 }
 
-}  // namespace msoc::debugtint
+}  // namespace msoc::occlusion::debugtint
