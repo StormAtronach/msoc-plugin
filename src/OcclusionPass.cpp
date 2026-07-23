@@ -220,6 +220,11 @@ using profiling::emaUpdate;
 static uint32_t g_callDepth = 0;
 
 // RAII for g_callDepth. Used exclusively by CullShow_detour.
+// Unnamed namespace: TU-local type. `static` cannot be applied to a
+// type, so this is the only way to keep it off the linker's radar and
+// out of reach of an identically-named type in another TU. See the
+// ODR incident in CHANGELOG (two distinct PendingOccluder structs).
+namespace {
 struct CallDepthGuard {
     CallDepthGuard() {
         ++g_callDepth;
@@ -229,6 +234,7 @@ struct CallDepthGuard {
     }
     ~CallDepthGuard() { --g_callDepth; }
 };
+}  // namespace
 // Last-checkpoint marker. Stable numbering - DO NOT renumber:
 //   0 idle, 1 entered top-level, 2 wakeThreads, 3 clearBuffer,
 //   4 cellWipe, 5 ageprune, 6 uploadCamera, 7 setMatrix,
@@ -329,6 +335,9 @@ forensics::Snapshot forensics::captureSnapshot() {
 //
 // Only NiTriShape leaves defer; NiNodes stay inline so their subtree
 // keeps contributing occluders during the main pass.
+// Unnamed namespace: these four types and their queues are TU-local.
+// See the note on CallDepthGuard above.
+namespace {
 struct PendingDisplay {
     NI::AVObject* shape;
     NI::Camera* camera;
@@ -377,6 +386,7 @@ struct DrainSlot {
 };
 
 static std::vector<DrainSlot> g_drainSlots;
+}  // namespace
 
 // ============================================================
 // Occluder property classification & terrain membership

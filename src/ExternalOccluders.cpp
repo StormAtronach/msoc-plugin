@@ -27,6 +27,12 @@ namespace msoc::patch::occlusion {
 //
 // g_externalOccluderTrisQueued enforces external-first rejection
 // against OcclusionOccluderMaxTriangles, preserving the native budget.
+// Unnamed namespace: TU-local type. `static` cannot be applied to a
+// type, so this is the only way to keep it out of reach of an
+// identically-named type in another TU - which is exactly how this
+// struct and OcclusionPass.cpp's DeferredOccluderRef (then also called
+// PendingOccluder) silently merged. See CHANGELOG.
+namespace {
 struct PendingExternalOccluder {
     std::vector<float> verts;
     std::vector<std::uint32_t> tris;
@@ -44,6 +50,7 @@ struct PendingExternalOccluder {
 static std::vector<PendingExternalOccluder> g_pendingExternalOccluders;
 static std::mutex g_pendingExternalOccludersMutex;
 static int g_externalOccluderTrisQueued = 0;
+}  // namespace
 
 // Drop queued external-occluder submissions on teardown (OcclusionInternal.h).
 void clearExternalOccluderQueue() {
