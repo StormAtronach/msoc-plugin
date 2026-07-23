@@ -12,13 +12,13 @@
 #include <ostream>
 #include <thread>
 
-namespace msoc::occlusion {
+namespace msoc::occlusion::resources {
 
 // Allocate g_msoc + g_threadpool. Idempotent. Returns false on
 // allocation failure (callers treat as permanent disable). Called
 // from installPatches at startup and from the detour's ensure-helper
 // on MCM toggle-on.
-bool createMSOCResources(std::ostream& log) {
+bool create(std::ostream& log) {
     if (g_msoc && g_threadpool) return true;
 
     if (!g_msoc) {
@@ -126,13 +126,13 @@ bool createMSOCResources(std::ostream& log) {
         } catch (const std::exception& e) {
             log << "MSOC: threadpool creation threw: " << e.what()
                 << "; freeing partial state, occlusion disabled this session." << std::endl;
-            destroyMSOCResources(log);
+            destroy(log);
             return false;
         } catch (...) {
             log << "MSOC: threadpool creation threw non-std exception; "
                    "freeing partial state, occlusion disabled this session."
                 << std::endl;
-            destroyMSOCResources(log);
+            destroy(log);
             return false;
         }
 
@@ -168,7 +168,7 @@ ThreadpoolConfigInputs g_poolCreatedWith;
 // ensure no async work is in flight (between frames, g_msocActive
 // false). Threadpool dtor joins all workers - bounded but blocking,
 // up to a few ms.
-void destroyMSOCResources(std::ostream& log) {
+void destroy(std::ostream& log) {
     if (!g_msoc && !g_threadpool) return;
 
     if (g_threadpool) {
@@ -200,7 +200,7 @@ void destroyMSOCResources(std::ostream& log) {
 // Idempotent reconciler called at the safe top-of-frame point.
 // Returns true when resources are live and MSOC can run; false
 // when disabled or creation failed.
-bool ensureMSOCResourcesMatchConfig() {
+bool ensureMatchesConfig() {
     auto& log = log::getLog();
     if (Configuration::EnableMSOC) {
         // Live threadpool-knob change (MCM slider / configure() push):
@@ -216,9 +216,9 @@ bool ensureMSOCResourcesMatchConfig() {
                 << ", bins " << g_poolCreatedWith.binsW << "x" << g_poolCreatedWith.binsH
                 << "->" << Configuration::OcclusionThreadpoolBinsW << "x" << Configuration::OcclusionThreadpoolBinsH
                 << "); recreating resources." << std::endl;
-            destroyMSOCResources(log);
+            destroy(log);
         }
-        const bool ok = createMSOCResources(log);
+        const bool ok = create(log);
         if (ok && !g_poolCreatedWith.valid) {
             g_poolCreatedWith.threadCount = Configuration::OcclusionThreadpoolThreadCount;
             g_poolCreatedWith.binsW = Configuration::OcclusionThreadpoolBinsW;
@@ -227,9 +227,9 @@ bool ensureMSOCResourcesMatchConfig() {
         }
         return ok;
     } else {
-        destroyMSOCResources(log);
+        destroy(log);
         return false;
     }
 }
 
-}  // namespace msoc::occlusion
+}  // namespace msoc::occlusion::resources

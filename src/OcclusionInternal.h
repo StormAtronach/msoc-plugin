@@ -120,9 +120,11 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera);
 // Mask resource lifecycle (MaskResources.cpp). create/ensure are called by
 // installPatches and the detour's top-of-frame reconcile; destroy by the
 // create-failure paths and a toggle-off.
-bool createMSOCResources(std::ostream& log);
-void destroyMSOCResources(std::ostream& log);
-bool ensureMSOCResourcesMatchConfig();
+namespace resources {
+bool create(std::ostream& log);
+void destroy(std::ostream& log);
+bool ensureMatchesConfig();
+}  // namespace resources
 
 // External-occluder injection (ExternalOccluders.cpp). drainPendingOccluders
 // rasterizes queued consumer submissions into the mask (called by the detour);

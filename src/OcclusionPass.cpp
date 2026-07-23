@@ -1300,7 +1300,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
                 // g_msoc + threadpool now; toggle-off tears them
                 // down (joins workers, frees ~57MB). Returns false
                 // on alloc failure -> vanilla cullShowBody this frame.
-                const bool resourcesLive = ensureMSOCResourcesMatchConfig();
+                const bool resourcesLive = resources::ensureMatchesConfig();
                 const bool sceneEnabled = resourcesLive && (isInterior
                                                                 ? Configuration::OcclusionEnableInterior
                                                                 : Configuration::OcclusionEnableExterior);
@@ -1684,7 +1684,7 @@ void installPatches() {
         << (Configuration::EnableMSOC ? "true" : "false")
         << std::endl;
 
-    // Must run before createMSOCResources so the snapshot buffer
+    // Must run before resources::create so the snapshot buffer
     // and threadpool see the tier-resolved size. Aligns to MOC's
     // SUB_TILE_WIDTH=8 / SUB_TILE_HEIGHT=4 and clamps - tiny
     // resolutions trip MOC's tile math, huge ones blow out the
@@ -1710,7 +1710,7 @@ void installPatches() {
     // Hooks always install. Resources are allocated here when
     // EnableMSOC starts on, lazily on first MCM toggle-on otherwise.
     if (Configuration::EnableMSOC) {
-        createMSOCResources(log);
+        resources::create(log);
     } else {
         log << "MSOC: starting with EnableMSOC=false; resources will be allocated on first MCM toggle-on." << std::endl;
     }

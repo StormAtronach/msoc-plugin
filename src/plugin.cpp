@@ -97,7 +97,7 @@ extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     lua_newtable(L);
 
     // Probe + classify before installPatches() so the threadpool's first
-    // createMSOCResources() reads tier-adjusted Configuration:: values
+    // resources::create() reads tier-adjusted Configuration:: values
     // rather than the module-init defaults. The Lua side's
     // cfg.syncToNative(msoc) call later overwrites these from msoc.json
     // if present (saved user values are sticky).
