@@ -132,7 +132,9 @@ void clearExternalOccluderQueue();
 
 // Emit the per-frame MSOC diagnostic line (DiagnosticsLog.cpp). Called at the
 // tail of the detour; gated internally on the log channels (cold path).
-void emitPerFrameStatsLine();
+namespace diag {
+void emitPerFrameLine();
+}  // namespace diag
 
 // Live mask readiness: true once the depth buffer reflects the complete
 // vanilla main-scene occluder set; cleared at the next ClearBuffer.

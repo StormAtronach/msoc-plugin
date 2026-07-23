@@ -11,9 +11,9 @@
 #include <atomic>
 #include <ostream>
 
-namespace msoc::occlusion {
+namespace msoc::occlusion::diag {
 
-void emitPerFrameStatsLine() {
+void emitPerFrameLine() {
     // Cumulative counters survive across frames so rare OCCLUDED
     // events - scenes where one building sits squarely behind
     // another - show up even when the 300-frame sampling misses
@@ -156,4 +156,4 @@ void emitPerFrameStatsLine() {
     }
 }
 
-}  // namespace msoc::occlusion
+}  // namespace msoc::occlusion::diag

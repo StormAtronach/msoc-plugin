@@ -1628,7 +1628,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             g_prevFrameEndUs = 0;
         }
 
-        emitPerFrameStatsLine();
+        diag::emitPerFrameLine();
     }
 }
 
