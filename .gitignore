@@ -20,5 +20,11 @@
 # Release staging
 /test-mod/MSOC Plugin Test Version/
 /test-mod/*.7z
+/dist/
+
+# Investigation working notes. Local scratch for a debugging session -
+# superseded the moment the bug is understood, and of no use to anyone
+# consuming this repo. Conclusions belong in CHANGELOG / ARCHITECTURE.
+/HANDOVER-*.md
 scripts/analyze_cellcross.py
 .gitignore

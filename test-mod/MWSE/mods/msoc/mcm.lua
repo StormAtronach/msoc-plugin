@@ -14,8 +14,7 @@ local i18n = mwse.loadTranslations("msoc")
 -- Close-time saves are gated on an actual value diff against a snapshot
 -- taken at load / after each save, so an MCM session that only browsed
 -- pages doesn't rewrite msoc.json - an unconditional rewrite clobbers
--- any manual file edit made while the game was running (see
--- HANDOVER-config-lifecycle-async-toggle.md, issue 2). Snapshot-compare
+-- any manual file edit made while the game was running. Snapshot-compare
 -- rather than a callback-set dirty flag because MCM "Reset" controls
 -- write config values without routing through widget callbacks.
 local function deepCopy(t)
