@@ -12,7 +12,7 @@
 #include <ostream>
 #include <thread>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Allocate g_msoc + g_threadpool. Idempotent. Returns false on
 // allocation failure (callers treat as permanent disable). Called
@@ -232,4 +232,4 @@ bool ensureMSOCResourcesMatchConfig() {
     }
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

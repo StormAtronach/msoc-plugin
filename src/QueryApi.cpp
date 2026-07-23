@@ -13,7 +13,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // External-consumer mask query API. Reads the SNAPSHOT (g_msoc_prev)
 // captured at drain-complete - race-free regardless of when the
@@ -216,4 +216,4 @@ MaskQueryResult testOcclusionOBB(
     return kMaskQueryVisible;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

@@ -16,7 +16,7 @@
 #include <optional>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // External occluder injection. Each PendingExternalOccluder is a self-
 // contained copy of a consumer's submission; plugin owns the memory.
@@ -222,4 +222,4 @@ bool addPreTransformedOccluder(
     return true;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

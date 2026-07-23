@@ -13,7 +13,7 @@
 
 #include "MaskedOcclusionCulling.h"  // BackfaceWinding
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 struct FrameConfig {
     // Occluder eligibility, resolved per scene type by snapshot().
@@ -84,4 +84,4 @@ struct FrameConfig {
     }
 };
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

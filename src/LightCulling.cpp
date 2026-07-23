@@ -14,7 +14,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Light observers - external consumers (MGE-XE) snapshotting the live
 // renderer-iterated light list. Iterated lock-free from the render thread.
@@ -172,4 +172,4 @@ __declspec(naked) void updateLights_enabledRead_hook() {
     }
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

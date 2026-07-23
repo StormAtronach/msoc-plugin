@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <iosfwd>
 
-namespace msoc::patch::occlusion::forensics {
+namespace msoc::occlusion::forensics {
 
 // Reads tear under hard freeze, but torn 32/64-bit values still
 // bracket the truth well enough for post-mortem.
@@ -41,4 +41,4 @@ const char* stageName(uint32_t stage);
 // at startup, not the user's most recent MCM edit.
 void spawnIfEnabled(std::ostream& log);
 
-}  // namespace msoc::patch::occlusion::forensics
+}  // namespace msoc::occlusion::forensics

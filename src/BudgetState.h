@@ -12,7 +12,7 @@
 #include <chrono>
 #include <cstdint>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 struct BudgetState {
     uint64_t rasterizeEmaUs = 0;
@@ -30,4 +30,4 @@ struct BudgetState {
 
 extern BudgetState g_budget;
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

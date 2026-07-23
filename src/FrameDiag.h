@@ -13,7 +13,7 @@
 
 #include <cstdint>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 struct FrameDiag {
     // Cell-cross diagnostics.
@@ -49,4 +49,4 @@ struct FrameDiag {
 
 extern FrameDiag g_diag;
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

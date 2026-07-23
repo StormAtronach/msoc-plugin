@@ -25,7 +25,7 @@
 #include <cstdint>
 #include <iosfwd>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // NI::Camera accessors for fields upstream MWSE NICamera.h labels
 // `unknown_*` (countCullingPlanes is always 6 for the main world camera;
@@ -157,4 +157,4 @@ struct ScopedUsAccumulator {
     }
 };
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

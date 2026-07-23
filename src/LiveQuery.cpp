@@ -11,7 +11,7 @@
 #include <atomic>
 #include <cfloat>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Sphere straddling the near plane bails as VISIBLE; TestRect can't
 // project a straddling rect safely.
@@ -86,4 +86,4 @@ namespace msoc::patch::occlusion {
     return g_msoc->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

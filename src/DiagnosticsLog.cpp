@@ -11,7 +11,7 @@
 #include <atomic>
 #include <ostream>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 void emitPerFrameStatsLine() {
     // Cumulative counters survive across frames so rare OCCLUDED
@@ -156,4 +156,4 @@ void emitPerFrameStatsLine() {
     }
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

@@ -67,7 +67,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // `log::getLog()` call sites resolved to mwse::log in MWSE proper;
 // this alias keeps them unchanged.
@@ -1888,4 +1888,4 @@ bool dumpOcclusionMask(const char* path) {
     return true;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

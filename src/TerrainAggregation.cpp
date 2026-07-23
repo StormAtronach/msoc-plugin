@@ -20,7 +20,7 @@
 #include <cstring>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // ============================================================
 // Terrain aggregation
@@ -598,4 +598,4 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
     }
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

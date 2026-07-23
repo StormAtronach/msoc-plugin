@@ -9,7 +9,7 @@
 #include "NIAVObject.h"
 #include "NIProperty.h"
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Why these can't be occluders:
 //   alpha   - blended/alpha-tested shapes (fences, banners, grates,
@@ -48,4 +48,4 @@ OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj) {
     return out;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

@@ -15,7 +15,7 @@
 #include <atomic>
 #include <cstdint>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 struct FrameStats {
     // Scene-graph traversal.
@@ -73,4 +73,4 @@ struct FrameStats {
 
 extern FrameStats g_stats;
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

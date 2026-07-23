@@ -4,7 +4,7 @@ namespace NI {
 struct Light;
 }
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Install hooks for DX8 Masked Software Occlusion Culling. Hooks
 // always install - EnableMSOC is a runtime gate re-checked every
@@ -127,7 +127,7 @@ bool addPreTransformedOccluder(
     const float* verts, int vtxCount, int stride, int offY, int offW,
     const unsigned int* tris, int triCount);
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion
 
 // Stable C-ABI exports for out-of-tree consumers (MGE-XE etc.). Resolve
 // with GetProcAddress(GetModuleHandleA("MWSE.dll"), "mwse_..."). NI::Light*
@@ -141,7 +141,7 @@ extern "C" __declspec(dllexport) void __cdecl mwse_registerVisibleGeomCallback(v
 extern "C" __declspec(dllexport) void __cdecl mwse_unregisterVisibleGeomCallback(void(__cdecl* cb)(void* const*, const float*, int));
 
 // MSOC mask query exports. Return values match
-// msoc::patch::occlusion::MaskQueryResult:
+// msoc::occlusion::MaskQueryResult:
 //   0 = Visible     (draw)
 //   1 = Occluded    (skip)
 //   2 = ViewCulled  (outside frustum)

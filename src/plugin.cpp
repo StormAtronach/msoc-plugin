@@ -122,7 +122,7 @@ extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     static bool s_installed = false;
     if (!s_installed) {
         s_installed = true;
-        msoc::patch::occlusion::installPatches();
+        msoc::occlusion::installPatches();
     }
 
     return 1;
