@@ -220,10 +220,6 @@ using profiling::emaUpdate;
 static uint32_t g_callDepth = 0;
 
 // RAII for g_callDepth. Used exclusively by CullShow_detour.
-// Unnamed namespace: TU-local type. `static` cannot be applied to a
-// type, so this is the only way to keep it off the linker's radar and
-// out of reach of an identically-named type in another TU. See the
-// ODR incident in CHANGELOG (two distinct PendingOccluder structs).
 namespace {
 struct CallDepthGuard {
     CallDepthGuard() {
@@ -335,9 +331,6 @@ forensics::Snapshot forensics::captureSnapshot() {
 //
 // Only NiTriShape leaves defer; NiNodes stay inline so their subtree
 // keeps contributing occluders during the main pass.
-// Unnamed namespace: these four types and their queues are TU-local.
-// See the note on CallDepthGuard above. The queues take their internal
-// linkage from the namespace, so `static` on them would be redundant.
 namespace {
 struct PendingDisplay {
     NI::AVObject* shape;
@@ -381,8 +374,7 @@ enum class DrainVerdict : uint8_t {
 struct DrainSlot {
     DrainVerdict verdict;
     // True only when live::testSphere actually ran. False for
-    // Skip*/CachedOccluded. Phase 2 uses this to gate counter
-    // increments that fired only on the !reused branch pre-refactor.
+    // Skip*/CachedOccluded. Phase 2 gates its counter increments on this.
     bool ranTestRect;
 };
 
@@ -392,7 +384,6 @@ std::vector<DrainSlot> g_drainSlots;
 // ============================================================
 // Occluder property classification & terrain membership
 // ============================================================
-// (Debug tinting moved to DebugTint.{h,cpp}.)
 
 // Single-pass occluder property classifier. Walks ancestors once,
 // resolving first-of-type-wins NiAlphaProperty and NiStencilProperty
@@ -1070,8 +1061,8 @@ static void classifyDrainRange(size_t lo, size_t hi) {
 //
 // Two-phase: classifyDrainRange does read-only verdict computation;
 // the loop below applies all writes (counters, cache, tints,
-// display()). Bit-exact counter parity with the pre-refactor serial
-// loop is the acceptance criterion.
+// display()). Splitting the phases must not change any counter, which
+// is what makes the stats line a usable regression check.
 static void drainPendingDisplays() {
     ScopedUsAccumulator t(g_stats.drainPhaseTimeUs);
     // Fast path: zero occluders this frame -> depth buffer is cleared
@@ -1185,8 +1176,7 @@ static void drainPendingDisplays() {
         }
     };
 
-    // Phase 2: serial action pass - counter semantics match the
-    // pre-refactor loop exactly.
+    // Phase 2: serial action pass - all writes happen here.
     g_lastStage = 15;
     for (size_t i = 0; i < n; ++i) {
         const auto& p = g_pendingDisplays[i];

@@ -1,7 +1,9 @@
 // Live sphere-vs-mask query: projects a world sphere through the live
 // per-frame matrix and tests it against g_msoc. Used by the drain (core) and
-// LightCulling - extracted to a leaf TU so neither depends back into the core.
-// Shared state via OcclusionInternal.h.
+// LightCulling. Shared state via OcclusionInternal.h.
+//
+// Counterpart to snapshot:: in QueryApi.cpp, which runs the same math against
+// g_msoc_prev through the swap-time projection.
 
 #include "OcclusionInternal.h"
 

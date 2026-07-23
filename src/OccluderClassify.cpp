@@ -1,8 +1,7 @@
 // Occluder property classification: first-of-type alpha/stencil flags from
 // a node's ancestor chain (alpha/stencil meshes are excluded from the
 // occluder rasterise pass). Used by the rasterizer (core) and
-// TerrainAggregation - extracted to a leaf TU to break the back-edge into
-// the core. Shared state via OcclusionInternal.h.
+// TerrainAggregation. Shared state via OcclusionInternal.h.
 
 #include "OcclusionInternal.h"
 

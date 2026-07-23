@@ -150,10 +150,9 @@ bool create(std::ostream& log) {
 // Raw config inputs the threadpool decision was last made with. Lets
 // the per-frame reconciler detect a live MCM change to the pool knobs
 // and rebuild through the same safe destroy/create path EnableMSOC
-// toggling already uses - previously these were silently restart-only
-// (HANDOVER-config-lifecycle-async-toggle.md, issue 3). Mask dimensions
-// stay restart-only: the detour's tile buffer is sized at patch-install
-// time and cannot follow a live resize.
+// toggling already uses. Mask dimensions stay restart-only: the detour's
+// tile buffer is sized at patch-install time and cannot follow a live
+// resize.
 namespace {
 struct ThreadpoolConfigInputs {
     unsigned int threadCount = 0;

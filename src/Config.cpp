@@ -121,8 +121,8 @@ void readTerrainOcclusionMode(lua_State* L, int tbl, const char* key, int& out) 
 
 namespace msoc {
 
-// classifyHardwareTier / hardwareTierName moved to HardwareTier.cpp (pure,
-// unit-tested). applyHardwareTierDefaults stays here - it writes Configuration.
+// Lives here rather than in HardwareTier.cpp because it writes Configuration;
+// that TU stays pure so it can be unit-tested.
 void applyHardwareTierDefaults(HardwareTier tier) {
     // Threadpool / async / mask knobs are tier-sensitive. So is
     // OcclusionSkipTerrainOccludees: A/B in a dense Vivec exterior showed

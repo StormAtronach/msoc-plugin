@@ -90,15 +90,12 @@ extern unsigned int kMsocWidth;                // mask resolution (latched at in
 extern unsigned int kMsocHeight;
 extern uint32_t g_frameCounter;  // top-level frame counter
 
-// Queries against the LIVE mask (g_msoc, current frame's projection).
-// The snapshot equivalents - which read g_msoc_prev through the
-// published projection - live in QueryApi.cpp; keeping the two behind
-// distinct namespaces is deliberate, since confusing them means
-// culling against the wrong buffer.
+// Queries against the LIVE mask - g_msoc, this frame's projection. The
+// snapshot equivalents (g_msoc_prev, swap-time projection) are snapshot::
+// in QueryApi.cpp.
 namespace live {
-// Sphere test against g_msoc. Defined in LiveQuery.cpp (leaf); called
-// by the drain (core) and LightCulling. Returns Intel's CullingResult
-// (VISIBLE / OCCLUDED / VIEW_CULLED).
+// Defined in LiveQuery.cpp; called by the drain and LightCulling.
+// Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
 ::MaskedOcclusionCulling::CullingResult testSphere(
     const NI::Point3& center, float radius);
 

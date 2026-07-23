@@ -50,12 +50,54 @@ modules below it. Nothing below the core depends back up into it.
 
 ### Why the leaf layer exists
 `LiveQuery` and `OccluderClassify` are not subsystems in their own right - they
-are helpers shared by *both* the core and a subsystem. `testSphereVisible` is
-called by the core drain and by `LightCulling`; `classifyOccluderProperties` by
-the core rasterizer and by `TerrainAggregation`. Keeping them in the core would
-make those subsystems depend back into the core (a cycle). Pulling them down
-into leaf TUs keeps the graph acyclic. `ExternalOccluders` is similar: the core
-detour drains it, `MaskResources` clears it, so it lives below both.
+are helpers shared by *both* the core and a subsystem. `live::testSphere` is
+called by the core drain and by `LightCulling`; `classify::occluderProperties`
+by the core rasterizer and by `TerrainAggregation`. Keeping them in the core
+would make those subsystems depend back into the core (a cycle). Pulling them
+down into leaf TUs keeps the graph acyclic. `ExternalOccluders` is similar: the
+core detour drains it, `MaskResources` clears it, so it lives below both.
+
+## Namespaces
+
+1. **`msoc::<name>`** - engine-free and reusable. The discriminator is whether
+   the module builds in the `msoc_tests` target (no MWSE, LuaJIT or Win32):
+   `clipmath`, `profiling`, `horizon`. `log` sits here as cross-cutting
+   infrastructure, as do `Configuration` and `HardwareTier`, which are
+   plugin-wide setup rather than standalone algorithms.
+2. **`msoc::occlusion`** - the shared seam: the public API in `OcclusionApi.h`,
+   the state owners, the cross-TU contracts in `OcclusionInternal.h`, and the
+   core orchestrator that defines all of it.
+3. **`msoc::occlusion::<module>`** - one per subsystem TU, holding that TU's
+   internals. Types local to a single TU go one level further, into an unnamed
+   namespace.
+
+The core *is* the parent namespace and the subsystems nest inside it, mirroring
+the layering above rather than flattening it into siblings.
+
+| TU | Namespace |
+|---|---|
+| `OcclusionPass` | `msoc::occlusion` (core; owns the shared state) |
+| `QueryApi` | `::snapshot` |
+| `LiveQuery` | `::live` |
+| `ExternalOccluders` | `::external` |
+| `TerrainAggregation` | `::terrain` |
+| `MaskResources` | `::resources` |
+| `LightCulling` | `::lights` |
+| `DiagnosticsLog` | `::diag` |
+| `OccluderClassify` | `::classify` |
+| `DebugTint` | `::debugtint` |
+| `ForensicsWatchdog` | `::forensics` |
+
+`live::testSphere` and `snapshot::testSphere` are the same math against
+different buffers - the live write target vs the published snapshot. The
+namespace is what separates them at the call site, and choosing the wrong one
+yields verdicts that look reasonable and are wrong.
+
+Where a subsystem owns public API (`ExternalOccluders`, `LightCulling`), the
+implementation sits in the module namespace and the frozen `OcclusionApi.h`
+name stays in the parent as a thin adapter. `Exports.cpp` and the `mwse_*`
+exports are unaffected - they are `extern "C"` and unmangled, so no internal
+namespace change can reach them.
 
 ## The shared-state seam: `OcclusionInternal.h`
 
@@ -69,9 +111,10 @@ things:
    resources (`g_msoc`, `g_msoc_prev`, `g_threadpool`), the live projection
    (`g_worldToClip`, `g_ndcRadius*`, `g_wGradMag`), and assorted frame flags.
 2. **The cross-TU function contract** - declarations of the functions a TU
-   exposes to the others (e.g. `rasterizeAggregateTerrain`, `createMSOCResources`,
-   `emitPerFrameStatsLine`, `testSphereVisible`, `drainPendingOccluders`). Every
-   one of these is *defined in a subsystem/leaf TU* - the core only calls them.
+   exposes to the others, each inside its module namespace (e.g.
+   `terrain::rasterizeAggregate`, `resources::create`, `diag::emitPerFrameLine`,
+   `live::testSphere`, `external::drain`). Every one of these is *defined in a
+   subsystem/leaf TU* - the core only calls them.
 
 Hot-path helpers (`projectWorld`, `ScopedUsAccumulator`, the camera-plane
 accessors) are header-inline so they still inline across TU boundaries.
@@ -98,28 +141,28 @@ detoured. One top-level pass per scene:
 
 1. `renderMainScene_wrapper` resets per-frame state; `resetFrameTints` (DebugTint).
 2. `CullShow_detour` (top-level entry):
-   - `ensureMSOCResourcesMatchConfig` (MaskResources) reconciles the gate.
+   - `resources::ensureMatchesConfig` reconciles the gate.
    - `g_frame.snapshot(isInterior)` (FrameConfig) caches the hot-path knobs.
    - `ClearBuffer`; `uploadCameraTransform` sets the live projection.
-   - `drainPendingOccluders` (ExternalOccluders) rasterizes consumer submissions.
+   - `external::drain` rasterizes consumer submissions.
    - scene traversal (`cullShowBody`): large opaque leaves -> `rasterizeTriShape`
-     (occluders); small leaves -> deferred queue; `classifyOccluderProperties`
-     (OccluderClassify) gates alpha/stencil out of the occluder pass.
-   - `rasterizeAggregateTerrain[Horizon]` (TerrainAggregation) adds terrain.
+     (occluders); small leaves -> deferred queue; `classify::occluderProperties`
+     gates alpha/stencil out of the occluder pass.
+   - `terrain::rasterizeAggregate[Horizon]` adds terrain.
    - drain: `classifyDrainRange` -> `TestRect` verdicts -> `drainPendingDisplays`
      skips `display()` on OCCLUDED leaves.
    - visible-geom callback fires the surviving set (for MGE depth/shadows).
-   - `emitPerFrameStatsLine` (DiagnosticsLog) on enabled log channels.
+   - `diag::emitPerFrameLine` on enabled log channels.
    - swap `g_msoc` <-> `g_msoc_prev`; publish `g_snapshot` for consumers.
-3. `updateLights_enabledRead_hook` (LightCulling) fires during light updates,
-   testing each NiPointLight via `testSphereVisible` (LiveQuery).
+3. `lights::enabledReadHook` fires during light updates, testing each
+   NiPointLight via `live::testSphere`.
 4. Out-of-tree consumers query the published snapshot through QueryApi /
    the `mwse_*` exports (Exports.cpp).
 
 ## ABI
 
 - `OcclusionApi.h` is the frozen public contract: the `mwse_*` C
-  exports and the `msoc::patch::occlusion` query/callback API. Result codes are
+  exports and the `msoc::occlusion` query/callback API. Result codes are
   fixed (`0=Visible 1=Occluded 2=ViewCulled 3=NotReady`).
 - `Exports.cpp` is a thin thunk layer; the API functions it forwards to live in
   QueryApi / LightCulling / ExternalOccluders.
@@ -129,7 +172,7 @@ detoured. One top-level pass per scene:
 `MSOC_BUILD_TESTS` (default ON) builds `msoc_tests` from the pure-leaf modules +
 doctest, gated behind `MSOC_BUILD_DLL` so it builds with no MWSE/LuaJIT/Win32
 (CI-friendly). Covered: ClipMath, Profiling, HorizonOccluder, HardwareTier
-(25 cases / 202 assertions). The engine-coupled TUs are verified by build/link
+(26 cases). The engine-coupled TUs are verified by build/link
 and the in-game `OcclusionLogAggregate` stats line (parse with
 `scripts/parse_msoc_log.py`).
 
@@ -139,6 +182,20 @@ and the in-game `OcclusionLogAggregate` stats line (parse with
 - ASCII only in source.
 - SIMD is capped at AVX2 (`Create(AVX2)` in plugin.cpp + MaskResources.cpp);
   AVX512 is disabled pending a revisit.
+- **Types local to one TU go in an unnamed namespace.** `static` gives internal
+  linkage to variables and functions but cannot be applied to a type, so an
+  unnamed namespace is the only thing preventing two TUs from silently sharing a
+  type that happens to share a name. Variables inside such a namespace do not
+  also need `static`.
+
+  This is not hypothetical. `OcclusionPass.cpp` and `ExternalOccluders.cpp` each
+  defined a `PendingOccluder` - 8 bytes and 116 bytes - in the same namespace.
+  The linker folded `std::vector<PendingOccluder>` to one instantiation, so
+  `emplace_back` allocated 8 bytes and constructed 116 into it: a 108-byte heap
+  overflow per external submission, plus a drain loop whose `!=` end check could
+  never match. An ODR violation is ill-formed-no-diagnostic-required, so no
+  compiler or linker warning is coming; MSVC ships no ODR checker, which leaves
+  the convention as the only guard.
 
 ## Known structure notes
 - The core's two remaining hot subsystems - occluder rasterization
@@ -146,6 +203,8 @@ and the in-game `OcclusionLogAggregate` stats line (parse with
   `drainPendingDisplays`) - have not been split out; they are the highest-risk
   extractions and would need in-game verification. After them the core would be
   a thin orchestrator.
-- `OcclusionInternal.h` carries both shared state and the function contract; if
-  it keeps growing, splitting the data declarations into an `OcclusionState.h`
-  would clarify it.
+- `OcclusionInternal.h` carries both shared state and the function contract. The
+  contract half is now grouped by module namespace, which is most of what a
+  split into an `OcclusionState.h` would have bought; the state half is genuinely
+  shared by nearly every TU, so per-module headers would all include it anyway.
+  Revisit only if the state grows module-specific sections.

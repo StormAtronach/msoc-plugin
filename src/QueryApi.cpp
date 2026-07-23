@@ -28,11 +28,9 @@ bool isOcclusionMaskReady() {
     return (now - g_snapshot.tickMs) <= kSnapshotMaxAgeMs;
 }
 
-// Queries against the SNAPSHOT buffer (g_msoc_prev, projected through
-// the matrix + NDC constants captured at the swap). Deliberately
-// namespaced as the counterpart to live:: in LiveQuery.cpp - the math
-// mirrors live::testSphere, but the buffer does not, and testing the
-// wrong one yields verdicts that look reasonable and are wrong.
+// Queries against the SNAPSHOT buffer - g_msoc_prev, projected through the
+// matrix + NDC constants captured at the swap. Same math as live:: in
+// LiveQuery.cpp, different buffer.
 namespace snapshot {
 
 ::MaskedOcclusionCulling::CullingResult testSphere(

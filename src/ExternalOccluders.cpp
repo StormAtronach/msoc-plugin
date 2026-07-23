@@ -27,14 +27,6 @@ namespace msoc::occlusion::external {
 //
 // g_externalOccluderTrisQueued enforces external-first rejection
 // against OcclusionOccluderMaxTriangles, preserving the native budget.
-//
-// Unnamed namespace: `static` cannot be applied to a type, so this is
-// the only way to keep PendingExternalOccluder out of reach of an
-// identically-named type in another TU - which is exactly how it and
-// OcclusionPass.cpp's DeferredOccluderRef (when both were called
-// PendingOccluder) silently merged. See CHANGELOG. The variables take
-// their internal linkage from the namespace as well, so `static` on
-// them would be redundant.
 namespace {
 struct PendingExternalOccluder {
     std::vector<float> verts;
@@ -179,7 +171,7 @@ bool enqueue(
 bool enqueuePreTransformed(
     const float* verts, int vtxCount, int stride, int offY, int offW,
     const unsigned int* tris, int triCount) {
-    // Same validation + budget as addOccluder, plus preTransformed.
+    // Same validation + budget as enqueue, plus preTransformed.
     // Validation is duplicated rather than factored - keeps both
     // public paths readable in isolation.
     if (!verts || !tris || vtxCount <= 0 || triCount <= 0) {
