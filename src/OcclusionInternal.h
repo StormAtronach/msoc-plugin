@@ -126,11 +126,15 @@ void destroy(std::ostream& log);
 bool ensureMatchesConfig();
 }  // namespace resources
 
-// External-occluder injection (ExternalOccluders.cpp). drainPendingOccluders
-// rasterizes queued consumer submissions into the mask (called by the detour);
-// clearExternalOccluderQueue drops them on teardown (called by MaskResources).
-void drainPendingOccluders();
-void clearExternalOccluderQueue();
+// External-occluder injection (ExternalOccluders.cpp). drain() rasterizes
+// queued consumer submissions into the mask (called by the detour);
+// clearQueue() drops them on teardown (called by MaskResources). The
+// public addOccluder / addPreTransformedOccluder in OcclusionApi.h are
+// thin adapters over enqueue* in this namespace.
+namespace external {
+void drain();
+void clearQueue();
+}  // namespace external
 
 // Emit the per-frame MSOC diagnostic line (DiagnosticsLog.cpp). Called at the
 // tail of the detour; gated internally on the log channels (cold path).

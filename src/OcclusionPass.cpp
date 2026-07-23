@@ -1498,7 +1498,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             // it isn't stomped), AFTER uploadCameraTransform (so
             // g_worldToClip is live for direct-MOC), and BEFORE any
             // threadpool work queues.
-            drainPendingOccluders();
+            external::drain();
 
             // Aggregate terrain. Submit merged per-Land occluders so
             // hill silhouettes are in the buffer before non-terrain

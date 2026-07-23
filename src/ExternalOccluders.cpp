@@ -16,7 +16,7 @@
 #include <optional>
 #include <vector>
 
-namespace msoc::occlusion {
+namespace msoc::occlusion::external {
 
 // External occluder injection. Each PendingExternalOccluder is a self-
 // contained copy of a consumer's submission; plugin owns the memory.
@@ -53,13 +53,13 @@ static int g_externalOccluderTrisQueued = 0;
 }  // namespace
 
 // Drop queued external-occluder submissions on teardown (OcclusionInternal.h).
-void clearExternalOccluderQueue() {
+void clearQueue() {
     std::lock_guard<std::mutex> lock(g_pendingExternalOccludersMutex);
     g_pendingExternalOccluders.clear();
     g_externalOccluderTrisQueued = 0;
 }
 
-void drainPendingOccluders() {
+void drain() {
     // Swap-and-release so a slow rasterise doesn't block consumer
     // threads in mwse_addOccluder.
     std::vector<PendingExternalOccluder> localQueue;
@@ -110,7 +110,7 @@ void drainPendingOccluders() {
     }
 }
 
-bool addOccluder(
+bool enqueue(
     const float* verts, int vtxCount, int stride, int offY, int offW,
     const unsigned int* tris, int triCount,
     const float* modelMatrix16) {
@@ -173,7 +173,7 @@ bool addOccluder(
     return true;
 }
 
-bool addPreTransformedOccluder(
+bool enqueuePreTransformed(
     const float* verts, int vtxCount, int stride, int offY, int offW,
     const unsigned int* tris, int triCount) {
     // Same validation + budget as addOccluder, plus preTransformed.
@@ -220,6 +220,29 @@ bool addPreTransformedOccluder(
     g_externalOccluderTrisQueued += triCount;
     g_pendingExternalOccluders.emplace_back(std::move(p));
     return true;
+}
+
+}  // namespace msoc::occlusion::external
+
+// Public consumer API (OcclusionApi.h). Thin adapters over the module
+// above: the frozen names stay exactly where OcclusionApi.h declares
+// them - the parent namespace - while the implementation sits behind
+// external::. Exports.cpp and the mwse_* C exports are unaffected.
+namespace msoc::occlusion {
+
+bool addOccluder(
+    const float* verts, int vtxCount, int stride, int offY, int offW,
+    const unsigned int* tris, int triCount,
+    const float* modelMatrix16) {
+    return external::enqueue(verts, vtxCount, stride, offY, offW,
+                             tris, triCount, modelMatrix16);
+}
+
+bool addPreTransformedOccluder(
+    const float* verts, int vtxCount, int stride, int offY, int offW,
+    const unsigned int* tris, int triCount) {
+    return external::enqueuePreTransformed(verts, vtxCount, stride, offY, offW,
+                                           tris, triCount);
 }
 
 }  // namespace msoc::occlusion

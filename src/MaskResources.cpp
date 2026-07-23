@@ -189,7 +189,7 @@ void destroy(std::ostream& log) {
     g_caches.occluder.clear();
     // External occluder queue: drop pending submissions so re-enable
     // doesn't replay stale ones against the fresh mask.
-    clearExternalOccluderQueue();
+    external::clearQueue();
     g_asyncThisFrame = false;
     g_maskReady = false;
     g_poolCreatedWith.valid = false;
