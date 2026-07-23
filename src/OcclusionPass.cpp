@@ -350,11 +350,11 @@ static std::vector<PendingDisplay> g_pendingDisplays;
 // g_caches.occluder (unordered_map node addresses are stable across insertions,
 // valid until cell-change wipe - same lifetime guarantee the threadpool relies
 // on). Reused across frames; cleared after the submit loop.
-struct PendingOccluder {
+struct DeferredOccluderRef {
     const OccluderCacheEntry* cache;
     float dist2;  // squared eye->worldBoundOrigin distance, sort key
 };
-static std::vector<PendingOccluder> g_pendingOccluders;
+static std::vector<DeferredOccluderRef> g_deferredOccluders;
 
 // Drain phase-1 verdict slots, populated by classifyDrainRange and
 // consumed by phase 2. Phase 1 stays read-only on shared state -
@@ -652,7 +652,7 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
     if (g_frame.occluderFrontToBack) {
         const auto& o = shape->worldBoundOrigin;
         const float dx = o.x - eye.x, dy = o.y - eye.y, dz = o.z - eye.z;
-        g_pendingOccluders.push_back({&cache, dx * dx + dy * dy + dz * dz});
+        g_deferredOccluders.push_back({&cache, dx * dx + dy * dy + dz * dz});
         return true;
     }
 
@@ -683,11 +683,11 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
 // rasterizeTriShape's submit (winding, layout, async vs direct) exactly; the
 // budget spike-clip still applies so a dense frame bails the tail. Occluders
 // are counted here (not at record time) so the counter matches what rasterised.
-static void submitPendingOccluders() {
-    if (g_pendingOccluders.empty()) return;
-    std::sort(g_pendingOccluders.begin(), g_pendingOccluders.end(),
-              [](const PendingOccluder& a, const PendingOccluder& b) { return a.dist2 < b.dist2; });
-    for (const auto& po : g_pendingOccluders) {
+static void submitDeferredOccluders() {
+    if (g_deferredOccluders.empty()) return;
+    std::sort(g_deferredOccluders.begin(), g_deferredOccluders.end(),
+              [](const DeferredOccluderRef& a, const DeferredOccluderRef& b) { return a.dist2 < b.dist2; });
+    for (const auto& po : g_deferredOccluders) {
         if (g_budget.skipRasterizeThisFrame) break;
         if (profiling::spikeClipTripped(g_stats.rasterizeTimeUs, g_budget.rasterizeBudgetUsEffective)) {
             g_budget.rasterizeBudgetTrips = 1;
@@ -710,7 +710,7 @@ static void submitPendingOccluders() {
         }
         g_stats.occluderTriangles += c.outTriCount;
     }
-    g_pendingOccluders.clear();
+    g_deferredOccluders.clear();
 }
 
 // ============================================================
@@ -1519,7 +1519,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // Front-to-back: submit the occluders deferred during traversal, sorted
         // near-to-far, before the Flush. No-op unless OcclusionOccluderFrontToBack
         // is on (the queue stays empty otherwise).
-        submitPendingOccluders();
+        submitDeferredOccluders();
 
         // Aggregate-terrain also goes through the threadpool, so
         // the Flush gate must include it. Otherwise a terrain-only

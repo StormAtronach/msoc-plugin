@@ -18,7 +18,7 @@
 
 namespace msoc::patch::occlusion {
 
-// External occluder injection. Each PendingOccluder is a self-
+// External occluder injection. Each PendingExternalOccluder is a self-
 // contained copy of a consumer's submission; plugin owns the memory.
 // Populated on the consumer's thread, drained on the render thread
 // before native near-scene occluders rasterize. Mutex contention is
@@ -27,7 +27,7 @@ namespace msoc::patch::occlusion {
 //
 // g_externalOccluderTrisQueued enforces external-first rejection
 // against OcclusionOccluderMaxTriangles, preserving the native budget.
-struct PendingOccluder {
+struct PendingExternalOccluder {
     std::vector<float> verts;
     std::vector<std::uint32_t> tris;
     int stride;
@@ -41,29 +41,29 @@ struct PendingOccluder {
     bool preTransformed = false;
 };
 
-static std::vector<PendingOccluder> g_pendingOccluders;
-static std::mutex g_pendingOccludersMutex;
+static std::vector<PendingExternalOccluder> g_pendingExternalOccluders;
+static std::mutex g_pendingExternalOccludersMutex;
 static int g_externalOccluderTrisQueued = 0;
 
 // Drop queued external-occluder submissions on teardown (OcclusionInternal.h).
 void clearExternalOccluderQueue() {
-    std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
-    g_pendingOccluders.clear();
+    std::lock_guard<std::mutex> lock(g_pendingExternalOccludersMutex);
+    g_pendingExternalOccluders.clear();
     g_externalOccluderTrisQueued = 0;
 }
 
 void drainPendingOccluders() {
     // Swap-and-release so a slow rasterise doesn't block consumer
     // threads in mwse_addOccluder.
-    std::vector<PendingOccluder> localQueue;
+    std::vector<PendingExternalOccluder> localQueue;
     int drainedTris = 0;
     {
-        std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
-        if (g_pendingOccluders.empty()) {
+        std::lock_guard<std::mutex> lock(g_pendingExternalOccludersMutex);
+        if (g_pendingExternalOccluders.empty()) {
             return;
         }
-        localQueue = std::move(g_pendingOccluders);
-        g_pendingOccluders.clear();
+        localQueue = std::move(g_pendingExternalOccluders);
+        g_pendingExternalOccluders.clear();
         drainedTris = g_externalOccluderTrisQueued;
         g_externalOccluderTrisQueued = 0;
     }
@@ -125,7 +125,7 @@ bool addOccluder(
     // native occluders. External-first rejection preserves the
     // native mask under contention.
     const int cap = static_cast<int>(Configuration::OcclusionOccluderMaxTriangles);
-    std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
+    std::lock_guard<std::mutex> lock(g_pendingExternalOccludersMutex);
     if (g_externalOccluderTrisQueued + triCount > cap) {
         // Rate-limit the log so a chatty consumer can't flood it.
         static bool warnOnce = true;
@@ -140,7 +140,7 @@ bool addOccluder(
     }
 
     // Copy into plugin-owned storage; consumer can free after return.
-    PendingOccluder p;
+    PendingExternalOccluder p;
     p.stride = stride;
     p.offY = offY;
     p.offW = offW;
@@ -162,7 +162,7 @@ bool addOccluder(
     }
 
     g_externalOccluderTrisQueued += triCount;
-    g_pendingOccluders.emplace_back(std::move(p));
+    g_pendingExternalOccluders.emplace_back(std::move(p));
     return true;
 }
 
@@ -183,7 +183,7 @@ bool addPreTransformedOccluder(
     }
 
     const int cap = static_cast<int>(Configuration::OcclusionOccluderMaxTriangles);
-    std::lock_guard<std::mutex> lock(g_pendingOccludersMutex);
+    std::lock_guard<std::mutex> lock(g_pendingExternalOccludersMutex);
     if (g_externalOccluderTrisQueued + triCount > cap) {
         static bool warnOnce = true;
         if (warnOnce) {
@@ -196,7 +196,7 @@ bool addPreTransformedOccluder(
         return false;
     }
 
-    PendingOccluder p;
+    PendingExternalOccluder p;
     p.stride = stride;
     p.offY = offY;
     p.offW = offW;
@@ -211,7 +211,7 @@ bool addPreTransformedOccluder(
     p.tris.assign(tris, tris + static_cast<size_t>(triCount) * 3);
 
     g_externalOccluderTrisQueued += triCount;
-    g_pendingOccluders.emplace_back(std::move(p));
+    g_pendingExternalOccluders.emplace_back(std::move(p));
     return true;
 }
 
