@@ -1,6 +1,6 @@
 // Live sphere-vs-mask query: projects a world sphere through the live
-// per-frame matrix and tests it against g_msoc. Used by the drain (core) and
-// LightCulling - extracted to a leaf TU so neither depends back into the core.
+// per-frame matrix and tests it against g_msoc. Used by the drain; kept in a
+// leaf TU so the query math stays separable from the core detour.
 // Shared state via OcclusionInternal.h.
 
 #include "OcclusionInternal.h"
@@ -43,10 +43,9 @@ namespace msoc::patch::occlusion {
 }
 
 // Live OBB-vs-mask query: projects the 8 world-space box corners through the
-// live matrix, tests their covered screen rect against g_msoc. Same shape as
-// testOcclusionSphere's rect path + testOcclusionOBB, but against the live
-// (this-frame) buffer. corners is 8 (x, y, z) triples. Used by the drain to
-// refine a sphere-VISIBLE occludee with its tighter box.
+// live matrix, tests their covered screen rect against g_msoc. Same rect math
+// as testSphereVisible above. corners is 8 (x, y, z) triples. Used by the
+// drain to refine a sphere-VISIBLE occludee with its tighter box.
 ::MaskedOcclusionCulling::CullingResult testBoxVisible(const float* corners) {
     float ndcMinX = FLT_MAX, ndcMinY = FLT_MAX;
     float ndcMaxX = -FLT_MAX, ndcMaxY = -FLT_MAX;

@@ -14,7 +14,7 @@
 #include "DebugTint.h"
 // Per-frame snapshot of the Configuration knobs the hot path reads.
 #include "FrameConfig.h"
-// Cross-TU shared state (g_frame, g_snapshot, g_msoc_prev, mask consts) for
+// Cross-TU shared state (g_frame, the caches, mask consts) for
 // the extracted subsystem TUs (QueryApi.cpp, ...).
 #include "OcclusionInternal.h"
 // LAYER-A-HORIZON: 1D horizon -> curtain occluder used by the Horizon
@@ -24,6 +24,9 @@
 // table, and the spawn gate. This TU implements the read accessor
 // (forensics::captureSnapshot) it calls back into.
 #include "ForensicsWatchdog.h"
+// Debug mask overlay (engine texture mirror of the finished mask) + the
+// PFM dump that shares its buffer. Both read the live mask post-drain.
+#include "MaskOverlay.h"
 
 #include "TES3Cell.h"
 #include "TES3DataHandler.h"
@@ -33,9 +36,7 @@
 #include "NICamera.h"
 #include "NIColor.h"
 #include "NIDefines.h"
-#include "NIDynamicEffect.h"
 #include "NIGeometryData.h"
-#include "NILight.h"
 #include "NINode.h"
 #include "NIProperty.h"
 #include "NITArray.h"
@@ -49,21 +50,14 @@
 #include "MaskedOcclusionCulling.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <cassert>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <limits>
-#include <mutex>
-#include <optional>
 #include <ostream>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -87,18 +81,6 @@ unsigned int kMsocHeight = 256;
 
 // Heap-allocated via Create()/Destroy(). Leaked on process exit.
 ::MaskedOcclusionCulling* g_msoc = nullptr;  // extern in OcclusionInternal.h
-// Double-buffer. g_msoc_prev holds the PREVIOUS frame's completed
-// mask - what external consumers (MGE-XE) read from. We rasterize
-// into g_msoc each frame and swap at drain-complete so consumers
-// always see "the mask as of the end of the previous frame".
-// Defined here, declared extern in OcclusionInternal.h (read by QueryApi).
-::MaskedOcclusionCulling* g_msoc_prev = nullptr;
-// Snapshot published at the drain-complete buffer swap. The MaskSnapshot
-// type + kSnapshotMaxAgeMs live in OcclusionInternal.h; the query API
-// projects through g_snapshot, not the live per-frame matrix.
-MaskSnapshot g_snapshot;
-
-
 
 // Transposed from NI's row-major M*v into Intel's column-major v*M
 // layout (consecutive memory = one column). Refreshed at top-level
@@ -114,7 +96,7 @@ float g_worldToClip[16];  // extern in OcclusionInternal.h
 //                   computed for safety against scaled views.
 float g_ndcRadiusX = 0.0f;  // extern in OcclusionInternal.h
 float g_ndcRadiusY = 0.0f;  // extern in OcclusionInternal.h
-float g_wGradMag = 0.0f;  // extern in OcclusionInternal.h
+float g_wGradMag = 0.0f;    // extern in OcclusionInternal.h
 
 // DataHandler::worldLandscapeRoot, captured per top-level frame.
 // Drain uses it to short-circuit occludee queries on terrain patches
@@ -139,13 +121,6 @@ static bool g_inRenderMainScene = false;
 // other non-main Clicks inside renderMainScene run vanilla.
 static bool g_msocActive = false;
 
-// True while the depth buffer reflects the complete vanilla
-// main-scene occluder set. Set after drainPendingDisplays in the
-// top-level cullShow_detour, cleared at the next ClearBuffer().
-// External consumers gate TestRect on this; queries before drain
-// would hit a partial buffer and falsely report VISIBLE.
-bool g_maskReady = false;  // extern in OcclusionInternal.h
-
 // Per-frame diagnostic counters + phase timers (FrameStats.h), reset at
 // the top of each worldCamera traversal. Defined here; declared extern
 // in FrameStats.h for the subsystem TUs.
@@ -157,12 +132,6 @@ FrameStats g_stats;
 
 OcclusionCaches g_caches;  // extern in OcclusionCaches.h
 
-// Visible-geom observers - registered by external consumers (MGE-XE)
-// to receive the MSOC-culled visible set before display() is called.
-static std::vector<VisibleGeomCallback> g_visibleGeomObservers;
-static std::vector<void*> g_visCallbackNodes;   // reused each frame, avoids alloc
-static std::vector<float> g_visCallbackBounds;  // xyzr per node, reused each frame
-
 // ============================================================
 // Frame counters & diagnostic state
 // ============================================================
@@ -170,7 +139,7 @@ static std::vector<float> g_visCallbackBounds;  // xyzr per node, reused each fr
 // File-scope frame counter; incremented once per top-level frame.
 // Used by the drain loop for cache-freshness checks.
 uint32_t g_frameCounter = 0;  // extern in OcclusionInternal.h
-FrameDiag g_diag;  // per-frame + session diagnostics (FrameDiag.h)
+FrameDiag g_diag;             // per-frame + session diagnostics (FrameDiag.h)
 // Cell pointer across frames. Cell change -> wipe g_caches.land and
 // g_caches.drain (NI::Node*/NI::AVObject* recycle in the new cell).
 static TES3::Cell* g_lastCell = nullptr;
@@ -249,7 +218,6 @@ static std::atomic<uint64_t> g_lastFrameEndTimeMs{0};
 // divide for the window average and zero both inside the log block.
 static uint64_t g_prevFrameEndUs = 0;
 
-
 // ============================================================
 // Threadpool state & per-frame config cache
 // ============================================================
@@ -280,23 +248,11 @@ bool g_asyncThisFrame = false;                // extern in OcclusionInternal.h
 // Defined here, declared extern in OcclusionInternal.h (read by QueryApi).
 FrameConfig g_frame;
 
-// Drain-parallel worker pool - DISABLED. Serial drain is the only
-// active path. To re-enable, restore: Configuration::OcclusionParallelDrain
-// (Config.h/.cpp + Lua config/mcm), drainWorkerMain, the worker-pool
-// spawn in installPatches, and the runParallel branch in
-// drainPendingDisplays. Sizing reference: ~840 TestRect/frame in dense
-// scenes, 2-way split (hiZ cache traffic dominates beyond that).
-//
-// constexpr unsigned int kDrainWorkerCount = 2;
-// constexpr size_t kParallelDrainMin = 100;
-// struct DrainWorkerRange { size_t lo; size_t hi; };
-// static std::jthread g_drainWorkers[kDrainWorkerCount];
-// static DrainWorkerRange g_drainRanges[kDrainWorkerCount];
-// static std::mutex g_drainMtx;
-// static std::condition_variable_any g_drainStartCv;
-// static std::condition_variable g_drainDoneCv;
-// static unsigned int g_drainStartTickets = 0;
-// static unsigned int g_drainDoneTickets = 0;
+// The drain runs serially. A parallel drain was built, measured and
+// abandoned; lessons/parallel-drain-lessons-learned.md in the moreFPS docs
+// records why, and is the thing to read before considering it again. The
+// commented-out declarations that used to sit here were a revival checklist
+// for a procedure that is no longer safe to follow, so they are gone.
 
 // ============================================================
 // Forensics watchdog - read accessor
@@ -336,6 +292,11 @@ struct PendingDisplay {
     // from rasterizeTriShape isn't overwritten by Tested/Occluded.
     // TestRect still runs.
     bool rasterisedAsOccluder;
+    // Resolved at deferral, where the traversal has already asked the same
+    // question to decide occluder eligibility. Carrying the answer saves the
+    // drain a hash lookup per occludee per frame, and keeps drain phase 1
+    // read-only against the caches.
+    bool isTerrain;
 };
 static std::vector<PendingDisplay> g_pendingDisplays;
 
@@ -357,8 +318,7 @@ struct PendingOccluder {
 static std::vector<PendingOccluder> g_pendingOccluders;
 
 // Drain phase-1 verdict slots, populated by classifyDrainRange and
-// consumed by phase 2. Phase 1 stays read-only on shared state -
-// prerequisite for moving it to worker threads.
+// consumed by phase 2.
 enum class DrainVerdict : uint8_t {
     Visible,         // VISIBLE; call display()
     Occluded,        // OCCLUDED; skip display (or tint+display in debug)
@@ -440,23 +400,6 @@ static void uploadCameraTransform(NI::Camera* cam) {
 // stable under camera rotation - small-mesh queries don't flicker
 // across TestRect's hiZ thresholds.
 //
-
-// ============================================================
-// Visible-geom observer registration
-// ============================================================
-
-// Dedup on register so DLL reload doesn't double-dispatch. Startup
-// only, not hot path.
-
-void registerVisibleGeomCallback(VisibleGeomCallback cb) {
-    if (!cb) return;
-    if (std::find(g_visibleGeomObservers.begin(), g_visibleGeomObservers.end(), cb) != g_visibleGeomObservers.end()) return;
-    g_visibleGeomObservers.push_back(cb);
-}
-void unregisterVisibleGeomCallback(VisibleGeomCallback cb) {
-    auto it = std::find(g_visibleGeomObservers.begin(), g_visibleGeomObservers.end(), cb);
-    if (it != g_visibleGeomObservers.end()) g_visibleGeomObservers.erase(it);
-}
 
 // ============================================================
 // Occluder rasterisation
@@ -564,7 +507,6 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
         cache.maxX = maxX;
         cache.maxY = maxY;
         cache.maxZ = maxZ;
-        cache.vertexCount = vertexCount;
 
         // Expand 16-bit indices into MSOC's 32-bit list and drop any
         // out-of-bounds entries (Intel's gather would crash).
@@ -636,7 +578,9 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
     }
 
     // VertexLayout(12, 4, 8): stride 12, y@4, z@8 - packed float[3].
-    // Winding from g_frame.occluderWinding. Default BACKFACE_NONE because
+    // Winding from g_frame.occluderWinding, which is BACKFACE_CW whenever
+    // OcclusionOccluderCCWOnly is set - the config's default since 1.4.0. The
+    // struct default below it is BACKFACE_NONE because
     // NIF winding isn't guaranteed consistent; OcclusionOccluderCCWOnly
     // trades the ~1% CW-wound meshes (dropped, safe) for half the raster.
     if (g_asyncThisFrame) {
@@ -645,6 +589,7 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
                                       static_cast<int>(cache.outTriCount),
                                       g_frame.occluderWinding,
                                       ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+        ++g_stats.asyncJobsQueued;
     } else {
         ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
         g_msoc->RenderTriangles(cache.worldVerts.data(), cache.indices.data(),
@@ -654,6 +599,8 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
                                 ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
     }
     g_stats.occluderTriangles += cache.outTriCount;
+    ++g_stats.rasterizedAsOccluder;
+    g_stats.maskHasOccluders = true;
     return true;
 }
 
@@ -679,6 +626,7 @@ static void submitPendingOccluders() {
                                           static_cast<int>(c.outTriCount),
                                           g_frame.occluderWinding,
                                           ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+            ++g_stats.asyncJobsQueued;
         } else {
             ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
             g_msoc->RenderTriangles(c.worldVerts.data(), c.indices.data(),
@@ -688,6 +636,8 @@ static void submitPendingOccluders() {
                                     ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
         }
         g_stats.occluderTriangles += c.outTriCount;
+        ++g_stats.rasterizedAsOccluder;
+        g_stats.maskHasOccluders = true;
     }
     g_pendingOccluders.clear();
 }
@@ -793,8 +743,12 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
                     ++g_stats.skippedStencil;
                 } else {
                     const auto& eye = camera->worldTransform.translation;
+                    // rasterizedAsOccluder is incremented at the submit
+                    // sites, not here: with front-to-back the call below only
+                    // queues, and a budget bail can drop the tail. didRasterise
+                    // stays record-time - the tint marks what was chosen as an
+                    // occluder, which is what a debugger wants to see.
                     if (rasterizeTriShape(static_cast<NI::TriBasedGeometry*>(self), eye, cacheEntry)) {
-                        ++g_stats.rasterizedAsOccluder;
                         didRasterise = true;
                         if (g_frame.tintOccluder) {
                             debugtint::tintOccluder(self);
@@ -802,7 +756,7 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
                     }
                 }
             }
-            g_pendingDisplays.push_back({self, camera, didRasterise});
+            g_pendingDisplays.push_back({self, camera, didRasterise, isTerrainLeaf});
             ++g_stats.deferred;
             restoreIgnoreBits();
             return;
@@ -818,11 +772,15 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
 // Deferred-display drain pipeline
 // ============================================================
 
-// Drain phase 1 - classify [lo, hi) of g_pendingDisplays into
-// g_drainSlots. Read-only on shared state (no g_caches.drain writes,
-// no counter increments except the atomic g_stats.queryNearClip, no
-// display(), no tints) - phase 2 owns all writes. Read-only-ness
-// is what lets this run on workers once parallel dispatch lands.
+// Drain phase 1 - classify [lo, hi) of g_pendingDisplays into g_drainSlots.
+// Phase 2 owns every write to g_caches.drain, the counters, display() and the
+// tints, and the only counter touched here is the atomic g_stats.queryNearClip.
+//
+// One deliberate exception: the occludee box cache inserts here, on miss. It is
+// keyed per geometry and computing an object-space AABB is not something to do
+// twice, so it stays lazy. Phase 1 is therefore "writes nothing phase 2 depends
+// on", not "read-only" - the earlier comment claimed the latter, which was
+// never true.
 // Optional tighter occludee test (OcclusionOccludeeBoxTest). Returns true if
 // the occludee's object-space vertex AABB, transformed to world, reads fully
 // behind the live mask. The object AABB is computed once per geometry and
@@ -854,8 +812,12 @@ static bool occludeeBoxOccluded(NI::AVObject* shape) {
     if (it != g_caches.occludeeBox.end()) {
         if (g_frame.logEnabled) ++g_caches.occludeeBoxHits;
         const auto& e = it->second;
-        mn[0] = e.minX; mn[1] = e.minY; mn[2] = e.minZ;
-        mx[0] = e.maxX; mx[1] = e.maxY; mx[2] = e.maxZ;
+        mn[0] = e.minX;
+        mn[1] = e.minY;
+        mn[2] = e.minZ;
+        mx[0] = e.maxX;
+        mx[1] = e.maxY;
+        mx[2] = e.maxZ;
     } else {
         if (g_frame.logEnabled) ++g_caches.occludeeBoxMisses;
         const unsigned short n = data->getActiveVertexCount();
@@ -873,9 +835,15 @@ static bool occludeeBoxOccluded(NI::AVObject* shape) {
             if (v.z < a[2]) a[2] = v.z;
             if (v.z > b[2]) b[2] = v.z;
         }
-        g_caches.occludeeBox[key] = {a[0], a[1], a[2], b[0], b[1], b[2]};
-        mn[0] = a[0]; mn[1] = a[1]; mn[2] = a[2];
-        mx[0] = b[0]; mx[1] = b[1]; mx[2] = b[2];
+        // `data` is an NI::Pointer, so storing it here is what keeps the key
+        // address alive and unique for as long as the entry exists.
+        g_caches.occludeeBox[key] = {a[0], a[1], a[2], b[0], b[1], b[2], data};
+        mn[0] = a[0];
+        mn[1] = a[1];
+        mn[2] = a[2];
+        mx[0] = b[0];
+        mx[1] = b[1];
+        mx[2] = b[2];
     }
 
     // Transform the 8 object-AABB corners to world via the shape's transform
@@ -944,7 +912,7 @@ static void classifyDrainRange(size_t lo, size_t hi) {
             }
         }
 
-        if (skipTerrainEnabled && isLandscapeDescendant(p.shape, g_worldLandscapeRoot)) {
+        if (skipTerrainEnabled && p.isTerrain) {
             slot.verdict = DrainVerdict::SkipTerrain;
             continue;
         }
@@ -1005,33 +973,6 @@ static void classifyDrainRange(size_t lo, size_t hi) {
     }
 }
 
-// Parallel-drain worker body - DISABLED. See the worker-pool block
-// higher in this file for the re-enable checklist.
-//
-// static void drainWorkerMain(std::stop_token stop, unsigned int workerId) {
-// 	assert(workerId < kDrainWorkerCount);
-//
-// 	while (!stop.stop_requested()) {
-// 		{
-// 			std::unique_lock<std::mutex> lock(g_drainMtx);
-// 			g_drainStartCv.wait(lock, stop, [] {
-// 				return g_drainStartTickets > 0;
-// 				});
-// 			if (stop.stop_requested()) break;
-// 			--g_drainStartTickets;
-// 		}
-//
-// 		const auto range = g_drainRanges[workerId];
-// 		classifyDrainRange(range.lo, range.hi);
-//
-// 		{
-// 			std::lock_guard<std::mutex> lock(g_drainMtx);
-// 			++g_drainDoneTickets;
-// 		}
-// 		g_drainDoneCv.notify_one();
-// 	}
-// }
-
 // Drain the deferred-display queue. Re-tests each entry against the
 // now-complete depth buffer and displays the visible ones. Must run
 // before g_msocActive clears so counters land in this frame's log.
@@ -1042,29 +983,15 @@ static void classifyDrainRange(size_t lo, size_t hi) {
 // loop is the acceptance criterion.
 static void drainPendingDisplays() {
     ScopedUsAccumulator t(g_stats.drainPhaseTimeUs);
-    // Fast path: zero occluders this frame -> depth buffer is cleared
-    // -> every TestRect would return VISIBLE. Skip the loop. Aggregate-
-    // terrain submissions count as occluders too - 40k hill triangles
-    // can still cull deferred leaves.
-    if (g_stats.rasterizedAsOccluder == 0 && g_stats.aggregateTerrainLands == 0) {
-        if (!g_visibleGeomObservers.empty()) {
-            const size_t nFast = g_pendingDisplays.size();
-            g_visCallbackNodes.clear();
-            g_visCallbackBounds.clear();
-            g_visCallbackNodes.reserve(nFast);
-            g_visCallbackBounds.reserve(nFast * 4);
-            for (size_t i = 0; i < nFast; ++i) {
-                const auto& p = g_pendingDisplays[i];
-                g_visCallbackNodes.push_back(p.shape);
-                g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.x);
-                g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.y);
-                g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.z);
-                g_visCallbackBounds.push_back(p.shape->worldBoundRadius);
-            }
-            for (const auto cb : g_visibleGeomObservers)
-                cb(g_visCallbackNodes.data(), g_visCallbackBounds.data(),
-                   (int)g_visCallbackNodes.size());
-        }
+    // Fast path: nothing in the mask this frame -> depth buffer is cleared
+    // -> every TestRect would return VISIBLE. Skip the loop.
+    //
+    // maskHasOccluders is set by every submit path, which is the point of it.
+    // This test used to be "rasterizedAsOccluder == 0 && aggregateTerrainLands
+    // == 0", and the horizon curtain increments neither - so in Horizon mode,
+    // where the curtain is usually the only thing in the mask, the drain
+    // skipped every frame and the curtain culled nothing at all.
+    if (!g_stats.maskHasOccluders) {
         ScopedUsAccumulator tt(g_stats.drainDisplayUs);
         for (const auto& p : g_pendingDisplays) {
             p.shape->vTable.asAVObject->display(p.shape, p.camera);
@@ -1075,74 +1002,18 @@ static void drainPendingDisplays() {
 
     const size_t n = g_pendingDisplays.size();
 
-    // Parallel drain DISABLED. Only the serial classify path
-    // is active. The worker-pool gate, dispatch, and done-barrier are
-    // preserved below as commented reference; see the worker-pool
-    // block higher in this file for the re-enable checklist.
-    //
-    // bool poolReady = true;
-    // for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-    // 	if (!g_drainWorkers[i].joinable()) { poolReady = false; break; }
-    // }
-    // const bool runParallel =
-    // 	Configuration::OcclusionParallelDrain
-    // 	&& n >= kParallelDrainMin
-    // 	&& poolReady;
+    // The drain is serial; see the note beside g_frame for why the
+    // parallel version was abandoned.
 
     // Phase 1: classify (currently serial).
     g_drainSlots.resize(n);
-    // if (runParallel) {
-    // 	g_lastStage = 14;
-    // 	const size_t half = n / 2;
-    // 	g_drainRanges[0] = { 0, half };
-    // 	g_drainRanges[1] = { half, n };
-    // }
 
     const auto classifyT0 = std::chrono::steady_clock::now();
-    // if (runParallel) {
-    // 	{
-    // 		std::lock_guard<std::mutex> lock(g_drainMtx);
-    // 		g_drainStartTickets = kDrainWorkerCount;
-    // 		g_drainDoneTickets = 0;
-    // 	}
-    // 	g_drainStartCv.notify_all();
-    // 	{
-    // 		std::unique_lock<std::mutex> lock(g_drainMtx);
-    // 		g_drainDoneCv.wait(lock, [] {
-    // 			return g_drainDoneTickets >= kDrainWorkerCount;
-    // 			});
-    // 	}
-    // }
-    // else {
     classifyDrainRange(0, n);
-    // }
     g_stats.classifyUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - classifyT0)
             .count());
-
-    // Fire visible-geom callback: give external consumers (e.g. MGE-XE) the exact
-    // set of nodes Morrowind will draw, before any display() calls.
-    if (!g_visibleGeomObservers.empty()) {
-        g_visCallbackNodes.clear();
-        g_visCallbackBounds.clear();
-        g_visCallbackNodes.reserve(n);
-        g_visCallbackBounds.reserve(n * 4);
-        for (size_t i = 0; i < n; ++i) {
-            const auto& s = g_drainSlots[i];
-            if (s.verdict == DrainVerdict::Occluded ||
-                s.verdict == DrainVerdict::CachedOccluded) continue;
-            const auto& p = g_pendingDisplays[i];
-            g_visCallbackNodes.push_back(p.shape);
-            g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.x);
-            g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.y);
-            g_visCallbackBounds.push_back(p.shape->worldBoundOrigin.z);
-            g_visCallbackBounds.push_back(p.shape->worldBoundRadius);
-        }
-        for (const auto cb : g_visibleGeomObservers)
-            cb(g_visCallbackNodes.data(), g_visCallbackBounds.data(),
-               (int)g_visCallbackNodes.size());
-    }
 
     // Shared handler for OCCLUDED verdicts (fresh + cached paths).
     auto handleOccluded = [&](const PendingDisplay& p) {
@@ -1189,7 +1060,6 @@ static void drainPendingDisplays() {
                 if (s.verdict == DrainVerdict::Occluded) {
                     auto& e = g_caches.drain[p.shape];
                     e.shapePtr = p.shape;
-                    e.result = ::MaskedOcclusionCulling::OCCLUDED;
                     e.lastQueryFrame = g_frameCounter;
                     e.boundOriginX = p.shape->worldBoundOrigin.x;
                     e.boundOriginY = p.shape->worldBoundOrigin.y;
@@ -1296,10 +1166,6 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // Latch async mode once per frame so a mid-frame Lua toggle
         // can't split submissions between threadpool and direct MOC.
         g_asyncThisFrame = g_threadpool && Configuration::OcclusionAsyncOccluders;
-        // Mask about to be wiped. Consumers gate on g_maskReady -
-        // clear so mid-frame queries get conservative VISIBLE
-        // instead of reading a partial buffer.
-        g_maskReady = false;
         if (g_asyncThisFrame) {
             // Wake workers ~100us before the first RenderTriangles.
             // ClearBuffer's implicit Flush retires last frame's
@@ -1344,6 +1210,8 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.recursiveFrustumCulled = 0;
         g_stats.rasterizedAsOccluder = 0;
         g_stats.occluderTriangles = 0;
+        g_stats.maskHasOccluders = false;
+        g_stats.asyncJobsQueued = 0;
         g_stats.skippedInside = 0;
         g_stats.skippedThin = 0;
         g_stats.skippedAlpha = 0;
@@ -1354,7 +1222,6 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.boxOccluded = 0;
         g_stats.queryNearClip.store(0, std::memory_order_relaxed);
         g_stats.deferred = 0;
-        g_stats.inlineTested = 0;
         g_stats.skippedTriCount = 0;
         g_stats.skippedTesteeTiny = 0;
         g_stats.skippedSceneGate = 0;
@@ -1385,10 +1252,6 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_caches.landEvictions = 0;
         g_caches.drainHits = 0;
         g_caches.drainMisses = 0;
-        g_caches.lightsTested = 0;
-        g_caches.lightsOccluded = 0;
-        g_caches.lightCullHits = 0;
-        g_caches.lightCullMisses = 0;
         ++g_frameCounter;
         g_lastStage = 5;
         // Age-prune the drain cache. Window 2*N frames - older
@@ -1402,24 +1265,6 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
                 for (auto it = g_caches.drain.begin(); it != g_caches.drain.end();) {
                     if (g_frameCounter - it->second.lastQueryFrame > maxAge) {
                         it = g_caches.drain.erase(it);
-                    } else {
-                        ++it;
-                    }
-                }
-            }
-        }
-        // Age-prune the light cache. Same pattern - transient lights
-        // (spell effects, projectile glows) otherwise accumulate
-        // pinned by their NI::Pointer keys until cell change.
-        {
-            if (!Configuration::OcclusionCullLights) {
-                if (!g_caches.lightCull.empty()) g_caches.lightCull.clear();
-            } else {
-                const uint32_t maxAge =
-                    Configuration::OcclusionLightCullHysteresisFrames * 2;
-                for (auto it = g_caches.lightCull.begin(); it != g_caches.lightCull.end();) {
-                    if (g_frameCounter - it->second.lastQueryFrame > maxAge) {
-                        it = g_caches.lightCull.erase(it);
                     } else {
                         ++it;
                     }
@@ -1457,12 +1302,6 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         }
         g_msocActive = true;
 
-        // External occluder drain. Must run AFTER ClearBuffer (so
-        // it isn't stomped), AFTER uploadCameraTransform (so
-        // g_worldToClip is live for direct-MOC), and BEFORE any
-        // threadpool work queues.
-        drainPendingOccluders();
-
         // Aggregate terrain. Submit merged per-Land occluders so
         // hill silhouettes are in the buffer before non-terrain
         // leaves reach the drain. Individual 25v/32t patches fail
@@ -1497,7 +1336,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // the Flush gate must include it. Otherwise a terrain-only
         // frame would SuspendThreads() with queued work in the
         // ring - suspected cause of a freeze on menu entry.
-        const bool hadAsyncWork = g_asyncThisFrame && (g_stats.rasterizedAsOccluder > 0 || g_stats.aggregateTerrainLands > 0);
+        const bool hadAsyncWork = g_asyncThisFrame && g_stats.asyncJobsQueued > 0;
         if (hadAsyncWork) {
             g_lastStage = 10;
             // Barrier: blocks until every queued RenderTriangles is
@@ -1508,29 +1347,12 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         }
         g_lastStage = 11;
         drainPendingDisplays();
-        // Snapshot swap - hands this frame's completed mask to
-        // external consumers and rotates the ex-prev buffer in as
-        // next frame's write target. After:
-        //   g_msoc_prev = completed mask (external reads)
-        //   g_msoc      = stale, will be cleared next frame
-        // Freshness tick guards against culling against a frozen
-        // mask during pauses / loading / alt-tab.
-        std::swap(g_msoc, g_msoc_prev);
-        // CRITICAL: CullingThreadpool caches the target buffer at
-        // init via SetBuffer; it does NOT follow g_msoc. Without
-        // this re-point, the threadpool keeps rasterising into the
-        // init-time buffer and the snapshot ends up empty every
-        // other frame.
-        if (g_threadpool) {
-            g_threadpool->SetBuffer(g_msoc);
+        // Debug overlay: mirror the finished mask into the engine texture the
+        // HUD element samples. Gated on the MCM toggle, and internally a no-op
+        // until Lua has asked for the texture, so an off overlay pays nothing.
+        if (g_frame.maskOverlay) {
+            updateMaskOverlay();
         }
-        std::memcpy(g_snapshot.worldToClip, g_worldToClip, sizeof(g_worldToClip));
-        g_snapshot.ndcRadiusX = g_ndcRadiusX;
-        g_snapshot.ndcRadiusY = g_ndcRadiusY;
-        g_snapshot.wGradMag = g_wGradMag;
-        g_snapshot.tickMs = GetTickCount64();
-
-        g_maskReady = true;
         if (g_asyncThisFrame) {
             g_lastStage = 12;
             // Workers back to low-overhead sleep until next frame.
@@ -1550,7 +1372,15 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // EMAs for next frame's predictive-skip gate. Samples are
         // MSOC-only - including non-MSOC work would have the gate
         // trigger on vanilla render slowness.
-        g_budget.rasterizeEmaUs = emaUpdate(g_budget.rasterizeEmaUs, g_stats.rasterizeTimeUs);
+        // Async frames pay for rasterization twice over on this thread: the
+        // enqueue, and the Flush barrier waiting for the workers. Sampling only
+        // the enqueue made the EMA read a few hundred microseconds on a frame
+        // that actually cost a millisecond, so predictive skip never tripped
+        // under async no matter how dense the scene. The mid-phase spike clip
+        // still sees main-thread time only - it cannot observe worker time.
+        g_budget.rasterizeEmaUs = emaUpdate(
+            g_budget.rasterizeEmaUs,
+            g_stats.rasterizeTimeUs + (g_asyncThisFrame ? g_diag.asyncFlushTimeUs : 0));
         g_budget.classifyEmaUs = emaUpdate(g_budget.classifyEmaUs, g_stats.classifyUs);
         g_budget.rasterizeBudgetTripsSession += g_budget.rasterizeBudgetTrips;
         g_budget.classifyBudgetTripsSession += g_budget.classifyBudgetTrips;
@@ -1628,8 +1458,6 @@ static void __cdecl renderMainScene_wrapper() {
     debugtint::resetFrameTints();
 }
 
-
-
 // ============================================================
 // Install & public query API
 // ============================================================
@@ -1677,31 +1505,6 @@ void installPatches() {
     // next launch.
     forensics::spawnIfEnabled(log);
 
-    // Drain-parallel worker pool spawn - DISABLED. See the
-    // worker-pool block higher in this file for the re-enable
-    // checklist.
-    //
-    // bool drainPoolStarted = true;
-    // try {
-    // 	for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-    // 		g_drainWorkers[i] = std::jthread(drainWorkerMain, i);
-    // 	}
-    // }
-    // catch (const std::exception& e) {
-    // 	log << "MSOC: drain worker spawn failed: " << e.what()
-    // 		<< "; tearing down partial state, parallel drain disabled."
-    // 		<< std::endl;
-    // 	drainPoolStarted = false;
-    // 	for (unsigned int i = 0; i < kDrainWorkerCount; ++i) {
-    // 		g_drainWorkers[i] = std::jthread{};
-    // 	}
-    // }
-    // if (drainPoolStarted) {
-    // 	log << "MSOC: drain worker pool spawned; workers="
-    // 		<< kDrainWorkerCount
-    // 		<< " (gated by OcclusionParallelDrain)." << std::endl;
-    // }
-
     // 5-byte prologue overwrite - we reimplement the body end-to-end
     // so no trampoline is needed. Replaces the previous 7-call-site
     // patch (equivalent coverage; all 7 direct callers land here).
@@ -1729,120 +1532,6 @@ void installPatches() {
     log << "MSOC: CullShow detour installed at 0x6EB480; wrapped "
         << renderMainSceneInstalled << " / 3 renderMainScene call sites ("
         << kMsocWidth << "x" << kMsocHeight << " tile buffer)." << std::endl;
-
-    // Replaces the 6-byte `mov al, [ebx+NiLight.super.enabled]` at
-    // 0x6bb7d4 with `call shouldLightBeEnabled; nop`. Installed
-    // unconditionally; the detour short-circuits when the feature
-    // is off or MSOC failed to init.
-    se::memory::genCallUnprotected(0x6bb7d4,
-                                   reinterpret_cast<DWORD>(updateLights_enabledRead_hook), 6);
-    log << "MSOC: light cull hook installed at 0x6bb7d4 (gated by "
-        << "Configuration::OcclusionCullLights, default off)." << std::endl;
-}
-
-// Drain external occluders into g_msoc. Must run AFTER
-// uploadCameraTransform (g_worldToClip valid) and BEFORE threadpool
-// work starts (no race on the shared MOC instance). Uses the direct
-// path - submissions are small enough that serializing on the main
-// thread is fine, and it keeps the threadpool's single-matrix
-// invariant intact for native occluders.
-
-bool dumpOcclusionMask(const char* path) {
-    if (path == nullptr) {
-        log::getLog() << "MSOC dump: null path" << std::endl;
-        return false;
-    }
-    if (!isOcclusionMaskReady()) {
-        const unsigned long long ageMs = g_snapshot.tickMs
-                                             ? (GetTickCount64() - g_snapshot.tickMs)
-                                             : 0;
-        log::getLog() << "MSOC dump: mask not ready (snapshotTick="
-                      << g_snapshot.tickMs << ", ageMs=" << ageMs
-                      << ", prevPtr=" << (g_msoc_prev ? "ok" : "null") << ")" << std::endl;
-        return false;
-    }
-
-    // Reads the SNAPSHOT. ComputePixelDepthBuffer takes a caller-
-    // owned float[width*height].
-    std::vector<float> depth(static_cast<size_t>(kMsocWidth) * kMsocHeight, 0.0f);
-    g_msoc_prev->ComputePixelDepthBuffer(depth.data(), /*flipY*/ true);
-
-    // Diagnostic: dump the LIVE buffer alongside the snapshot -
-    // lets us tell whether native occluders end up in the raster
-    // target but not the swapped snapshot (would imply a broken
-    // swap contract). Saved with "_live" suffix.
-    if (g_msoc) {
-        std::vector<float> liveDepth(static_cast<size_t>(kMsocWidth) * kMsocHeight, 0.0f);
-        g_msoc->ComputePixelDepthBuffer(liveDepth.data(), /*flipY*/ true);
-
-        // Normalize live copy (same tone-map as snapshot below)
-        float lMinPos = FLT_MAX, lMaxPos = -FLT_MAX;
-        int lPosCount = 0;
-        for (float v : liveDepth) {
-            if (v > 0.0f) {
-                ++lPosCount;
-                if (v < lMinPos) lMinPos = v;
-                if (v > lMaxPos) lMaxPos = v;
-            }
-        }
-        const float lRange = (lPosCount > 0 && lMaxPos > lMinPos) ? (lMaxPos - lMinPos) : 1.0f;
-        for (float& v : liveDepth) {
-            if (v <= 0.0f)
-                v = 0.0f;
-            else
-                v = 0.2f + 0.8f * ((v - lMinPos) / lRange);
-        }
-
-        char livePath[512];
-        std::snprintf(livePath, sizeof(livePath), "%s_live.pfm", path);
-        if (FILE* fl = std::fopen(livePath, "wb")) {
-            std::fprintf(fl, "Pf\n%u %u\n-1.0\n", kMsocWidth, kMsocHeight);
-            std::fwrite(liveDepth.data(), sizeof(float), liveDepth.size(), fl);
-            std::fclose(fl);
-            log::getLog() << "MSOC: live mask also dumped to " << livePath
-                          << " (occluderPx=" << lPosCount
-                          << " rawRange=[" << lMinPos << ".." << lMaxPos << "])" << std::endl;
-        }
-    }
-
-    // Tone-map for [0, 1] viewers. MOC writes -1.0 for unwritten
-    // tiles and tiny positive 1/w for occluder depth - both
-    // collapse to black under auto-stretch. Remap unwritten -> 0,
-    // occluder -> [0.2, 1.0] (lightest = nearest). Raw stats stay
-    // in the log line so tooling has exact numbers.
-    float minPos = FLT_MAX, maxPos = -FLT_MAX;
-    int posCount = 0;
-    for (float v : depth) {
-        if (v > 0.0f) {
-            ++posCount;
-            if (v < minPos) minPos = v;
-            if (v > maxPos) maxPos = v;
-        }
-    }
-    const float range = (posCount > 0 && maxPos > minPos) ? (maxPos - minPos) : 1.0f;
-    for (float& v : depth) {
-        if (v <= 0.0f) {
-            v = 0.0f;
-        } else {
-            v = 0.2f + 0.8f * ((v - minPos) / range);
-        }
-    }
-
-    FILE* f = std::fopen(path, "wb");
-    if (!f) {
-        log::getLog() << "MSOC dump: fopen failed for '" << path
-                      << "' errno=" << errno << std::endl;
-        return false;
-    }
-    std::fprintf(f, "Pf\n%u %u\n-1.0\n", kMsocWidth, kMsocHeight);
-    std::fwrite(depth.data(), sizeof(float), depth.size(), f);
-    std::fclose(f);
-
-    log::getLog() << "MSOC: occlusion mask dumped to " << path
-                  << " (" << kMsocWidth << "x" << kMsocHeight
-                  << ", occluderPx=" << posCount
-                  << ", rawRange=[" << minPos << ".." << maxPos << "])" << std::endl;
-    return true;
 }
 
 }  // namespace msoc::patch::occlusion

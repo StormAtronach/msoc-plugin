@@ -55,3 +55,11 @@ Summary of changes:
 The original Apache 2.0 copyright headers in each source file are
 preserved unchanged. A short "Modified by" notice has been added below
 the original header in each file we changed, per Apache 2.0 §4(b).
+
+- AVX-512 support is not compiled. `MaskedOcclusionCullingAVX512.cpp` is left out
+  of the build and the two references to `MaskedOcclusionCullingAVX512` in
+  `MaskedOcclusionCulling.cpp` (the extern declaration and the `impl >= AVX512`
+  dispatch branch) are wrapped in `#if USE_AVX512 != 0`. Upstream already
+  defaults `USE_AVX512` to 0, which makes that translation unit a stub returning
+  nullptr, so this is a build-time removal of dead code and not a behaviour
+  change. msoc-plugin additionally requests `Create(AVX2)` explicitly.

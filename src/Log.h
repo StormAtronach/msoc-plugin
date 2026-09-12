@@ -1,34 +1,22 @@
 #pragma once
 
 // Plugin-local logger. Output goes to MSOC.log next to Morrowind.exe
-// (separate file from MWSE.log to avoid contention). API mirrors MWSE's
-// Log.h so existing `log::getLog() << ...` call sites carry over.
+// (separate file from MWSE.log to avoid contention). Call sites read
+// `log::getLog() << ...`, matching MWSE's own Log.h.
 //
-// std::endl does not force a flush - the underlying filebuf has a 64KB
-// buffer and a no-op sync(). Call msoc::log::flush() at safe sync points
-// or rely on atexit for clean exit.
+// getLog() opens the file lazily on first use and an atexit handler flushes
+// it, so there is nothing to open or close by hand. std::endl does not force
+// a flush - the underlying filebuf has a 64KB buffer and a no-op sync() - so
+// call flush() at a safe sync point when the process may not exit cleanly.
+// A harness that kills the game needs it; msoc.flushLog() exposes it to Lua.
+//
+// 1.6.0 removed OpenLog, CloseLog, getDebug and prettyDump, none of which had
+// callers, and the first two of which did not describe the lifecycle above.
 
 #include <iosfwd>
 
 namespace msoc::log {
-void OpenLog(const char* path);
-void CloseLog();
-
 std::ostream& getLog();
-std::ostream& getDebug();  // alias for getLog
 
 void flush();
-
-void prettyDump(const void* data, const size_t length);
-void prettyDump(const void* data, const size_t length, std::ostream& output);
-
-template <class T>
-void prettyDump(const T* data) {
-    prettyDump(data, sizeof(T));
-};
-
-template <class T>
-void prettyDump(const T* data, std::ostream& output) {
-    prettyDump(data, sizeof(T), output);
-};
 }  // namespace msoc::log

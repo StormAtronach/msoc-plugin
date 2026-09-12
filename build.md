@@ -26,9 +26,24 @@ rule — copy it into your Morrowind install at
 ## MWSE source pairing
 
 The plugin compiles against MWSE engine headers. **`CMakeLists.txt`
-defaults `MWSE_ROOT` to the vendored snapshot at `deps/mwse-upstream/`** —
-a pinned, known-good commit that's immune to upstream drift. This is the
-safe default and should build cleanly out of the box.
+defaults `MWSE_ROOT` to the vendored snapshot at `deps/mwse-upstream/`.**
+This is the safe default and should build cleanly out of the box.
+
+It is a submodule, not a frozen snapshot. The 1.6.0 commit moves the recorded
+pointer forward to the MWSE commit this release was built and verified against,
+so `git submodule update --init` gives you exactly that. Two things to know:
+
+- **Check the pointer before blaming your own change.** `git submodule status`
+  prints a leading `+` when the working tree sits somewhere other than the
+  recorded commit. If it does, a build failure may have nothing to do with what
+  you edited.
+- **Upstream additions can break the build**, because SharedSE is compiled
+  through a glob rather than an explicit file list. That is how MWSE's
+  cross-app crash logger arrived: it formats through fmtlib and expects the
+  consuming project's PCH to provide it, which this project has no reason to.
+  `CMakeLists.txt` filters `CrashLog*.cpp` out of the glob for exactly that
+  reason, and the filter is a no-op against an older pin, so it costs nothing
+  and survives drift in either direction.
 
 If you point `MWSE_ROOT` at a sibling MWSE checkout (e.g. you're
 developing both repos in parallel), it must be on a branch carrying the

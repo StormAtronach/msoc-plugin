@@ -26,6 +26,15 @@ struct FrameStats {
     // Occluder rasterization.
     uint64_t rasterizedAsOccluder = 0;
     uint64_t occluderTriangles = 0;
+    // Set by every path that submits triangles into the mask: per-instance
+    // occluders, aggregate terrain, and the horizon curtain. The drain's
+    // fast path used to infer this from the two counters below, which the
+    // curtain does not touch, so a Horizon-mode frame tested nothing.
+    bool maskHasOccluders = false;
+    // Threadpool submits only. The Flush barrier is worth paying for only if
+    // something was actually queued; a front-to-back frame that recorded
+    // occluders and then bailed on budget has queued nothing.
+    uint64_t asyncJobsQueued = 0;
     uint64_t skippedInside = 0;
     uint64_t skippedThin = 0;
     uint64_t skippedAlpha = 0;
@@ -38,7 +47,6 @@ struct FrameStats {
     uint64_t boxOccluded = 0;  // sphere VISIBLE but tighter box test culled it
     std::atomic<uint64_t> queryNearClip{0};
     uint64_t deferred = 0;
-    uint64_t inlineTested = 0;
     uint64_t skippedTriCount = 0;
     uint64_t skippedTesteeTiny = 0;
     uint64_t skippedSceneGate = 0;

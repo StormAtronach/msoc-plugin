@@ -52,7 +52,6 @@ void emitPerFrameStatsLine() {
                       << " viewCulled=" << g_stats.queryViewCulled
                       << " nearClip=" << g_stats.queryNearClip.load(std::memory_order_relaxed)
                       << " deferred=" << g_stats.deferred
-                      << " inlineTested=" << g_stats.inlineTested
                       << " recursive=" << g_stats.recursiveCalls
                       << " appCulled=" << g_stats.recursiveAppCulled
                       << " frustumCulled=" << g_stats.recursiveFrustumCulled
@@ -87,13 +86,6 @@ void emitPerFrameStatsLine() {
                       << " landCacheHit=" << g_caches.landHits
                       << " landCacheMiss=" << g_caches.landMisses
                       << " landCacheEvict=" << g_caches.landEvictions
-                      // Light-cull A/B counters. lightCullMiss == lightsTested
-                      // (every miss runs the MSOC test); kept separate for
-                      // symmetry with other *Hit/Miss pairs.
-                      << " lightCullHit=" << g_caches.lightCullHits
-                      << " lightCullMiss=" << g_caches.lightCullMisses
-                      << " lightOccluded=" << g_caches.lightsOccluded
-                      << " lightCacheSize=" << g_caches.lightCull.size()
                       // Average per-frame time across this sample window.
                       // 1e6 / avgFrameUs = average FPS. Reset right after.
                       << " avgFrameUs=" << (g_diag.windowFrameCount ? (g_diag.windowFrameTimeUs / g_diag.windowFrameCount) : 0)

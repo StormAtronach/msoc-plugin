@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 project(msoc-plugin LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -60,7 +60,9 @@ if(MSOC_BUILD_DLL)
     set(MOC_SOURCES
         "${CMAKE_SOURCE_DIR}/deps/msoc/MaskedOcclusionCulling.cpp"
         "${CMAKE_SOURCE_DIR}/deps/msoc/MaskedOcclusionCullingAVX2.cpp"
-        "${CMAKE_SOURCE_DIR}/deps/msoc/MaskedOcclusionCullingAVX512.cpp"
+        # MaskedOcclusionCullingAVX512.cpp is deliberately not built. Intel's
+        # USE_AVX512 defaults to 0, so it compiles to a stub that returns
+        # nullptr and the runtime never selects it. See deps/msoc/NOTICE.
         "${CMAKE_SOURCE_DIR}/deps/msoc/CullingThreadpool.cpp"
     )
 
@@ -74,6 +76,15 @@ if(MSOC_BUILD_DLL)
     # sets; SE_USE_LUA / SE_IS_MWSE left off) drives the engine-address thunks
     # and gates out the Lua / MWSE-private surface. MemoryUtil.cpp is in here too.
     file(GLOB SHAREDSE_SOURCES CONFIGURE_DEPENDS "${MWSE_ROOT}/SharedSE/*.cpp")
+
+    # MWSE added a cross-app crash logger to SharedSE after this project's
+    # pinned commit. CrashLog*.cpp format through fmtlib and expect the
+    # consuming project to supply it via its PCH (MWSE proper does). The
+    # plugin has no crash logger and no fmt in stdafx.h, and the files are
+    # self-contained - nothing else in SharedSE references them - so drop
+    # them from the glob. No-op against the pinned commit, which predates
+    # them; keeps the build green when MWSE_ROOT points at a newer checkout.
+    list(FILTER SHAREDSE_SOURCES EXCLUDE REGEX "/CrashLog[^/]*\.cpp$")
 
     add_library(msoc SHARED
         src/plugin.cpp
@@ -92,24 +103,18 @@ if(MSOC_BUILD_DLL)
         # forensics::captureSnapshot() defined in OcclusionPass.cpp.
         src/ForensicsWatchdog.cpp
         src/OcclusionPass.cpp
-        # Out-of-tree mask query API (testOcclusion*, snapshot accessors).
-        # Reads the shared snapshot state via OcclusionInternal.h.
-        src/QueryApi.cpp
-        # CPU light culling (updateLights enabled-read hook + observers).
-        src/LightCulling.cpp
         # Terrain occluder aggregation (Raster + Horizon modes).
         src/TerrainAggregation.cpp
         # MSOC mask buffer + threadpool lifecycle (create/destroy/reconcile).
         src/MaskResources.cpp
         # Per-frame diagnostic stats-line logging (cold path).
         src/DiagnosticsLog.cpp
+        # Debug mask overlay: mirrors the finished mask into an engine texture
+        # for the Lua HUD element, and owns the PFM dump.
+        src/MaskOverlay.cpp
         # Leaf helpers extracted to break the core<->subsystem cycle:
         src/LiveQuery.cpp          # live sphere-vs-mask query
         src/OccluderClassify.cpp   # ancestor alpha/stencil classification
-        src/ExternalOccluders.cpp  # MGE-XE consumer occluder-injection feature
-        # C-ABI exports (mwse_* thunks) for out-of-tree consumers; split out
-        # of the patch TU. Forward to the msoc::patch::occlusion public API.
-        src/Exports.cpp
         # Local forwarders for the NI/TES3 engine methods the patch calls.
         # UIE-style: each body is a one-liner reinterpret_cast to a fixed
         # Morrowind.exe address. Pure engine thunks, no MWSE runtime dep.
@@ -136,11 +141,6 @@ if(MSOC_BUILD_DLL)
         "${CMAKE_SOURCE_DIR}/deps/msoc/MaskedOcclusionCullingAVX2.cpp"
         PROPERTIES COMPILE_OPTIONS "/arch:AVX2"
     )
-    set_source_files_properties(
-        "${CMAKE_SOURCE_DIR}/deps/msoc/MaskedOcclusionCullingAVX512.cpp"
-        PROPERTIES COMPILE_OPTIONS "/arch:AVX512"
-    )
-
     # Include paths:
     #   1. mwse-upstream/MWSE/    - engine struct mirrors (NI*.h, TES3*.h),
     #                              served verbatim from upstream MWSE.

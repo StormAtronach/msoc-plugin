@@ -7,6 +7,9 @@
 #include <thread>
 
 #include "Config.h"
+#include "HardwareTier.h"
+#include "Log.h"
+#include "MaskOverlay.h"
 #include "MaskedOcclusionCulling.h"
 #include "OcclusionApi.h"
 
@@ -43,9 +46,11 @@ struct ProbeResult {
 // Create + exercise + destroy. Catches AVX2 link failures at load instead of
 // at first patch use.
 //
-// AVX512 is intentionally disabled (known issues) by capping RequestedSIMD at
-// AVX2 here and at both buffer allocations in MaskResources.cpp. Revisit:
-// re-enable by removing the AVX2 cap (Create() defaults to AVX512).
+// Asking for AVX2 documents intent; it does not gate anything. As of 1.6.0 the
+// AVX-512 translation unit is not compiled at all and the dispatch branch is
+// preprocessed out (deps/msoc/NOTICE), so Create() has no AVX-512 path to
+// return. Re-enabling it means restoring the TU to MOC_SOURCES and setting
+// Intel's USE_AVX512, not removing this argument.
 ProbeResult probeMocLink() {
     auto* moc = MaskedOcclusionCulling::Create(MaskedOcclusionCulling::AVX2);
     if (!moc) return {"Create() returned null", -1};
@@ -76,6 +81,72 @@ ProbeResult probeMocLink() {
     }
 }
 
+// msoc.maskOverlayTexture() -> integer address of the NI::SourceTexture
+// mirroring the occlusion mask, or 0 if it is not available yet. Lua turns
+// the address back into a usertype with mwse.memory.convertTo.niObject and
+// assigns it to a UI image element's texture. Creating the texture on the
+// first call is also what arms the per-frame refresh.
+int maskOverlayTexture_lua(lua_State* L) {
+    void* tex = msoc::patch::occlusion::maskOverlayTexture();
+    lua_pushnumber(L, static_cast<lua_Number>(reinterpret_cast<uintptr_t>(tex)));
+    return 1;
+}
+
+// msoc.dumpMask(path) -> bool. Tone-mapped PFM of the finished mask.
+// Replaces the mwse_dumpOcclusionMask export removed in 1.6.0.
+int dumpMask_lua(lua_State* L) {
+    const char* path = luaL_checkstring(L, 1);
+    const bool ok = msoc::patch::occlusion::dumpMaskToPfm(path);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+// msoc.maskResolution() -> width, height. The size actually latched at
+// install, which may differ from msoc.json after rounding and clamping.
+int maskResolution_lua(lua_State* L) {
+    int w = 0, h = 0;
+    msoc::patch::occlusion::maskResolution(&w, &h);
+    lua_pushnumber(L, static_cast<lua_Number>(w));
+    lua_pushnumber(L, static_cast<lua_Number>(h));
+    return 2;
+}
+
+// msoc.flushLog() - force MSOC.log to disk. The log uses a 64KB buffer with a
+// no-op sync (see Log.cpp), so a run that ends in a kill rather than a clean
+// exit loses its tail. Any harness that reads the log after killing the game
+// needs this first.
+int flushLog_lua(lua_State*) {
+    msoc::log::flush();
+    return 0;
+}
+// msoc.logMark(text) - write a marker line into MSOC.log and flush. Lets a
+// harness bracket the region of the log that belongs to its sample window,
+// so stats lines emitted before the run's config was applied are not counted.
+int logMark_lua(lua_State* L) {
+    const char* text = luaL_checkstring(L, 1);
+    msoc::log::getLog() << "MSOC MARK " << text << std::endl;
+    msoc::log::flush();
+    return 0;
+}
+// msoc.install() - install the engine hooks. Separate from luaopen_msoc so
+// main.lua can push msoc.json across first: installPatches() latches the
+// restart-only knobs (mask resolution, forensics watchdog) as it runs, and
+// before 1.6.0 it ran during include(), when Configuration:: still held
+// compile-time defaults. Idempotent; MWSE's include() can load the same DLL
+// twice across Lua states.
+//
+// IMPORTANT: assumes MWSE's own MSOC patch is NOT compiled into MWSE.dll. If
+// it is, both patchers collide on the same Morrowind.exe addresses
+// (0x6EB480, 0x41C08E, 0x42E655, 0x4B50FF).
+int install_lua(lua_State*) {
+    static bool s_installed = false;
+    if (!s_installed) {
+        s_installed = true;
+        msoc::patch::occlusion::installPatches();
+    }
+    return 0;
+}
+
 const char* simdLevelName(int impl) {
     switch (impl) {
         case MaskedOcclusionCulling::SSE2:
@@ -96,34 +167,32 @@ const char* simdLevelName(int impl) {
 extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     lua_newtable(L);
 
-    // Probe + classify before installPatches() so the threadpool's first
-    // createMSOCResources() reads tier-adjusted Configuration:: values
-    // rather than the module-init defaults. The Lua side's
-    // cfg.syncToNative(msoc) call later overwrites these from msoc.json
-    // if present (saved user values are sticky).
+    // Probe and classify only. The tier is reported to Lua, which owns the
+    // table of knobs it implies and pushes them back through configure()
+    // before calling msoc.install().
     const auto probe = probeMocLink();
     const unsigned hwConcurrency = std::thread::hardware_concurrency();
     const auto tier = msoc::classifyHardwareTier(probe.impl, hwConcurrency);
-    msoc::applyHardwareTierDefaults(tier);
 
-    setStringField(L, "version", "1.4.0");
+    setStringField(L, "version", "1.6.0-dev");
     setStringField(L, "mocLink", probe.linkText);
     setStringField(L, "simdLevel", simdLevelName(probe.impl));
     setStringField(L, "hardwareTier", msoc::hardwareTierName(tier));
     setNumberField(L, "cpuThreads", static_cast<lua_Number>(hwConcurrency));
     setCFunctionField(L, "configure", &msoc::configure);
+    setCFunctionField(L, "install", &install_lua);
+    setCFunctionField(L, "maskOverlayTexture", &maskOverlayTexture_lua);
+    setCFunctionField(L, "dumpMask", &dumpMask_lua);
+    setCFunctionField(L, "maskResolution", &maskResolution_lua);
+    setCFunctionField(L, "flushLog", &flushLog_lua);
+    setCFunctionField(L, "logMark", &logMark_lua);
 
-    // Install the occlusion patches exactly once. MWSE's include() can
-    // load the same DLL twice across Lua states; guard with a static.
-    //
-    // IMPORTANT: assumes MWSE's own MSOC patch is NOT compiled into
-    // MWSE.dll. If it is, both patchers collide on the same Morrowind.exe
-    // addresses (0x6EB480, 0x41C08E, 0x42E655, 0x4B50FF, 0x6BB7D4).
-    static bool s_installed = false;
-    if (!s_installed) {
-        s_installed = true;
-        msoc::patch::occlusion::installPatches();
-    }
+    // No installPatches() here. main.lua calls msoc.install() once it has
+    // pushed msoc.json; until then the plugin is loaded but inert. A log
+    // reading "plugin loaded" with no later "installing occlusion patches"
+    // means main.lua is older than the DLL.
+    msoc::log::getLog() << "MSOC: loaded, awaiting msoc.install() from main.lua."
+                        << std::endl;
 
     return 1;
 }

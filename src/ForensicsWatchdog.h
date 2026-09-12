@@ -36,9 +36,9 @@ const char* stageName(uint32_t stage);
 
 // Spawn the detached watchdog thread when
 // Configuration::OcclusionForensicsWatchdog is true. No-op otherwise.
-// Restart-only - installPatches runs from luaopen_msoc before Lua's
-// first msoc.configure() call, so the gate reflects C++/tier defaults
-// at startup, not the user's most recent MCM edit.
+// Read once, at install. Since 1.6.0 main.lua calls msoc.install() after
+// pushing msoc.json, so the gate reflects the saved value; an MCM edit made
+// during the session takes effect on the next launch.
 void spawnIfEnabled(std::ostream& log);
 
 }  // namespace msoc::patch::occlusion::forensics

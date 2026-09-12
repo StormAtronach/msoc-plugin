@@ -58,7 +58,7 @@ return {
         .. "box. The sphere is conservative for long or flat meshes, so the box can "
         .. "catch occlusions the sphere misses, raising the cull rate. The box is "
         .. "computed once per mesh and cached. Costs an extra projection only on "
-        .. "occludees the sphere left visible. Default off; enable to A/B test.",
+        .. "occludees the sphere left visible.",
 
     ["OcclusionAggregateTerrain.label"] = "Terrain occluder mode",
     ["OcclusionAggregateTerrain.description"] = "Off: no terrain in the occlusion mask "
@@ -148,9 +148,9 @@ return {
         .. "rasteriser can reject the parts of far occluders already hidden by near ones, cutting "
         .. "raster work in scenes where occluders overlap in depth. The catch: occluders can only "
         .. "be submitted after the whole scene is walked, which on multi-core setups gives up the "
-        .. "overlap between walking the scene and rasterising in the background. A clear win on "
-        .. "single-threaded (low-tier) setups; on multi-core, compare rasterize/async-flush timing "
-        .. "in the log with it on vs off before keeping it. Default off.",
+        .. "overlap between walking the scene and rasterising in the background. Measured in two "
+        .. "dense cities for 1.6.0 it changed frame time by less than the noise either way, with "
+        .. "or without async, so there is no reason to move it unless your own numbers say so.",
 
     ["OcclusionOccluderCCWOnly.label"] = "Cull back faces (CCW only)",
     ["OcclusionOccluderCCWOnly.description"] = "Rasterise only counter-clockwise (front) "
@@ -159,8 +159,10 @@ return {
         .. "a rare clockwise-wound mesh is simply dropped from the occlusion mask. That can "
         .. "only under-occlude (the object behind it stays visible) and never hides something "
         .. "that should be drawn. Applies to all occluders - cell meshes, terrain, the "
-        .. "horizon curtain, and external occluders. Default off (both faces rasterised, "
-        .. "correct regardless of winding); enable to A/B test the throughput gain.",
+        .. "horizon curtain and aggregated terrain. Worth about 0.4 ms per frame in a dense "
+        .. "city when occluders rasterise on the main thread, which is how the low-tier preset "
+        .. "runs; with async on, the saving lands on a worker and does not show in frame time. "
+        .. "Turn it off only if you suspect a mis-wound mesh is failing to occlude.",
 
     -- ----------------------------------------------------------------
     -- Occludee page
@@ -204,6 +206,9 @@ return {
     -- ----------------------------------------------------------------
     -- Debug page
     -- ----------------------------------------------------------------
+    ["DebugMaskOverlay.label"] = "Show occlusion mask overlay",
+    ["DebugMaskOverlay.description"] = "Draws the occlusion depth mask itself in the top-right corner of the HUD, the way MGE-XE can show its shadow layers. Brighter means nearer: black is empty mask, and every lit region is geometry that was rasterised as an occluder. Use it to see what the culler is actually working from - combined with the occluder tint below, bright patches in the corner should line up with the tinted meshes in the world. Costs one mask readback per frame while it is on and nothing at all while it is off.",
+
     ["DebugOcclusionTintOccluder.label"] = "Tint occluders yellow",
     ["DebugOcclusionTintOccluder.description"] = "Overlays a yellow emissive tint on every "
         .. "mesh rasterised as an occluder. Use to check which meshes qualify under the "
@@ -240,6 +245,6 @@ return {
         .. "MWSE.log. If the game hard-freezes and Windows kills it, the file shows which "
         .. "stage the main thread was stuck in, the recursion depth, and the time since the "
         .. "last clean frame. Diagnostic-only — leave off unless you are reproducing a freeze. "
-        .. "RESTART REQUIRED: this toggle is read once when the plugin loads; changes here are "
-        .. "saved to msoc.json but only take effect on the next launch.",
+        .. "RESTART REQUIRED: the plugin reads this once while starting up, so a change made "
+        .. "here is saved to msoc.json and takes effect the next time you launch.",
 }

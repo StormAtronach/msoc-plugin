@@ -1,6 +1,6 @@
-// MSOC mask resource lifecycle: allocate / free the live + snapshot MOC
-// buffers and the culling threadpool, and reconcile them against the
-// EnableMSOC gate. Not hot-path (install / MCM toggle / create-failure).
+// MSOC mask resource lifecycle: allocate / free the MOC mask buffer and the
+// culling threadpool, and reconcile them against the EnableMSOC gate.
+// Not hot-path (install / MCM toggle / create-failure).
 // Split from OcclusionPass.cpp; shared state via OcclusionInternal.h.
 
 #include "OcclusionInternal.h"
@@ -14,16 +14,24 @@
 
 namespace msoc::patch::occlusion {
 
+// Set when a threadpool was considered and deliberately not built (one usable
+// worker). Without it the reconciler re-runs the whole decision every frame,
+// because it only early-outs on a pool that exists, and re-logs the refusal -
+// tens of megabytes of identical lines over a session on a dual-core machine.
+// Cleared in destroyMSOCResources so an MCM toggle re-evaluates.
+static bool s_threadpoolDeclined = false;
+
 // Allocate g_msoc + g_threadpool. Idempotent. Returns false on
 // allocation failure (callers treat as permanent disable). Called
 // from installPatches at startup and from the detour's ensure-helper
 // on MCM toggle-on.
 bool createMSOCResources(std::ostream& log) {
-    if (g_msoc && g_threadpool) return true;
+    if (g_msoc && (g_threadpool || s_threadpoolDeclined)) return true;
 
     if (!g_msoc) {
-        // AVX2 cap: AVX512 is intentionally disabled (known issues). See the
-        // probe in plugin.cpp. Revisit to re-enable (Create() defaults to AVX512).
+        // Documents intent; it does not gate anything. The AVX-512 TU is not
+        // built at all as of 1.6.0 (see deps/msoc/NOTICE), so Create() cannot
+        // return an AVX-512 implementation even when asked.
         g_msoc = ::MaskedOcclusionCulling::Create(::MaskedOcclusionCulling::AVX2);
         if (!g_msoc) {
             log << "MSOC: MaskedOcclusionCulling::Create() returned null; occlusion disabled." << std::endl;
@@ -31,24 +39,6 @@ bool createMSOCResources(std::ostream& log) {
         }
         g_msoc->SetResolution(kMsocWidth, kMsocHeight);
         g_msoc->SetNearClipPlane(kNearClipW);
-    }
-
-    if (!g_msoc_prev) {
-        // Snapshot buffer - external consumers read this. Same config
-        // as g_msoc so the drain-complete swap preserves rasterizer
-        // state. Pre-cleared so the first query (before any frame
-        // has completed) sees a defined all-far mask. AVX2 cap (AVX512 off).
-        g_msoc_prev = ::MaskedOcclusionCulling::Create(::MaskedOcclusionCulling::AVX2);
-        if (!g_msoc_prev) {
-            log << "MSOC: snapshot buffer Create() returned null; occlusion disabled." << std::endl;
-            ::MaskedOcclusionCulling::Destroy(g_msoc);
-            g_msoc = nullptr;
-            return false;
-        }
-        g_msoc_prev->SetResolution(kMsocWidth, kMsocHeight);
-        g_msoc_prev->SetNearClipPlane(kNearClipW);
-        g_msoc_prev->ClearBuffer();
-        g_snapshot.tickMs = 0;
     }
 
     if (!g_threadpool) {
@@ -106,6 +96,7 @@ bool createMSOCResources(std::ostream& log) {
                    " Set OcclusionThreadpoolThreadCount=2+ to override."
                 << std::endl;
             g_threadpool = nullptr;
+            s_threadpoolDeclined = true;
             return true;
         }
 
@@ -152,6 +143,9 @@ bool createMSOCResources(std::ostream& log) {
 // false). Threadpool dtor joins all workers - bounded but blocking,
 // up to a few ms.
 void destroyMSOCResources(std::ostream& log) {
+    // Unconditional: a toggle off/on must re-evaluate the pool decision even
+    // if there was nothing left to free.
+    s_threadpoolDeclined = false;
     if (!g_msoc && !g_threadpool) return;
 
     if (g_threadpool) {
@@ -162,19 +156,10 @@ void destroyMSOCResources(std::ostream& log) {
         ::MaskedOcclusionCulling::Destroy(g_msoc);
         g_msoc = nullptr;
     }
-    if (g_msoc_prev) {
-        ::MaskedOcclusionCulling::Destroy(g_msoc_prev);
-        g_msoc_prev = nullptr;
-    }
-    g_snapshot.tickMs = 0;
     // Release NI::Pointer refcounts on every cached static, drop the
     // world-vert/index buffers; re-enable rebuilds from scratch.
     g_caches.occluder.clear();
-    // External occluder queue: drop pending submissions so re-enable
-    // doesn't replay stale ones against the fresh mask.
-    clearExternalOccluderQueue();
     g_asyncThisFrame = false;
-    g_maskReady = false;
 
     log << "MSOC: resources freed (threadpool joined, mask buffer destroyed)." << std::endl;
 }

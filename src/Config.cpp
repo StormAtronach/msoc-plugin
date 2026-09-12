@@ -12,6 +12,7 @@ bool Configuration::EnableMSOC = true;
 bool Configuration::DebugOcclusionTintOccluded = false;
 bool Configuration::DebugOcclusionTintTested = false;
 bool Configuration::DebugOcclusionTintOccluder = false;
+bool Configuration::DebugMaskOverlay = false;
 
 float Configuration::OcclusionOccluderRadiusMinInterior = 128.0f;
 float Configuration::OcclusionOccluderRadiusMinExterior = 256.0f;
@@ -31,9 +32,8 @@ bool Configuration::OcclusionOccludeeBoxTest = false;
 bool Configuration::OcclusionEnableInterior = true;
 bool Configuration::OcclusionEnableExterior = true;
 bool Configuration::OcclusionSkipTerrainOccludees = true;
-// 1 = Raster (default for mid/high tier where async parallelizes the
-// rasterization). Low tier overrides to 2 (Horizon) where main-thread
-// bounded cost is preferable to per-subcell raster work.
+// 1 = Raster. config.lua's tier table sends 2 (Horizon) on low tier, where a
+// bounded main-thread cost beats per-subcell raster work.
 int Configuration::OcclusionAggregateTerrain = 1;
 // 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). See currentTerrainStep().
 unsigned int Configuration::OcclusionTerrainResolution = 1;
@@ -41,23 +41,14 @@ unsigned int Configuration::OcclusionTerrainResolution = 1;
 bool Configuration::OcclusionOccluderCCWOnly = true;
 bool Configuration::OcclusionOccluderFrontToBack = true;
 
-// Default off in 1.1.0: A/B in a Vivec canton at night showed the
-// feature is net-negative (~12% FPS regression). Bracketed savings
-// were real (~480 us/frame less drain/display) but engine-side
-// relighting churn cost more elsewhere. The C++ knob stays so a
-// user can flip it via msoc.json if they want to retest on their
-// hardware; the MCM toggle and hysteresis slider are hidden.
-bool Configuration::OcclusionCullLights = false;
-unsigned int Configuration::OcclusionLightCullHysteresisFrames = 3;
-
 bool Configuration::OcclusionAsyncOccluders = true;
 unsigned int Configuration::OcclusionThreadpoolThreadCount = 0;
 unsigned int Configuration::OcclusionThreadpoolBinsW = 4;
 unsigned int Configuration::OcclusionThreadpoolBinsH = 2;
 unsigned int Configuration::OcclusionTemporalCoherenceFrames = 4;
 
-// Tier-aware overrides (applyHardwareTierDefaults) are applied before
-// installPatches latches these into kMsocWidth/Height.
+// installPatches() latches these into kMsocWidth/Height, and main.lua calls
+// it after configure(), so what lands here is whatever config.lua pushed.
 unsigned int Configuration::OcclusionMaskWidth = 512;
 unsigned int Configuration::OcclusionMaskHeight = 256;
 
@@ -121,66 +112,12 @@ void readTerrainOcclusionMode(lua_State* L, int tbl, const char* key, int& out) 
 
 namespace msoc {
 
-// classifyHardwareTier / hardwareTierName moved to HardwareTier.cpp (pure,
-// unit-tested). applyHardwareTierDefaults stays here - it writes Configuration.
-void applyHardwareTierDefaults(HardwareTier tier) {
-    // Threadpool / async / mask knobs are tier-sensitive. So is
-    // OcclusionSkipTerrainOccludees: A/B in a dense Vivec exterior showed
-    // ~1.9 ms/frame `displayUs` saved by letting terrain leaves flow
-    // through TestRect on mid/high tiers (denser mask means a meaningful
-    // fraction of terrain reads OCCLUDED and skips display()). On low
-    // tier the extra TestRect work eats the classifyBudget, so the
-    // bypass stays on. Occluder *selection* thresholds (radius/dim/etc.)
-    // remain scene-shape-sensitive only.
-    switch (tier) {
-        case HardwareTier::Low:
-            // SSE4.1 or <=4 threads: fixed per-frame threadpool tax
-            // (Wake/Flush/Suspend) outweighs the parallelism win on
-            // 4-wide SIMD. Synchronous skips the tax entirely.
-            // Mask 256x128 = 1/4 rasterization work per triangle. Tight
-            // budgets bound spike cost (one log showed 32ms drainUs
-            // spikes on i5-2400; 1500us caps that at ~5% of a 30fps
-            // frame).
-            Configuration::OcclusionAsyncOccluders = false;
-            Configuration::OcclusionThreadpoolBinsW = 2;
-            Configuration::OcclusionThreadpoolBinsH = 1;
-            Configuration::OcclusionMaskWidth = 256;
-            Configuration::OcclusionMaskHeight = 128;
-            Configuration::OcclusionRasterizeBudgetUs = 1500;
-            Configuration::OcclusionClassifyBudgetUs = 1500;
-            // Keep the bypass on - classifyUs headroom is tight here
-            // and the displayUs win is smaller (the mask is also smaller).
-            Configuration::OcclusionSkipTerrainOccludees = true;
-            break;
-
-        case HardwareTier::Mid:
-            // 6-8 threads with AVX2. 4x2=8 bins is more atomic
-            // ping-pong than parallelism with ~4-6 workers; 2x2 keeps
-            // work-stealing alive at half the per-bin coordination cost.
-            // Mask 384x192 ~ 56% of full work.
-            Configuration::OcclusionAsyncOccluders = true;
-            Configuration::OcclusionThreadpoolBinsW = 2;
-            Configuration::OcclusionThreadpoolBinsH = 2;
-            Configuration::OcclusionMaskWidth = 384;
-            Configuration::OcclusionMaskHeight = 192;
-            Configuration::OcclusionRasterizeBudgetUs = 3000;
-            Configuration::OcclusionClassifyBudgetUs = 3000;
-            Configuration::OcclusionSkipTerrainOccludees = false;
-            break;
-
-        case HardwareTier::High:
-            // Explicit assignment so toggling tiers via Lua resets cleanly.
-            Configuration::OcclusionAsyncOccluders = true;
-            Configuration::OcclusionThreadpoolBinsW = 4;
-            Configuration::OcclusionThreadpoolBinsH = 2;
-            Configuration::OcclusionMaskWidth = 512;
-            Configuration::OcclusionMaskHeight = 256;
-            Configuration::OcclusionRasterizeBudgetUs = 0;
-            Configuration::OcclusionClassifyBudgetUs = 0;
-            Configuration::OcclusionSkipTerrainOccludees = false;
-            break;
-    }
-}
+// classifyHardwareTier / hardwareTierName live in HardwareTier.cpp (pure,
+// unit-tested). There is deliberately no applyHardwareTierDefaults here any
+// more: config.lua owns the tier table and pushes the result through
+// configure() before main.lua calls msoc.install(). Keeping a second copy in
+// C++ meant the restart-only knobs latched the C++ table while the MCM showed
+// the Lua one.
 
 int configure(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -190,6 +127,7 @@ int configure(lua_State* L) {
     readBool(L, 1, "DebugOcclusionTintOccluded", Configuration::DebugOcclusionTintOccluded);
     readBool(L, 1, "DebugOcclusionTintTested", Configuration::DebugOcclusionTintTested);
     readBool(L, 1, "DebugOcclusionTintOccluder", Configuration::DebugOcclusionTintOccluder);
+    readBool(L, 1, "DebugMaskOverlay", Configuration::DebugMaskOverlay);
 
     readFloat(L, 1, "OcclusionOccluderRadiusMinInterior", Configuration::OcclusionOccluderRadiusMinInterior);
     readFloat(L, 1, "OcclusionOccluderRadiusMinExterior", Configuration::OcclusionOccluderRadiusMinExterior);
@@ -212,9 +150,6 @@ int configure(lua_State* L) {
     readUInt(L, 1, "OcclusionTerrainResolution", Configuration::OcclusionTerrainResolution);
     readBool(L, 1, "OcclusionOccluderCCWOnly", Configuration::OcclusionOccluderCCWOnly);
     readBool(L, 1, "OcclusionOccluderFrontToBack", Configuration::OcclusionOccluderFrontToBack);
-
-    readBool(L, 1, "OcclusionCullLights", Configuration::OcclusionCullLights);
-    readUInt(L, 1, "OcclusionLightCullHysteresisFrames", Configuration::OcclusionLightCullHysteresisFrames);
 
     readBool(L, 1, "OcclusionAsyncOccluders", Configuration::OcclusionAsyncOccluders);
     readUInt(L, 1, "OcclusionThreadpoolThreadCount", Configuration::OcclusionThreadpoolThreadCount);

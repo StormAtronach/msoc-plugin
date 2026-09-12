@@ -150,17 +150,23 @@ TEST_CASE("conservativeSphereNdcRect bounds every sphere surface point") {
     const float fx = 1.2f;
     const float fy = 1.6f;
     std::array<float, 16> m = {};
-    m[0] = fx;   // x row
-    m[5] = fy;   // y row
-    m[11] = 1;   // w row picks up view z
+    m[0] = fx;  // x row
+    m[5] = fy;  // y row
+    m[11] = 1;  // w row picks up view z
 
     const RowNorms norms = msoc::clipmath::clipRowNorms(m.data());
 
     // Sphere centers across the frustum, including hard off-axis close-range
     // cases (the regime where dividing by the center w under-covers).
     const float centers[][3] = {
-        {0, 0, 100},   {50, 30, 100},  {-70, 45, 110}, {80, -60, 120},
-        {30, 20, 40},  {-25, 18, 35},  {15, -12, 25},  {-9, 8, 20},
+        {0, 0, 100},
+        {50, 30, 100},
+        {-70, 45, 110},
+        {80, -60, 120},
+        {30, 20, 40},
+        {-25, 18, 35},
+        {15, -12, 25},
+        {-9, 8, 20},
     };
     const float radii[] = {1.0f, 5.0f, 12.0f};
 
@@ -175,7 +181,7 @@ TEST_CASE("conservativeSphereNdcRect bounds every sphere surface point") {
             // Sample the sphere surface; every projected point must be inside.
             const float kEps = 1e-4f;
             for (int i = 0; i < 400; ++i) {
-                const float t = 3.8832221f * static_cast<float>(i);   // golden angle
+                const float t = 3.8832221f * static_cast<float>(i);  // golden angle
                 const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / 400.0f;
                 const float s = std::sqrt(1.0f - z * z);
                 const float px = ctr[0] + r * s * std::cos(t);

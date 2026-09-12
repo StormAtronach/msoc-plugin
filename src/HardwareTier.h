@@ -2,8 +2,8 @@
 
 // Hardware tier classification - pure logic, no Configuration or Lua
 // dependency, so it is unit-testable on its own (see tests/hardware_tier_tests).
-// applyHardwareTierDefaults (which writes Configuration:: statics) stays in
-// Config.cpp; only the pure classifier + name helper live here.
+// The tier only names the machine here; the knobs each tier implies live in
+// config.lua's applyTierDefaults, which is the single source of them.
 
 namespace msoc {
 
@@ -11,7 +11,9 @@ namespace msoc {
 // net-negative, so the tier maps to a different default set of threadpool /
 // mask knobs. simdImpl values match MaskedOcclusionCulling::Implementation
 // (SSE2=0, SSE41=1, AVX2=2, AVX512=3); negative = probe failed, treat as Low.
-enum class HardwareTier { Low = 0, Mid = 1, High = 2 };
+enum class HardwareTier { Low = 0,
+                          Mid = 1,
+                          High = 2 };
 
 HardwareTier classifyHardwareTier(int simdImpl, unsigned hwConcurrency);
 const char* hardwareTierName(HardwareTier tier);

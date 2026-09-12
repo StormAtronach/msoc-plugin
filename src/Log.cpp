@@ -6,14 +6,11 @@
 
 #include "Log.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <fstream>
-#include <iomanip>
-#include <iostream>
 #include <mutex>
 #include <ostream>
-#include <sstream>
+#include <sstream>  // g_fallback, the sink used when the file will not open
 
 #include <Windows.h>
 
@@ -77,57 +74,13 @@ std::ostream& openOnce() {
 
 namespace msoc::log {
 
-void OpenLog(const char* /*path*/) {
-    (void)openOnce();
-}
-
-void CloseLog() {
-    std::lock_guard<std::mutex> lk(g_initMutex);
-    if (g_filebuf.is_open()) {
-        g_filebuf.forceSync();
-        g_filebuf.close();
-    }
-}
-
 std::ostream& getLog() {
-    return openOnce();
-}
-
-std::ostream& getDebug() {
     return openOnce();
 }
 
 void flush() {
     std::lock_guard<std::mutex> lk(g_initMutex);
     if (g_filebuf.is_open()) g_filebuf.forceSync();
-}
-
-void prettyDump(const void* data, const size_t length) {
-    prettyDump(data, length, openOnce());
-}
-
-// Compact hex dump: 16 bytes per line, offset prefix, ASCII gutter.
-void prettyDump(const void* data, const size_t length, std::ostream& output) {
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    const auto oldFlags = output.flags();
-    const auto oldFill = output.fill();
-    output << std::hex << std::setfill('0');
-    for (size_t i = 0; i < length; i += 16) {
-        output << std::setw(8) << i << "  ";
-        size_t row = std::min<size_t>(16, length - i);
-        for (size_t j = 0; j < row; ++j) {
-            output << std::setw(2) << static_cast<unsigned int>(bytes[i + j]) << ' ';
-        }
-        for (size_t j = row; j < 16; ++j) output << "   ";
-        output << " ";
-        for (size_t j = 0; j < row; ++j) {
-            unsigned char b = bytes[i + j];
-            output << static_cast<char>((b >= 32 && b < 127) ? b : '.');
-        }
-        output << '\n';
-    }
-    output.flags(oldFlags);
-    output.fill(oldFill);
 }
 
 }  // namespace msoc::log

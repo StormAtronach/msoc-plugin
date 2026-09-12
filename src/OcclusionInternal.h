@@ -27,19 +27,20 @@
 
 namespace msoc::patch::occlusion {
 
-// NI::Camera accessors for fields upstream MWSE NICamera.h labels
-// `unknown_*` (countCullingPlanes is always 6 for the main world camera;
-// usedCullingPlanesBitfield sits just past the inline cullingPlanes[6]).
-// Shared by the core-TU occluder frustum test and TerrainAggregation.cpp.
-inline int cameraCountCullingPlanes(const NI::Camera* /*cam*/) {
-    return 6;
+// NI::Camera culling-plane accessors, shared by the core-TU occluder frustum
+// test and TerrainAggregation.cpp. These read named fields now: SharedSE's
+// NICamera.h labels countCullingPlanes (0x160) and usedCullingPlanesBitfield
+// (0x1C4), so neither the hard-coded 6 nor the offset arithmetic that used to
+// stand in for them is needed. Six is right for the main world camera but not
+// a guarantee - a non-main camera can add user clip planes.
+inline int cameraCountCullingPlanes(const NI::Camera* cam) {
+    return cam->countCullingPlanes;
 }
 inline const NI::Point4* cameraCullingPlane(NI::Camera* cam, int i) {
     return &cam->cullingPlanes[i];
 }
 inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
-    auto* base = reinterpret_cast<char*>(&cam->cullingPlanes[0]);
-    return reinterpret_cast<uint32_t*>(base + sizeof(NI::Point4) * 6);
+    return cam->usedCullingPlanesBitfield;
 }
 
 // First-of-type alpha/stencil flags from an occluder's ancestor chain;
@@ -61,46 +62,26 @@ extern ::CullingThreadpool* g_threadpool;
 extern bool g_asyncThisFrame;           // async submit latched this frame
 extern NI::Node* g_worldLandscapeRoot;  // DataHandler terrain root
 
-// Snapshot published at the drain-complete buffer swap: the matrix + NDC
-// constants the depth data was built with, plus the capture time. The
-// external query API projects through these, not the live per-frame matrix.
-struct MaskSnapshot {
-    float worldToClip[16] = {};
-    float ndcRadiusX = 0.0f;
-    float ndcRadiusY = 0.0f;
-    float wGradMag = 0.0f;
-    unsigned long long tickMs = 0;  // GetTickCount64 at swap; 0 = none yet
-};
-
 // MOC near-clip w floor; sits below the engine near plane and above the
 // numerical noise that explodes NDC after the perspective divide.
 inline constexpr float kNearClipW = 1.0f;
 
-// External queries reject snapshots older than this (alt-tab, menu, load).
-inline constexpr unsigned long long kSnapshotMaxAgeMs = 200;
-
 // Cross-TU shared state. Defined once in OcclusionPass.cpp.
-extern FrameConfig g_frame;                    // per-frame Configuration snapshot
-extern MaskSnapshot g_snapshot;                // published snapshot metadata
-extern ::MaskedOcclusionCulling* g_msoc_prev;  // swapped snapshot buffer
-extern ::MaskedOcclusionCulling* g_msoc;       // live frame buffer
-extern unsigned int kMsocWidth;                // mask resolution (latched at install)
+extern FrameConfig g_frame;               // per-frame Configuration snapshot
+extern ::MaskedOcclusionCulling* g_msoc;  // live frame buffer
+extern unsigned int kMsocWidth;           // mask resolution (latched at install)
 extern unsigned int kMsocHeight;
 extern uint32_t g_frameCounter;  // top-level frame counter
 
 // Live sphere test against g_msoc (uses the live per-frame projection).
-// Defined in LiveQuery.cpp (leaf); called by the drain (core) and
-// LightCulling. Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
+// Defined in LiveQuery.cpp (leaf); called by the drain (core).
+// Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
 ::MaskedOcclusionCulling::CullingResult testSphereVisible(
     const NI::Point3& center, float radius);
 
 // Live OBB test against g_msoc: corners is 8 world-space (x, y, z) triples.
 // Defined in LiveQuery.cpp; used by the drain's optional occludee box test.
 ::MaskedOcclusionCulling::CullingResult testBoxVisible(const float* corners);
-
-// Naked trampoline (NiDX8LightManager::updateLights enabled-read hook),
-// defined in LightCulling.cpp; installPatches() takes its address.
-void updateLights_enabledRead_hook();
 
 // Terrain aggregation entry points (TerrainAggregation.cpp), called by the
 // detour. Raster mode merges each near Land into one submission; Horizon
@@ -115,19 +96,9 @@ bool createMSOCResources(std::ostream& log);
 void destroyMSOCResources(std::ostream& log);
 bool ensureMSOCResourcesMatchConfig();
 
-// External-occluder injection (ExternalOccluders.cpp). drainPendingOccluders
-// rasterizes queued consumer submissions into the mask (called by the detour);
-// clearExternalOccluderQueue drops them on teardown (called by MaskResources).
-void drainPendingOccluders();
-void clearExternalOccluderQueue();
-
 // Emit the per-frame MSOC diagnostic line (DiagnosticsLog.cpp). Called at the
 // tail of the detour; gated internally on the log channels (cold path).
 void emitPerFrameStatsLine();
-
-// Live mask readiness: true once the depth buffer reflects the complete
-// vanilla main-scene occluder set; cleared at the next ClearBuffer.
-extern bool g_maskReady;
 
 // Live projection forwarder + clip type alias, shared by the query, drain,
 // and terrain paths. Header-inline so the hot path still inlines fully.

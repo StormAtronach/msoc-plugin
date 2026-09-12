@@ -1,0 +1,30 @@
+[
+  {
+    "name": "old-ebonheart",
+    "x": 7,
+    "y": -19,
+    "refs": 1019,
+    "cell": "Old Ebonheart"
+  },
+  {
+    "name": "narsis",
+    "x": 6,
+    "y": -51,
+    "refs": 694,
+    "cell": "Narsis, Council Quarter"
+  },
+  {
+    "name": "balmora",
+    "x": -3,
+    "y": -2,
+    "refs": 483,
+    "cell": "Balmora"
+  },
+  {
+    "name": "vivec",
+    "x": 4,
+    "y": -10,
+    "refs": 185,
+    "cell": "Vivec, Foreign Quarter"
+  }
+]

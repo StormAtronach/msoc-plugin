@@ -9,7 +9,7 @@
 #include "NIPointer.h"
 #include "NINode.h"
 #include "NIAVObject.h"
-#include "NILight.h"
+#include "NIGeometryData.h"  // OccludeeBoxEntry pins the mesh data it is keyed on
 
 #include <cstdint>
 #include <unordered_map>
@@ -67,7 +67,6 @@ struct LandCacheEntry {
 // frames bounds memory.
 struct DrainCacheEntry {
     NI::Pointer<NI::AVObject> shapePtr;
-    ::MaskedOcclusionCulling::CullingResult result;
     uint32_t lastQueryFrame;
     float boundOriginX, boundOriginY, boundOriginZ;
     float boundRadius;
@@ -112,7 +111,6 @@ struct OccluderCacheEntry {
     std::vector<float> worldVerts;
     std::vector<unsigned int> indices;
     unsigned int outTriCount = 0;
-    unsigned short vertexCount = 0;
     float minX = 0, minY = 0, minZ = 0;
     float maxX = 0, maxY = 0, maxZ = 0;
 
@@ -120,22 +118,6 @@ struct OccluderCacheEntry {
     // (rotation + translation + scale) lets a single memcmp catch any
     // kind of motion without writing a per-field comparator.
     float xfData[13] = {};
-};
-
-// Per-light occlusion cache for updateLights (gated by
-// OcclusionCullLights). Tracks last query frame, last verdict,
-// consecutive-occluded count for hysteresis, and worldBound snapshot
-// for move detection.
-//
-// lightPtr (NI::Pointer) refcounts the NiLight so a freed-then-
-// reallocated address can't collide with a stale entry mid-cell.
-struct LightCullEntry {
-    NI::Pointer<NI::Light> lightPtr;
-    uint32_t lastQueryFrame;
-    uint8_t consecOccluded;
-    bool cullActive;
-    float boundOriginX, boundOriginY, boundOriginZ;
-    float boundRadius;
 };
 
 // Object-space AABB of a geometry's verts, for the optional occludee box
@@ -147,6 +129,12 @@ struct LightCullEntry {
 struct OccludeeBoxEntry {
     float minX, minY, minZ;
     float maxX, maxY, maxZ;
+    // The cache is keyed on the GeometryData pointer, so it has to hold a
+    // reference to it. Without this the engine can free the mesh data and
+    // hand the same address back for a different mesh, and the entry then
+    // describes the wrong box. One refcount per unique mesh per cell; the
+    // other four caches already do this.
+    NI::Pointer<NI::GeometryData> dataPtr;
 };
 
 // ------------------------------------------------------------
@@ -165,9 +153,6 @@ struct OcclusionCaches {
 
     std::unordered_map<NI::AVObject*, OccluderCacheEntry> occluder;
     uint64_t occluderHits = 0, occluderMisses = 0;
-
-    std::unordered_map<NI::Light*, LightCullEntry> lightCull;
-    uint64_t lightsTested = 0, lightsOccluded = 0, lightCullHits = 0, lightCullMisses = 0;
 
     // Object-space vertex AABB per geometry (optional occludee box test).
     std::unordered_map<const void*, OccludeeBoxEntry> occludeeBox;
@@ -189,7 +174,6 @@ struct OcclusionCaches {
     void wipeForCellChange() {
         land.clear();
         drain.clear();
-        lightCull.clear();
         terrainMembership.clear();
         occluder.clear();
         occludeeBox.clear();

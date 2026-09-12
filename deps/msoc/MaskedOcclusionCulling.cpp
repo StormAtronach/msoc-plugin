@@ -416,10 +416,12 @@ namespace MaskedOcclusionCullingSSE2
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Object construction and allocation
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#if USE_AVX512 != 0
 namespace MaskedOcclusionCullingAVX512
 {
 	extern MaskedOcclusionCulling *CreateMaskedOcclusionCulling(pfnAlignedAlloc alignedAlloc, pfnAlignedFree alignedFree);
 }
+#endif
 
 namespace MaskedOcclusionCullingAVX2
 {
@@ -441,8 +443,10 @@ MaskedOcclusionCulling *MaskedOcclusionCulling::Create(Implementation RequestedS
 		impl = RequestedSIMD;
 
 	// Return best supported version
+#if USE_AVX512 != 0
 	if (object == nullptr && impl >= AVX512)
 		object = MaskedOcclusionCullingAVX512::CreateMaskedOcclusionCulling(alignedAlloc, alignedFree); // Use AVX512 version
+#endif
 	if (object == nullptr && impl >= AVX2)
 		object = MaskedOcclusionCullingAVX2::CreateMaskedOcclusionCulling(alignedAlloc, alignedFree); // Use AVX2 version
 	if (object == nullptr && impl >= SSE41)

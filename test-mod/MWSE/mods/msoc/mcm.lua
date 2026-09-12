@@ -40,6 +40,13 @@ local function clampThreadCount()
     end
 end
 
+--- The overlay toggle needs the Lua-side element created or destroyed on the
+--- spot, not just the native flag pushed.
+local function applyMaskOverlay()
+    cfg.syncToNative(msoc)
+    require("msoc.overlay").refresh()
+end
+
 local function applyChangeClamped()
     clampThreadCount()
     cfg.syncToNative(msoc)
@@ -138,10 +145,9 @@ local function registerModConfig()
     })
 
     -- The "Cull occluded lights" toggle and its hysteresis slider were
-    -- exposed in 1.0.0 but removed from the MCM in 1.1.0 after the
-    -- feature tested net-negative (~12% FPS regression). The native
-    -- knob `OcclusionCullLights` is still read from msoc.json so a
-    -- power user can flip it on for re-testing.
+    -- exposed in 1.0.0, removed from the MCM in 1.1.0 after the feature
+    -- tested net-negative (~12% FPS regression), and removed outright in
+    -- 1.6.0 along with the 0x6bb7d4 hook and the per-light cache.
 
     main:createSlider({
         label       = i18n("OcclusionTemporalCoherenceFrames.label"),
@@ -326,6 +332,16 @@ local function registerModConfig()
     }) --[[@as mwseMCMSideBarPage]]
     createSidebar(debugPage)
 
+    -- The mask overlay is not a tint: it draws the depth mask itself in the
+    -- corner of the HUD rather than recolouring scene geometry, so it sits
+    -- above the tinting category rather than inside it.
+    debugPage:createOnOffButton({
+        label       = i18n("DebugMaskOverlay.label"),
+        description = i18n("DebugMaskOverlay.description"),
+        configKey   = "DebugMaskOverlay",
+        callback    = applyMaskOverlay,
+    })
+
     local tinting = debugPage:createCategory({ label = i18n("category.tinting") })
     tinting:createOnOffButton({
         label       = i18n("DebugOcclusionTintOccluder.label"),
@@ -366,10 +382,9 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
-    -- Restart-only diagnostic. The native side reads this once during
-    -- installPatches() (which runs before msoc.configure() is ever
-    -- called), so the toggle below only takes effect on the next launch.
-    -- The description spells that out for the user.
+    -- Read once at install, which happens after main.lua pushes msoc.json,
+    -- so the saved value is what starts up. A change made here takes effect
+    -- on the next launch. The description spells that out for the user.
     logging:createOnOffButton({
         label       = i18n("OcclusionForensicsWatchdog.label"),
         description = i18n("OcclusionForensicsWatchdog.description"),

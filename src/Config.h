@@ -15,6 +15,10 @@ public:
     static bool DebugOcclusionTintOccluded;
     static bool DebugOcclusionTintTested;
     static bool DebugOcclusionTintOccluder;
+    // Mirror the finished mask into an engine texture each frame so the Lua
+    // side can show it as a HUD image element. Off costs nothing: the
+    // readback only runs once Lua has asked for the texture. See MaskOverlay.h.
+    static bool DebugMaskOverlay;
 
     // Interior favours smaller occluders (pillars, crates); exterior
     // raises the bar to skip clutter. Resolved into g_*Effective per
@@ -75,18 +79,16 @@ public:
     // A/B via rasterizeUs + asyncFlushUs in a dense scene).
     static bool OcclusionOccluderFrontToBack;
 
-    static bool OcclusionCullLights;
-    static unsigned int OcclusionLightCullHysteresisFrames;
-
     static bool OcclusionAsyncOccluders;
     static unsigned int OcclusionThreadpoolThreadCount;
     static unsigned int OcclusionThreadpoolBinsW;
     static unsigned int OcclusionThreadpoolBinsH;
     static unsigned int OcclusionTemporalCoherenceFrames;
 
-    // Restart-only: latched in installPatches(). MOC requires
-    // width % 8 == 0 and height % 4 == 0; installPatches rounds and
-    // clamps.
+    // Applied at launch: latched in installPatches(), which main.lua calls
+    // after pushing msoc.json, so a saved value takes effect. Changing it
+    // afterwards needs a restart. MOC requires width % 8 == 0 and
+    // height % 4 == 0; installPatches rounds and clamps.
     static unsigned int OcclusionMaskWidth;
     static unsigned int OcclusionMaskHeight;
 
@@ -106,10 +108,10 @@ public:
     // almost never lands on a cross). Lines carry cellCross=<age>.
     static bool OcclusionLogCellCross;
 
-    // Restart-only freeze diagnostic: spawns a detached thread that
-    // dumps MSOC.forensics.txt every 250ms. Read once in
-    // installPatches() (before Lua's first configure() call), so MCM
-    // edits only take effect on the next launch. Default off.
+    // Freeze diagnostic: spawns a detached thread that dumps
+    // MSOC.forensics.txt every 250ms. Read once in installPatches(), which
+    // runs after Lua's first configure(), so a saved value is honoured;
+    // changing it afterwards needs a restart. Default off.
     static bool OcclusionForensicsWatchdog;
 };
 
@@ -118,9 +120,4 @@ public:
 // missing keys leave the static untouched.
 int configure(lua_State* L);
 
-// Resolve the tier-sensitive Configuration defaults (threadpool / async / mask
-// / terrain-bypass knobs) for the given tier. The pure HardwareTier enum +
-// classifyHardwareTier / hardwareTierName live in HardwareTier.h; this one
-// writes Configuration:: statics so it stays here.
-void applyHardwareTierDefaults(HardwareTier tier);
 }  // namespace msoc

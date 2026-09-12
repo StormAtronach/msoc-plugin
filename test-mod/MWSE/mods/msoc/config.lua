@@ -35,12 +35,6 @@ local default_config = {
     -- is dropped from the mask (safe under-occlude, never a wrong-cull).
     OcclusionOccluderCCWOnly            = true,
 
-    -- Light culling. Default off in 1.1.0; A/B showed the feature is
-    -- net-negative on the tested hardware. Hidden from the MCM; native
-    -- key still respected if a user sets it to true via msoc.json.
-    OcclusionCullLights                 = false,
-    OcclusionLightCullHysteresisFrames  = 3,
-
     -- Occluder selection (split per scene: interiors favour smaller
     -- occluders; exteriors raise the bar to skip clutter).
     OcclusionOccluderRadiusMinInterior    = 128.0,
@@ -71,11 +65,13 @@ local default_config = {
     OcclusionThreadpoolBinsH            = 2,
     OcclusionTemporalCoherenceFrames    = 4,
 
-    -- Mask resolution. Restart to apply — installPatches latches
-    -- these into kMsocWidth/Height once and ignores subsequent
-    -- changes for the session. Tier-overridden below (see
-    -- applyTierDefaults). MOC requires width%8==0 and height%4==0
-    -- (asserted in C++); plugin clamps to [64..2048] × [32..1024].
+    -- Mask resolution. Applied at launch, changed on restart: main.lua
+    -- pushes this table across before calling msoc.install(), which latches
+    -- it into kMsocWidth/Height for the session. (Before 1.6.0 install ran
+    -- first and a saved value here never took effect at all.)
+    -- Tier-overridden below (see applyTierDefaults). MOC requires
+    -- width%8==0 and height%4==0 (asserted in C++); plugin clamps to
+    -- [64..2048] × [32..1024].
     OcclusionMaskWidth                  = 512,
     OcclusionMaskHeight                 = 256,
 
@@ -99,29 +95,34 @@ local default_config = {
     OcclusionLogAggregate               = false,
     OcclusionLogCellCross               = false,
 
-    -- Freeze-forensics watchdog. Restart-only — the native side reads
-    -- this at installPatches() time, which runs before this config
-    -- table is pushed across the FFI. MCM edits round-trip into
-    -- msoc.json but only take effect on the next launch.
+    -- Freeze-forensics watchdog. Applied at launch, changed on restart:
+    -- the native side reads it at install, which since 1.6.0 runs after this
+    -- table is pushed across. An MCM edit persists to msoc.json and takes
+    -- effect on the next launch.
     OcclusionForensicsWatchdog          = false,
 
     -- Debug tints.
     DebugOcclusionTintOccluded          = false,
     DebugOcclusionTintTested            = false,
     DebugOcclusionTintOccluder          = false,
+
+    -- Show the occlusion mask itself as a HUD overlay (see overlay.lua).
+    DebugMaskOverlay                    = false,
 }
 
--- Tier defaults must match Config.cpp::applyHardwareTierDefaults so a
--- first-run user (no msoc.json yet) and a configure-only user (no Lua
--- side) both end up at the same Configuration::* values. Diverging the
--- two would be a quiet bug — load order picks one set silently.
+-- This is the tier table. There is no other one.
 --
--- Why this needs to live on the Lua side too: the C++ side runs
--- applyHardwareTierDefaults during luaopen_msoc, but cfg.syncToNative
--- pushes the Lua default_config across the FFI right after, clobbering
--- those C++ picks. mwse.loadConfig fills in any field not present in
--- the user's saved JSON from default_config — which is why we mutate
--- default_config here, BEFORE that load happens.
+-- Up to 1.4.0 C++ carried a second copy in Config.cpp, on the theory that a
+-- "configure-only" consumer might use the DLL without these Lua files. No such
+-- consumer existed — the plugin cannot install itself without main.lua — and
+-- the duplicate was a standing hazard: whichever ran last won, silently, and
+-- the two drifted (OcclusionSkipTerrainOccludees was tier-sensitive in C++ and
+-- absent here). 1.6.0 deleted the C++ copy.
+--
+-- Order matters. mwse.loadConfig fills any field missing from the user's saved
+-- JSON out of default_config, so the mutation below has to happen BEFORE that
+-- load, and syncToNative pushes the result across afterwards — which is now
+-- the only way these values ever reach C++.
 local function applyTierDefaults(plugin, target)
     local tier = plugin and plugin.hardwareTier
     if tier == "low" then
@@ -143,6 +144,12 @@ local function applyTierDefaults(plugin, target)
         -- async off the rasterization cost surfaces on the main thread,
         -- and Horizon's bounded-cost projection is cheaper there.
         target.OcclusionAggregateTerrain   = 2
+        -- Keep terrain leaves out of the occludee queue here. Letting them
+        -- through saved ~1.9 ms of displayUs per frame in a dense Vivec
+        -- exterior on mid/high, because a dense mask reads a useful fraction
+        -- of them OCCLUDED — but on low tier the mask is a quarter the size
+        -- and the extra TestRect work eats the classify budget instead.
+        target.OcclusionSkipTerrainOccludees = true
     elseif tier == "mid" then
         -- 6-8 threads with AVX2: async pays off, but 4×2=8 bins is
         -- atomic-ping-pong overkill for ~4-6 workers. 2×2 keeps
@@ -156,6 +163,7 @@ local function applyTierDefaults(plugin, target)
         target.OcclusionMaskHeight         = 192
         target.OcclusionRasterizeBudgetUs  = 3000
         target.OcclusionClassifyBudgetUs   = 3000
+        target.OcclusionSkipTerrainOccludees = false
     elseif tier == "high" then
         target.OcclusionAsyncOccluders     = true
         target.OcclusionThreadpoolBinsW    = 4
@@ -165,6 +173,7 @@ local function applyTierDefaults(plugin, target)
         -- Budgets disabled — High-tier hardware doesn't need them.
         target.OcclusionRasterizeBudgetUs  = 0
         target.OcclusionClassifyBudgetUs   = 0
+        target.OcclusionSkipTerrainOccludees = false
     end
     -- Unknown / nil tier: leave default_config untouched (matches
     -- legacy behaviour for safety).
@@ -219,6 +228,12 @@ local kTierMigratedKeys = {
     "OcclusionMaskHeight",
     "OcclusionRasterizeBudgetUs",
     "OcclusionClassifyBudgetUs",
+    -- 1.6.0: was tier-sensitive in C++ only, so a saved JSON written before
+    -- this release holds the flat Lua default rather than the tier's value.
+    "OcclusionSkipTerrainOccludees",
+    -- 1.6.0: mask size now actually reaches the latch (install runs after
+    -- configure), so a stale saved value would take effect for the first time.
+    "OcclusionAggregateTerrain",
 }
 
 -- _Claude_ Renamed / removed keys. Each version bump that drops a
@@ -227,6 +242,11 @@ local kTierMigratedKeys = {
 -- forever — harmless, but clutters the file.
 local kRetiredKeys = {
     "OcclusionDrainBudgetUs", -- 0.0.10: renamed to OcclusionClassifyBudgetUs
+    -- 1.6.0: CPU light culling removed. The feature tested net-negative in
+    -- 1.1.0 (~12% FPS regression in a Vivec canton at night) and was left in
+    -- as a json-only knob; 1.6.0 drops the hook, the cache and both keys.
+    "OcclusionCullLights",
+    "OcclusionLightCullHysteresisFrames",
 }
 
 -- _Claude_ Default-value retunes. Keys whose shipped default changed in a

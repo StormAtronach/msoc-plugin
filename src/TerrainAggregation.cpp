@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>  // numeric_limits; was reaching this through the PCH
 #include <vector>
 
 namespace msoc::patch::occlusion {
@@ -475,6 +476,9 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
             ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
             ::MaskedOcclusionCulling::VertexLayout(16, 4, 12));
     }
+    // The curtain is the whole mask in Horizon mode. Saying so here is what
+    // lets the drain run at all; it increments none of the other counters.
+    g_stats.maskHasOccluders = true;
 
     // columnsTouched is a linear scan but runs once per frame.
     g_stats.horizonCurtainTris = static_cast<uint64_t>(triCount);
@@ -546,6 +550,7 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
                         static_cast<int>(range.triCount),
                         g_frame.occluderWinding,
                         ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+                    ++g_stats.asyncJobsQueued;
                 } else {
                     ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
                     g_msoc->RenderTriangles(
@@ -567,6 +572,7 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
                                               static_cast<int>(entry.triCount),
                                               g_frame.occluderWinding,
                                               ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
+                ++g_stats.asyncJobsQueued;
             } else {
                 ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
                 g_msoc->RenderTriangles(entry.verts.data(), entry.indices.data(),
@@ -581,6 +587,7 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
         if (submittedTris > 0) {
             ++g_stats.aggregateTerrainLands;
             g_stats.aggregateTerrainTris += submittedTris;
+            g_stats.maskHasOccluders = true;
         }
     }
 }

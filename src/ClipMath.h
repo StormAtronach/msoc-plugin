@@ -91,7 +91,7 @@ inline NdcRect conservativeSphereNdcRect(float cx, float cy, float cw, float rX,
     const float yLo = cy - rY, yHi = cy + rY;
     const auto lo = [&](float n) { return n < 0.0f ? n * invNear : n * invFar; };
     const auto hi = [&](float n) { return n > 0.0f ? n * invNear : n * invFar; };
-    return { lo(xLo), lo(yLo), hi(xHi), hi(yHi) };
+    return {lo(xLo), lo(yLo), hi(xHi), hi(yHi)};
 }
 
 }  // namespace msoc::clipmath

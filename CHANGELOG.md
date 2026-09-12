@@ -1,5 +1,115 @@
 # Changelog
 
+## 1.6.0 - unreleased
+
+Two removals and one new debug tool. The version jumps from 1.4.0 to 1.6.0 to
+line up with the number already published on Nexus.
+
+- **Removed the MGE-XE integration ABI.** Through 1.4.0 the plugin published a
+  double-buffered snapshot of its mask and a set of `mwse_*` `__cdecl` exports
+  (`mwse_testOcclusionSphere`, the batch and AABB/OBB variants, the snapshot
+  accessors, the visible-geometry and light observer registrations, and the
+  external-occluder submission queue) so MGE-XE could cull distant statics
+  against the same mask. No released MGE-XE ever called any of it, including
+  G7; the only consumer lives on an unreleased development branch. Keeping the
+  contract cost a second `MaskedOcclusionCulling` instance, a per-frame
+  `SetBuffer` re-point on the threadpool (and therefore an extra worker
+  suspend/wake round trip on every async frame), an external-occluder drain at
+  the top of the pass, and observer callbacks on the drain. `Exports.cpp`,
+  `QueryApi.cpp` and `ExternalOccluders.cpp` are deleted and `OcclusionApi.h`
+  now declares nothing but `installPatches()`. `msoc.dll` exports no occlusion
+  API. If a future MGE-XE wants this, it should be designed against a shipped
+  consumer rather than kept warm speculatively.
+- **Removed light culling** (`OcclusionCullLights`,
+  `OcclusionLightCullHysteresisFrames`). The feature tested every `NiLight`
+  against the mask and disabled fully-occluded ones for the frame. It was
+  opt-in, never demonstrated a clear win, and required the plugin's second
+  engine detour (the `updateLights` enabled-read hook at 0x6BB7D4), a per-cell
+  light cache with its own age-prune pass, and four fields on the stats line.
+  Both config keys are retired and removed from saved JSON on first launch.
+- **Added a live occlusion-mask overlay** (`DebugMaskOverlay`, "Show occlusion
+  mask" on the MCM Debug page). Draws the mask the rasterizer is building into
+  a help-layer panel in the top-right corner, tone-mapped the way the file dump
+  was: unwritten tiles black, occluder depth ramped by inverse-w. Modelled on
+  MGE-XE's shadow-map debug overlay, but delivered through the engine UI so no
+  render state is touched behind the NiDX8 state cache. The readback is armed
+  by Lua asking for the texture, so the overlay costs nothing while it is off.
+  It replaces the PFM dump as the way to inspect the mask; `msoc.dumpMask(path)`
+  still writes the same buffer to a file for offline comparison.
+- **Fixed: Horizon terrain mode culled nothing.** The drain has a fast path that
+  skips every occludee test when it believes the mask is empty, and it decided
+  that by checking two counters - per-instance occluders and aggregated terrain
+  Lands - neither of which the horizon curtain touches. On any frame where no
+  per-instance occluder rasterized, the drain therefore concluded the mask was
+  empty and skipped every occludee test, so the curtain occluded nothing. That
+  is open terrain with little built on it, which is exactly where Horizon mode
+  is the default; a dense city frame submits hundreds of occluders and was
+  never affected. Both that gate and the async flush gate now read facts
+  recorded where the triangles are actually submitted.
+- **Fixed: a wasted threadpool barrier on budget-limited frames.** With
+  front-to-back submission the occluder queue is drained after traversal and a
+  spike-clip can bail the tail. The flush gate counted occluders recorded rather
+  than jobs queued, so a frame that bailed before queuing anything still paid
+  for a full `Flush` barrier.
+- **Fixed: `rasterized=` in the stats line over-counted.** It was incremented
+  when an occluder was accepted, not when it was submitted, so budget-dropped
+  occluders were counted as if they had reached the mask.
+- **Fixed: per-frame log spam on single-worker machines.** The reconciler runs
+  every frame and only short-circuits once a threadpool exists, so a machine
+  where the pool is deliberately declined re-made and re-logged that decision
+  forever. It is latched now, and cleared when resources are torn down so an MCM
+  toggle re-evaluates.
+- **The tier defaults live in one place, and your saved mask resolution now
+  works.** `config.lua` and `Config.cpp` each carried a tier table; whichever ran
+  last won, silently, and they had drifted. The C++ copy is gone. Related, and
+  the reason it matters: the DLL used to install its engine hooks during
+  `include()`, before `main.lua` could push `msoc.json` across, so the
+  restart-only knobs latched compile-time defaults and a hand-edited
+  `OcclusionMaskWidth`/`Height` was discarded without a word. Installation is now
+  a separate `msoc.install()` that `main.lua` calls after the config sync.
+  **Two behaviour changes follow.** A saved mask resolution takes effect at
+  launch where before it never did. And `OcclusionSkipTerrainOccludees`, which
+  was tier-sensitive in C++ only, is now tier-sensitive everywhere: off on mid
+  and high tier, where letting terrain leaves through the occludee test saves
+  more `displayUs` than the tests cost. Both keys are re-applied once on upgrade.
+- **Fixed: a stale occludee box could survive its mesh.** The cache is keyed on
+  the address of a mesh's geometry data but held no reference to it, so the
+  engine could free that mesh mid-cell and hand the same address back for a
+  different one, leaving the entry describing the wrong bounding box and
+  producing a wrong cull. It pins its key now, at one refcount per unique mesh
+  per cell, which is what the other four per-cell caches already did.
+- **Fixed: the phase budget could not see async rasterization.** On an async
+  frame the main thread pays for rasterization twice, once to enqueue and again
+  waiting at the flush barrier, and the budget's moving average sampled only the
+  enqueue. It therefore read a few hundred microseconds on frames that cost a
+  millisecond, and predictive skip never engaged under async however dense the
+  scene got. The average now includes the flush stall.
+- **AVX-512 is no longer built.** Intel's `USE_AVX512` has always defaulted to
+  0, which compiled that translation unit into a stub returning null, so the
+  runtime never selected it. 1.6.0 stops compiling the file and preprocesses out
+  the dispatch branch. No behaviour change; one fewer untested path, and a
+  slightly smaller DLL. Recorded in `deps/msoc/NOTICE`.
+- Removed dead state and API that nothing read: the `inlineTested` counter,
+  which the stats line has been reporting as a constant 0 since the inline-test
+  path went away, two unread cache fields, the commented-out parallel drain and
+  the includes that served it, and `OpenLog` / `CloseLog` / `getDebug` /
+  `prettyDump` from the logger.
+- Corrected three MCM descriptions that said "Default off" for settings that
+  have shipped on by default since 1.3.0 and 1.4.0, and one that predicted
+  front-to-back submission would be "a clear win on single-threaded setups".
+  Measurement for this release put it within noise of zero, with or without
+  async, so the description now says so.
+- Internal: there is one mask buffer instead of two, and `SetBuffer` is called
+  once at pool creation rather than every frame. The drain reads a bool for
+  terrain membership instead of doing a second hash lookup per occludee per
+  frame. `FrameConfig`'s defaults come from `Configuration` rather than a
+  hand-maintained copy, and the camera's culling-plane count is read rather
+  than assumed to be six. `src/` drops from 6278 to 5206 lines.
+
+**Upgrading:** `main.lua` and `msoc.dll` must be updated together. A new DLL with
+an old `main.lua` loads but never installs its hooks, and says so in `MSOC.log`;
+an old DLL with a new `main.lua` works as it did before, and says so too.
+
 ## 1.4.0 - 2026-07-02
 
 A query correctness fix, two occluder-throughput features, and threadpool /

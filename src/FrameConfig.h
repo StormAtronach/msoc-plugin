@@ -16,6 +16,13 @@
 namespace msoc::patch::occlusion {
 
 struct FrameConfig {
+    // Exterior defaults, taken from Configuration:: rather than written out
+    // again here. Configuration's statics are constant-initialised
+    // fundamentals, so they hold their values before any dynamic initialiser
+    // runs and this is safe at static-init time. One construction per process;
+    // the hot path is untouched.
+    FrameConfig() { snapshot(false); }
+
     // Occluder eligibility, resolved per scene type by snapshot().
     float occluderRadiusMin = 0.0f;
     float occluderRadiusMax = 0.0f;
@@ -35,14 +42,14 @@ struct FrameConfig {
     // OcclusionOccluderCCWOnly bool. BACKFACE_NONE rasterizes both faces.
     ::MaskedOcclusionCulling::BackfaceWinding occluderWinding =
         ::MaskedOcclusionCulling::BACKFACE_NONE;
-    // Sort occluders near-to-far and submit after traversal (see Config.h). Off.
+    // Sort occluders near-to-far and submit after traversal (see Config.h).
+    // The value here is only the pre-snapshot state; config.lua ships it on.
     bool occluderFrontToBack = false;
     unsigned int temporalCoherenceFrames = 4;
-    bool cullLights = true;
-    unsigned int lightCullHysteresisFrames = 3;
     bool tintOccluder = false;
     bool tintOccluded = false;
     bool tintTested = false;
+    bool maskOverlay = false;
     bool logEnabled = false;
 
     // Resolve every field from Configuration:: for this frame. isInterior
@@ -74,11 +81,10 @@ struct FrameConfig {
                               : ::MaskedOcclusionCulling::BACKFACE_NONE;
         occluderFrontToBack = C::OcclusionOccluderFrontToBack;
         temporalCoherenceFrames = C::OcclusionTemporalCoherenceFrames;
-        cullLights = C::OcclusionCullLights;
-        lightCullHysteresisFrames = C::OcclusionLightCullHysteresisFrames;
         tintOccluder = C::DebugOcclusionTintOccluder;
         tintOccluded = C::DebugOcclusionTintOccluded;
         tintTested = C::DebugOcclusionTintTested;
+        maskOverlay = C::DebugMaskOverlay;
         insideOccluderGuard = C::OcclusionInsideOccluderGuard;
         logEnabled = C::OcclusionLogPerFrame || C::OcclusionLogAggregate || C::OcclusionLogCellCross;
     }
