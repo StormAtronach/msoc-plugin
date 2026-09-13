@@ -29,13 +29,43 @@ line up with the number already published on Nexus.
   Both config keys are retired and removed from saved JSON on first launch.
 - **Added a live occlusion-mask overlay** (`DebugMaskOverlay`, "Show occlusion
   mask" on the MCM Debug page). Draws the mask the rasterizer is building into
-  a help-layer panel in the top-right corner, tone-mapped the way the file dump
-  was: unwritten tiles black, occluder depth ramped by inverse-w. Modelled on
-  MGE-XE's shadow-map debug overlay, but delivered through the engine UI so no
-  render state is touched behind the NiDX8 state cache. The readback is armed
-  by Lua asking for the texture, so the overlay costs nothing while it is off.
-  It replaces the PFM dump as the way to inspect the mask; `msoc.dumpMask(path)`
-  still writes the same buffer to a file for offline comparison.
+  a help-layer panel in the top-right corner: unwritten tiles black, occluder
+  depth ramped on a log scale of inverse-w, nearest brightest. The ramp is
+  logarithmic rather than linear because a linear stretch is owned by the
+  single nearest pixel, and in Raster terrain mode that pixel is pinned at the
+  ceiling on every outdoor frame: the ground under the player straddles MOC's
+  near plane and each clipped edge lands at w = 1, so everything past the
+  foreground collapsed into one flat grey while the near hillside saturated
+  white. Horizon mode never showed it, since the curtain carries the far
+  silhouette depth. Modelled on MGE-XE's shadow-map debug overlay, but
+  delivered through the engine UI so no render state is touched behind the
+  NiDX8 state cache. The readback is armed by Lua asking for the texture, so
+  the overlay costs nothing while it is off. It replaces the PFM dump as the
+  way to inspect the mask; `msoc.dumpMask(path)` still writes the same buffer
+  to a file, with the same tone map, for offline comparison.
+- **Fixed: downsampled terrain (Half / Corners) was wound backwards and mostly
+  culled.** The coarse terrain builder emits its own quad triangles rather than
+  copying the source patch's, and it wound them clockwise while the full-
+  resolution path and the source patches are counter-clockwise. The same
+  `OcclusionOccluderCCWOnly` gate (default on) that halves occluder work by
+  culling CW faces then dropped almost every coarse triangle: at the Half
+  default about a third of the terrain silhouette went missing, Corners lost
+  the lot. It showed as black fractures running across the hills in the mask
+  overlay and, worse, as terrain that occluded far less than it should. Found
+  by dumping the mask against the live camera and re-rasterising the same
+  patches offline; the coarse quads now wind CCW to match the full path.
+- **Fixed: the Horizon curtain sat at the far skyline depth and occluded almost
+  nothing.** The 1D builder coupled each column's height and depth: depth
+  tracked the height winner, which is the distant skyline ridge, and the
+  erosion pass then took the farthest depth over each sample's neighbourhood.
+  The curtain ended up pinned at the farthest terrain in view (w about 10000 in
+  the test scene) while the raster path reached the near hill at w about 230,
+  so it culled next to nothing. Height and depth are now independent
+  reductions: height still takes the per-column max (the silhouette), depth
+  takes the min, the nearest terrain surface, so the curtain occludes like a
+  coarse raster. The trade is that one depth still covers the whole strip from
+  skyline to screen bottom, so the curtain can over-occlude through a gap in
+  the silhouette; that case is left for a follow-up.
 - **Fixed: Horizon terrain mode culled nothing.** The drain has a fast path that
   skips every occludee test when it believes the mask is empty, and it decided
   that by checking two counters - per-instance occluders and aggregated terrain

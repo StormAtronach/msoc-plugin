@@ -22,9 +22,15 @@
 // Adapted from MGE-XE's terrain_horizon_occluder. Notable adaptations:
 //   - Order-independent update (no front-to-back prune); near-terrain
 //     iteration order is not guaranteed front-to-back.
-//   - d[c] is updated only when y_upper STRICTLY exceeds h[c] - the depth
-//     written tracks the silhouette winner, matching the FAR-depth
-//     occluder semantic required for correctness.
+//   - h[c] and d[c] are independent reductions over a column's contributors:
+//     h = max(y_upper) is the silhouette, d = min(depth) is the NEAREST
+//     terrain. The curtain therefore sits at the near surface and occludes
+//     like a coarse raster. (An earlier version coupled them - d followed the
+//     height winner, i.e. the distant skyline - which pinned the whole curtain
+//     at the farthest depth and made it occlude almost nothing. The near-depth
+//     curtain can over-occlude through a gap in the silhouette, since one
+//     depth covers the strip from skyline to screen bottom; that is the known
+//     trade for matching the raster path's reach.)
 //   - simplify() takes an ADAPTIVE epsD from computeAdaptiveEpsD(), not
 //     a fixed 1e30 like MGE-XE's distant path. Near-terrain depth
 //     heterogeneity makes a disabled-depth-term setup silently wrong.
@@ -81,13 +87,14 @@ public:
     // before any update() calls.
     void reset();
 
-    // Update column c with (y_upper, far_depth). Writes both h[c] and
-    // d[c] only when y_upper > h[c]; depth tracks the silhouette winner.
-    // Order-independent. Caller ensures c in [0, resolution).
-    void update(int c, float yUpper, float farDepth);
+    // Update column c with (y_upper, depth). Raises h[c] to max(y_upper) and
+    // lowers d[c] to min(depth) - the nearest terrain, smallest clip-w - as
+    // independent reductions. Order-independent. Caller ensures c in
+    // [0, resolution).
+    void update(int c, float yUpper, float depth);
 
-    // Apply (yUpper, farDepth) to an inclusive column range [c0, c1].
-    void updateRange(int c0, int c1, float yUpper, float farDepth);
+    // Apply (yUpper, depth) to an inclusive column range [c0, c1].
+    void updateRange(int c0, int c1, float yUpper, float depth);
 
     // Budget-bounded Douglas-Peucker simplifier. Writes up to maxSamples
     // into out[]; returns actual count (>= 2 unless resolution < 2).
@@ -113,7 +120,7 @@ public:
 
     // Emit curtain triangles in NDC layout. Per segment [s_i, s_{i+1}]:
     //   y_top    = min(s_i.h, s_{i+1}.h)   conservative - below silhouette
-    //   z        = max(s_i.d, s_{i+1}.d)   conservative - at/behind terrain
+    //   z        = min(s_i.d, s_{i+1}.d)   nearest - at the near terrain surface
     //   y_bottom = ndcYBottom              typically -1.1f, extends past screen
     //
     // Output: w=1.0, depth in z slot. Caller MUST run fixupForMOC()

@@ -125,20 +125,29 @@ void HorizonOccluder::reset() {
     std::fill(m_d.begin(), m_d.end(), 0.0f);
 }
 
-void HorizonOccluder::update(int c, float yUpper, float farDepth) {
-    // Strict > so multiple contributors at one column converge to (h, d)
-    // where h = max(yUpper) and d = depth-of-the-winner.
+void HorizonOccluder::update(int c, float yUpper, float depth) {
+    // Height and depth are now decoupled reductions over the column's
+    // contributors: h = max(yUpper) is the silhouette, d = min(depth) is the
+    // NEAREST terrain (smallest clip-w). The old code coupled them - d tracked
+    // the height winner, which is the distant skyline ridge - so the curtain
+    // sat at the farthest depth in view and occluded almost nothing. Nearest
+    // depth makes the curtain behave like a coarse raster of the near surface.
+    // m_h's kYBelow sentinel marks first touch, so d is seeded before it is
+    // min'd (m_d resets to 0, which is not a usable min seed).
+    const bool firstTouch = m_h[static_cast<size_t>(c)] <= kYBelow + 1.0e-29f;
     if (yUpper > m_h[static_cast<size_t>(c)]) {
         m_h[static_cast<size_t>(c)] = yUpper;
-        m_d[static_cast<size_t>(c)] = farDepth;
+    }
+    if (firstTouch || depth < m_d[static_cast<size_t>(c)]) {
+        m_d[static_cast<size_t>(c)] = depth;
     }
 }
 
-void HorizonOccluder::updateRange(int c0, int c1, float yUpper, float farDepth) {
+void HorizonOccluder::updateRange(int c0, int c1, float yUpper, float depth) {
     if (c0 < 0) c0 = 0;
     if (c1 >= m_resolution) c1 = m_resolution - 1;
     for (int c = c0; c <= c1; ++c) {
-        update(c, yUpper, farDepth);
+        update(c, yUpper, depth);
     }
 }
 
@@ -277,10 +286,16 @@ int HorizonOccluder::emitCurtainNDC(const Sample* samples, int nSamples,
         const Sample& s0 = samples[i];
         const Sample& s1 = samples[i + 1];
 
-        // Conservative: y_top below silhouette (min), z at/behind
-        // terrain (max - farther depth in clip-w convention).
+        // y_top stays the conservative silhouette (min height, below both
+        // endpoints). z takes the NEAREST endpoint (smaller clip-w) so the
+        // curtain sits at the near terrain surface like the raster path; the
+        // farther choice pinned it at the distant skyline. Fall back to the
+        // set endpoint if one is the 0 depth of an untouched sample (emit skips
+        // fully-untouched segments below, so a live segment normally has both).
         const float yTop = (s0.h < s1.h) ? s0.h : s1.h;
-        const float z = (s0.d > s1.d) ? s0.d : s1.d;
+        const float z = (s0.d > 0.0f && s1.d > 0.0f)
+                            ? ((s0.d < s1.d) ? s0.d : s1.d)
+                            : ((s0.d > s1.d) ? s0.d : s1.d);
 
         // Skip segments where neither endpoint has been touched -
         // otherwise the kYBelow sentinel projects to garbage quads.

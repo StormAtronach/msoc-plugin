@@ -58,7 +58,7 @@ TEST_CASE("reset returns every column to the sentinel") {
     }
 }
 
-TEST_CASE("update writes only when yUpper STRICTLY exceeds current height") {
+TEST_CASE("update: height takes the max, depth takes the nearest, independently") {
     HorizonOccluder h;
     REQUIRE(h.init(16, 8));
     h.reset();
@@ -67,22 +67,25 @@ TEST_CASE("update writes only when yUpper STRICTLY exceeds current height") {
     CHECK(h.heightAt(5) == doctest::Approx(0.5f));
     CHECK(h.depthAt(5) == doctest::Approx(1000.0f));
 
-    // Lower height is ignored; depth stays the winner's.
-    h.update(5, 0.2f, 2000.0f);
+    // Lower height is ignored, but a nearer (smaller) depth still wins - the
+    // two reductions are decoupled now.
+    h.update(5, 0.2f, 600.0f);
     CHECK(h.heightAt(5) == doctest::Approx(0.5f));
-    CHECK(h.depthAt(5) == doctest::Approx(1000.0f));
+    CHECK(h.depthAt(5) == doctest::Approx(600.0f));
 
-    // Equal height is NOT strictly greater -> ignored.
-    h.update(5, 0.5f, 3000.0f);
-    CHECK(h.depthAt(5) == doctest::Approx(1000.0f));
-
-    // Strictly higher overwrites both height and depth.
+    // A farther depth never wins, whatever the height.
     h.update(5, 0.9f, 4000.0f);
     CHECK(h.heightAt(5) == doctest::Approx(0.9f));
-    CHECK(h.depthAt(5) == doctest::Approx(4000.0f));
+    CHECK(h.depthAt(5) == doctest::Approx(600.0f));
+
+    // Equal height is not strictly greater, so height holds; a nearer depth
+    // that arrives with it still applies.
+    h.update(5, 0.9f, 300.0f);
+    CHECK(h.heightAt(5) == doctest::Approx(0.9f));
+    CHECK(h.depthAt(5) == doctest::Approx(300.0f));
 }
 
-TEST_CASE("update is order-independent: max height wins, depth follows it") {
+TEST_CASE("update is order-independent: max height, min (nearest) depth") {
     HorizonOccluder a;
     HorizonOccluder b;
     REQUIRE(a.init(16, 8));
@@ -101,8 +104,8 @@ TEST_CASE("update is order-independent: max height wins, depth follows it") {
 
     CHECK(a.heightAt(3) == doctest::Approx(b.heightAt(3)));
     CHECK(a.depthAt(3) == doctest::Approx(b.depthAt(3)));
-    CHECK(a.heightAt(3) == doctest::Approx(0.7f));
-    CHECK(a.depthAt(3) == doctest::Approx(700.0f));
+    CHECK(a.heightAt(3) == doctest::Approx(0.7f));   // max height
+    CHECK(a.depthAt(3) == doctest::Approx(100.0f));  // nearest depth
 }
 
 TEST_CASE("columnsTouched counts distinct non-sentinel columns") {
@@ -210,7 +213,7 @@ TEST_CASE("simplify keeps endpoints and stays within the sample budget") {
     }
 }
 
-TEST_CASE("emitCurtainNDC uses conservative top/depth and the given bottom") {
+TEST_CASE("emitCurtainNDC uses conservative top and nearest depth, given bottom") {
     // Two explicit samples; one segment -> 2 triangles, 6 vertices.
     Sample s[2] = {
         {0, -1.0f, /*h*/ 0.5f, /*d*/ 100.0f},
@@ -222,9 +225,9 @@ TEST_CASE("emitCurtainNDC uses conservative top/depth and the given bottom") {
     const int tris = h.emitCurtainNDC(s, 2, /*ndcYBottom*/ -1.1f, out, 6);
     CHECK(tris == 2);
 
-    // Conservative silhouette: top = min(h), depth = max(d).
+    // Conservative silhouette top = min(h); depth = min(d), the nearest surface.
     const float expectTop = 0.5f;
-    const float expectZ = 200.0f;
+    const float expectZ = 100.0f;
     // First emitted vertex is the top-left corner (TL).
     CHECK(out[0].x == doctest::Approx(-1.0f));
     CHECK(out[0].y == doctest::Approx(expectTop));

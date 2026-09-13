@@ -11,6 +11,7 @@
 
 #include <cerrno>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <ostream>
 #include <vector>
@@ -36,10 +37,20 @@ struct ToneMapStats {
 
 // Read the completed mask into g_depth and tone-map it in place to [0, 1].
 // MOC writes -1.0 into tiles nothing rasterized into and a small positive 1/w
-// for occluder depth, so a naive auto-stretch collapses both to black.
-// Unwritten becomes 0; occluder depth spreads over [0.2, 1.0] with the nearest
-// surface brightest. Raw extents come back in the stats so the log line can
-// report real numbers.
+// for occluder depth. Unwritten becomes 0; occluder depth spreads over
+// [0.2, 1.0] with the nearest surface brightest. Raw extents come back in the
+// stats so the log line can report real numbers.
+//
+// The spread is over log(1/w), not 1/w. A linear stretch is owned by the
+// single nearest pixel, and in Raster terrain mode that pixel is pinned at
+// the ceiling every outdoor frame: the ground the player stands on straddles
+// MOC's near plane, each clipped edge lands at w = mNearDist = 1, and 1/1 is
+// the largest depth the buffer can hold. Everything past the foreground then
+// collapses into the bottom few percent of the ramp as one flat grey, which
+// is what the overlay showed. Horizon mode never had the problem because its
+// curtain carries the far silhouette depth and drops near-plane verts. On a
+// log scale equal depth ratios get equal brightness steps, so a wall at 500
+// units and a tower at 5000 stay distinguishable next to ground at 50.
 //
 // flipY picks scanline order. MOC writes top-to-bottom under USE_D3D, which is
 // what a D3D texture wants (false); PFM is bottom-up (true).
@@ -62,9 +73,13 @@ ToneMapStats readAndToneMap(bool flipY) {
         return s;  // g_depth is already all-zero from the assign above
     }
 
-    const float range = (s.rawMax > s.rawMin) ? (s.rawMax - s.rawMin) : 1.0f;
+    // rawMin > 0 here (only v > 0 fed the scan), so both logs are finite, and
+    // every positive v sits in [rawMin, rawMax], so the ratio needs no clamp.
+    const float logMin = std::log(s.rawMin);
+    const float logMax = std::log(s.rawMax);
+    const float logRange = (logMax > logMin) ? (logMax - logMin) : 1.0f;
     for (float& v : g_depth) {
-        v = (v <= 0.0f) ? 0.0f : 0.2f + 0.8f * ((v - s.rawMin) / range);
+        v = (v <= 0.0f) ? 0.0f : 0.2f + 0.8f * ((std::log(v) - logMin) / logRange);
     }
     return s;
 }

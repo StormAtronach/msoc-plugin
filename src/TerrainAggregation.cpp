@@ -110,8 +110,14 @@ static void appendTerrainShape(std::vector<float>& aggVerts,
             }
         }
 
-        // (n-1)*(n-1)*2 triangles. Winding set at submit time via
-        // g_frame.occluderWinding; this builder leaves index order as-is.
+        // (n-1)*(n-1)*2 triangles. Winding must match the full-resolution
+        // path, which copies the source patches' own CCW order: the same
+        // OcclusionOccluderCCWOnly gate (BACKFACE_CW) runs at submit time, so
+        // a coarse quad emitted CW is silently culled. It was, and with the
+        // default Half/CCW-only config that dropped most of the downsampled
+        // terrain from the mask and left black fractures across the hills.
+        // (v00, v01, v10) + (v10, v01, v11) is CCW under this row-major grid;
+        // verified against every dumped patch.
         const unsigned int qN = n - 1;
         aggIdx.reserve(aggIdx.size() + static_cast<size_t>(qN * qN) * 6);
         for (unsigned int qr = 0; qr < qN; ++qr) {
@@ -121,11 +127,11 @@ static void appendTerrainShape(std::vector<float>& aggVerts,
                 const unsigned int v10 = baseVert + ((qr + 1) * n + qc);
                 const unsigned int v11 = baseVert + ((qr + 1) * n + (qc + 1));
                 aggIdx.push_back(v00);
-                aggIdx.push_back(v10);
                 aggIdx.push_back(v01);
                 aggIdx.push_back(v10);
+                aggIdx.push_back(v10);
+                aggIdx.push_back(v01);
                 aggIdx.push_back(v11);
-                aggIdx.push_back(v01);
             }
         }
         return;
@@ -412,32 +418,35 @@ void rasterizeHorizon(NI::Camera* camera) {
     // bin and the tile-snap phase change - the source of the flicker.
     //
     // Fix: lower each sample's height to the MIN touched height over the
-    // span to its neighbours, and raise its depth to the MAX. Then for any
-    // segment [i, i+1], emit's min(s_i.h, s_{i+1}.h) is <= the raw horizon
-    // at every column in the segment (s_i.h already spans [col_{i-1},
-    // col_{i+1}] >= [col_i, col_{i+1}]), so the curtain is conservative
-    // against the full silhouette regardless of how coarsely simplify()
-    // placed the samples. Sentinel (untouched) columns are skipped so a
-    // see-through gap does not drag a real segment down; a sample whose
-    // whole neighbourhood is sentinel keeps its sentinel h and emit skips
-    // it. The safety margin folds into the same pass.
+    // span to its neighbours, and set its depth to the MIN (nearest) over the
+    // same span. Then for any segment [i, i+1], emit's min(s_i.h, s_{i+1}.h)
+    // is <= the raw horizon at every column in the segment (s_i.h already
+    // spans [col_{i-1}, col_{i+1}] >= [col_i, col_{i+1}]), so the curtain is
+    // conservative against the full silhouette regardless of how coarsely
+    // simplify() placed the samples. Nearest depth (not the old MAX/farthest)
+    // is what makes the curtain occlude like a coarse raster instead of
+    // sitting at the distant skyline; the trade is over-occlusion through a
+    // silhouette gap, since one depth covers the whole strip. Sentinel
+    // (untouched) columns are skipped so a see-through gap does not drag a
+    // real segment down; a sample whose whole neighbourhood is sentinel keeps
+    // its sentinel h and emit skips it. The safety margin folds in here.
     for (int i = 0; i < nSamples; ++i) {
         const int cLo = (i > 0) ? samples[i - 1].col : samples[i].col;
         const int cHi = (i + 1 < nSamples) ? samples[i + 1].col : samples[i].col;
         float hMin = std::numeric_limits<float>::infinity();
-        float dMax = 0.0f;
+        float dMin = std::numeric_limits<float>::infinity();
         bool found = false;
         for (int c = cLo; c <= cHi; ++c) {
             const float hc = horizon.heightAt(c);
             if (hc <= -1.0e29f) continue;  // untouched column
             if (hc < hMin) hMin = hc;
             const float dc = horizon.depthAt(c);
-            if (dc > dMax) dMax = dc;
+            if (dc > 0.0f && dc < dMin) dMin = dc;  // nearest; 0 = untouched depth
             found = true;
         }
         if (found) {
             samples[i].h = hMin - kYSafetyMargin;
-            samples[i].d = dMax;
+            if (dMin < std::numeric_limits<float>::infinity()) samples[i].d = dMin;
         }
     }
 
