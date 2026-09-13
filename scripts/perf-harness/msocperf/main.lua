@@ -34,8 +34,14 @@ do
     if ok then spec = result end
 end
 
+-- mwse.log is `print(tostring(str):format(...))`, so it formats its first
+-- argument a second time even with no varargs. A message that legitimately
+-- contains a percent sign - "(%.0f%% off)" renders one - then dies there with
+-- "bad argument #1 to 'format'". Passing the text as an argument to "%s" keeps
+-- it out of that second format pass, which fixes the whole class rather than
+-- requiring every call site to avoid percent signs.
 local function say(fmt, ...)
-    mwse.log("[msocperf] " .. string.format(fmt, ...))
+    mwse.log("%s", "[msocperf] " .. string.format(fmt, ...))
 end
 
 mwse.log("[msocperf] harness loaded; spec=%s", spec and "present" or "absent")
