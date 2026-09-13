@@ -31,7 +31,7 @@ bool createMSOCResources(std::ostream& log) {
 
     if (!g_msoc) {
         // Documents intent; it does not gate anything. The AVX-512 TU is not
-        // built at all as of 1.6.0 (see deps/msoc/NOTICE), so Create() cannot
+        // built at all as of 1.6.1 (see deps/msoc/NOTICE), so Create() cannot
         // return an AVX-512 implementation even when asked.
         g_msoc = ::MaskedOcclusionCulling::Create(msoc::simdCap());
         if (!g_msoc) {

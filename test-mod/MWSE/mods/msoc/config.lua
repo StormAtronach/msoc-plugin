@@ -67,7 +67,7 @@ local default_config = {
 
     -- Mask resolution. Applied at launch, changed on restart: main.lua
     -- pushes this table across before calling msoc.install(), which latches
-    -- it into kMsocWidth/Height for the session. (Before 1.6.0 install ran
+    -- it into kMsocWidth/Height for the session. (Before 1.6.1 install ran
     -- first and a saved value here never took effect at all.)
     -- Tier-overridden below (see applyTierDefaults). MOC requires
     -- width%8==0 and height%4==0 (asserted in C++); plugin clamps to
@@ -96,7 +96,7 @@ local default_config = {
     OcclusionLogCellCross               = false,
 
     -- Freeze-forensics watchdog. Applied at launch, changed on restart:
-    -- the native side reads it at install, which since 1.6.0 runs after this
+    -- the native side reads it at install, which since 1.6.1 runs after this
     -- table is pushed across. An MCM edit persists to msoc.json and takes
     -- effect on the next launch.
     OcclusionForensicsWatchdog          = false,
@@ -117,7 +117,7 @@ local default_config = {
 -- consumer existed — the plugin cannot install itself without main.lua — and
 -- the duplicate was a standing hazard: whichever ran last won, silently, and
 -- the two drifted (OcclusionSkipTerrainOccludees was tier-sensitive in C++ and
--- absent here). 1.6.0 deleted the C++ copy.
+-- absent here). 1.6.1 deleted the C++ copy.
 --
 -- Order matters. mwse.loadConfig fills any field missing from the user's saved
 -- JSON out of default_config, so the mutation below has to happen BEFORE that
@@ -228,10 +228,10 @@ local kTierMigratedKeys = {
     "OcclusionMaskHeight",
     "OcclusionRasterizeBudgetUs",
     "OcclusionClassifyBudgetUs",
-    -- 1.6.0: was tier-sensitive in C++ only, so a saved JSON written before
+    -- 1.6.1: was tier-sensitive in C++ only, so a saved JSON written before
     -- this release holds the flat Lua default rather than the tier's value.
     "OcclusionSkipTerrainOccludees",
-    -- 1.6.0: mask size now actually reaches the latch (install runs after
+    -- 1.6.1: mask size now actually reaches the latch (install runs after
     -- configure), so a stale saved value would take effect for the first time.
     "OcclusionAggregateTerrain",
 }
@@ -242,9 +242,9 @@ local kTierMigratedKeys = {
 -- forever — harmless, but clutters the file.
 local kRetiredKeys = {
     "OcclusionDrainBudgetUs", -- 0.0.10: renamed to OcclusionClassifyBudgetUs
-    -- 1.6.0: CPU light culling removed. The feature tested net-negative in
+    -- 1.6.1: CPU light culling removed. The feature tested net-negative in
     -- 1.1.0 (~12% FPS regression in a Vivec canton at night) and was left in
-    -- as a json-only knob; 1.6.0 drops the hook, the cache and both keys.
+    -- as a json-only knob; 1.6.1 drops the hook, the cache and both keys.
     "OcclusionCullLights",
     "OcclusionLightCullHysteresisFrames",
 }

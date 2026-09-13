@@ -147,7 +147,7 @@ local function registerModConfig()
     -- The "Cull occluded lights" toggle and its hysteresis slider were
     -- exposed in 1.0.0, removed from the MCM in 1.1.0 after the feature
     -- tested net-negative (~12% FPS regression), and removed outright in
-    -- 1.6.0 along with the 0x6bb7d4 hook and the per-light cache.
+    -- 1.6.1 along with the 0x6bb7d4 hook and the per-light cache.
 
     main:createSlider({
         label       = i18n("OcclusionTemporalCoherenceFrames.label"),

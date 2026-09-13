@@ -2,7 +2,7 @@
 
 // Plugin entry point.
 //
-// Until 1.6.0 this header also carried the MGE-XE consumer ABI: the mask
+// Until 1.6.1 this header also carried the MGE-XE consumer ABI: the mask
 // query API, external occluder injection, the light-observed and
 // visible-geom callbacks, and the mwse_* C exports that fronted them. No
 // released MGE-XE ever resolved those exports, so the whole surface was

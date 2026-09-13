@@ -10,7 +10,7 @@
 // call flush() at a safe sync point when the process may not exit cleanly.
 // A harness that kills the game needs it; msoc.flushLog() exposes it to Lua.
 //
-// 1.6.0 removed OpenLog, CloseLog, getDebug and prettyDump, none of which had
+// 1.6.1 removed OpenLog, CloseLog, getDebug and prettyDump, none of which had
 // callers, and the first two of which did not describe the lifecycle above.
 
 #include <iosfwd>

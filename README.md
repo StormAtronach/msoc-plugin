@@ -10,7 +10,7 @@ on geometry the player would never have seen.
 The plugin runs standalone — no extra mods required beyond MWSE, and
 nothing else has to know it is there.
 
-## What's new in 1.6.0
+## What's new in 1.6.1
 
 - **The MGE-XE integration surface is gone.** The plugin used to publish a
   double-buffered copy of its mask plus a set of `mwse_*` C exports so
@@ -57,7 +57,7 @@ applied automatically. The MCM lets you override if needed.
 - **Windows 8 or newer** (worker-thread parking uses `WaitOnAddress`).
 - **CPU** with at least SSE4.1. The rasterizer uses AVX2 where available and
   SSE4.1 otherwise. (Intel's AVX-512 path is not built: it never selected at
-  runtime, and 1.6.0 stopped compiling the dead translation unit.) A fallback
+  runtime, and 1.6.1 stopped compiling the dead translation unit.) A fallback
   below SSE4.1 exists but isn't recommended.
 - No Visual C++ redistributable required — the runtime is linked in.
 
@@ -93,7 +93,7 @@ The cost above is close to constant. What the plugin returns is not: it
 depends entirely on how much of the view is hidden behind something else. So
 the same build is a large win in one place and a small loss in another.
 
-Measured for 1.6.0 across four exterior sites, culler off against culler on:
+Measured for 1.6.1 across four exterior sites, culler off against culler on:
 
 | site | cull rate | result |
 |------|-----------|--------|
@@ -229,7 +229,7 @@ sudden camera reveals) so the per-frame cost stays bounded.
 
 - **MGE-XE versions:** any of them, including none. Up to 1.4.0 the plugin
   published its mask so MGE-XE could cull distant statics against it; that
-  contract was removed in 1.6.0 because no released MGE-XE ever used it.
+  contract was removed in 1.6.1 because no released MGE-XE ever used it.
   The two now share nothing but the frame, so the plugin neither requires a
   particular MGE-XE build nor cares whether one is installed.
 - **Other MWSE mods:** the plugin detours Morrowind's `cullShow` — the

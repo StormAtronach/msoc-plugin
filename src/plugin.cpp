@@ -47,7 +47,7 @@ struct ProbeResult {
 // Create + exercise + destroy. Catches AVX2 link failures at load instead of
 // at first patch use.
 //
-// Asking for AVX2 documents intent; it does not gate anything. As of 1.6.0 the
+// Asking for AVX2 documents intent; it does not gate anything. As of 1.6.1 the
 // AVX-512 translation unit is not compiled at all and the dispatch branch is
 // preprocessed out (deps/msoc/NOTICE), so Create() has no AVX-512 path to
 // return. Re-enabling it means restoring the TU to MOC_SOURCES and setting
@@ -94,7 +94,7 @@ int maskOverlayTexture_lua(lua_State* L) {
 }
 
 // msoc.dumpMask(path) -> bool. Tone-mapped PFM of the finished mask.
-// Replaces the mwse_dumpOcclusionMask export removed in 1.6.0.
+// Replaces the mwse_dumpOcclusionMask export removed in 1.6.1.
 int dumpMask_lua(lua_State* L) {
     const char* path = luaL_checkstring(L, 1);
     const bool ok = msoc::patch::occlusion::dumpMaskToPfm(path);
@@ -132,7 +132,7 @@ int logMark_lua(lua_State* L) {
 // msoc.install() - install the engine hooks. Separate from luaopen_msoc so
 // main.lua can push msoc.json across first: installPatches() latches the
 // restart-only knobs (mask resolution, forensics watchdog) as it runs, and
-// before 1.6.0 it ran during include(), when Configuration:: still held
+// before 1.6.1 it ran during include(), when Configuration:: still held
 // compile-time defaults. Idempotent; MWSE's include() can load the same DLL
 // twice across Lua states.
 //
@@ -175,7 +175,7 @@ extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     const unsigned hwConcurrency = std::thread::hardware_concurrency();
     const auto tier = msoc::classifyHardwareTier(probe.impl, hwConcurrency);
 
-    setStringField(L, "version", "1.6.0-dev");
+    setStringField(L, "version", "1.6.1");
     setStringField(L, "mocLink", probe.linkText);
     setStringField(L, "simdLevel", simdLevelName(probe.impl));
     setStringField(L, "hardwareTier", msoc::hardwareTierName(tier));
