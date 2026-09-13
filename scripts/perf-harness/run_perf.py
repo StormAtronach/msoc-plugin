@@ -311,12 +311,20 @@ def kill_game():
 
 # i7-14700KF topology: 8 P-cores with hyperthreading on logical 0-15, then 12
 # E-cores on 16-27. Named masks so a run is readable without counting bits.
+#
+# These are for simulating hardware you do not own. Pinning to P-cores to make
+# measurements more repeatable was tried and does not work: alternated against
+# free scheduling over four cycles it moved the culler-on side by +0.008 ms
+# with the sign flipping between cycles. Between-session drift is real but is
+# not the scheduler, so measure inside a session instead. See lessons 30
+# and 32 in moreFPS docs/lessons/performance-measurement.md.
 AFFINITY_PRESETS = {
     "ecore2": 0x30000,       # 2 E-cores
     "ecore4": 0xF0000,       # 4 E-cores, the default weak-CPU profile
     "ecore8": 0xFF0000,      # 8 E-cores
     "pcore2": 0x00003,       # 2 threads of one P-core, for comparison
     "pcore4": 0x0000F,
+    "pcore8": 0x0000FFFF,   # all 8 P-cores, both threads
     "all": 0,                # 0 means leave it alone
 }
 
@@ -354,6 +362,22 @@ def launch(args):
         print("    launch attempt %d produced no game process; retrying" % attempt)
         kill_game()
     return False
+
+
+def deploy_dll(path):
+    """Copy a specific msoc.dll into the test install before launching.
+
+    Comparing two builds is the same shape of problem as sweeping a setting
+    that latches at install: it cannot be done inside one session, so the
+    sessions have to alternate and the repeats have to cycle. See lesson 31.
+    """
+    if not path:
+        return
+    dest = os.path.join(DEPLOY_MOD, "MWSE", "lib", "msoc.dll")
+    if not os.path.isfile(path):
+        raise SystemExit("--dll not found: %s" % path)
+    shutil.copy(path, dest)
+    print("  dll <- %s (%d bytes)" % (path, os.path.getsize(dest)))
 
 
 def deploy_harness():
@@ -765,6 +789,9 @@ def main():
                     help="rotate the view every N frames during sampling (default 300)")
     ap.add_argument("--views", type=int, default=8,
                     help="how many bearings to rotate through (default 8)")
+    ap.add_argument("--dll",
+                    help="deploy this msoc.dll before launching, for "
+                         "comparing two builds across alternating sessions")
     ap.add_argument("--affinity", choices=sorted(AFFINITY_PRESETS),
                     help="pin the game to a subset of logical processors. "
                          "ecore4 is the weak-CPU profile on this machine")
@@ -823,6 +850,7 @@ def main():
 
     patched = False if args.vsync else disable_vsync()
     print("  results -> %s" % start_results_dir())
+    deploy_dll(args.dll)
     deploy_harness()
     results = []
     try:
@@ -875,6 +903,13 @@ def main():
                         finally:
                             if patched_json:
                                 restore_msoc_json()
+                        # A session whose game never launched returns None on
+                        # the scan path. Skipping it loses one data point;
+                        # crashing loses every session after it, which on an
+                        # overnight sweep is the whole run.
+                        if not rs:
+                            print("  session produced nothing; skipping")
+                            continue
                         for r in rs:
                             # "site/variant#rep" -> variant
                             head = r["run"].split("#", 1)[0]
