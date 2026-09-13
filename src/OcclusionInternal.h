@@ -89,12 +89,11 @@ namespace live {
 
 }  // namespace live
 
-// TerrainAggregation.cpp, called by the detour. Raster mode merges each near
-// Land into one submission; Horizon mode rasterizes a 1D silhouette curtain.
+// TerrainAggregation.cpp, called by the detour. Merges each near Land into
+// one occluder submission.
 namespace terrain {
 
 void rasterizeAggregate(NI::Camera* camera);
-void rasterizeHorizon(NI::Camera* camera);
 
 }  // namespace terrain
 

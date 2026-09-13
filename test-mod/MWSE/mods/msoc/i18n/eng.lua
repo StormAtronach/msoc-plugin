@@ -63,20 +63,13 @@ return {
     ["OcclusionAggregateTerrain.label"] = "Terrain occluder mode",
     ["OcclusionAggregateTerrain.description"] = "Off: no terrain in the occlusion mask "
         .. "(lowest CPU, lowest cull rate). "
-        .. "Raster (default for medium/high hardware tier): rasterizes terrain triangles "
-        .. "directly into the mask. With Async Occluders enabled, the threadpool "
-        .. "parallelizes the rasterization, hiding most of its cost on multi-core CPUs. "
-        .. "Horizon (default for low hardware tier): builds a 1D screen-space silhouette "
-        .. "and submits ~120 curtain triangles synchronously. Construction is "
-        .. "bounded-cost regardless of how much terrain is in view, which makes it the "
-        .. "safer pick when async is off — its cost stays on the main thread but is "
-        .. "predictable. "
-        .. "Cull rate is comparable across both modes in most scenes — pick based on the "
-        .. "cost shape that fits your hardware. The default tracks your hardware tier; "
-        .. "flip it manually only if your specific setup contradicts the tier auto-pick.",
+        .. "Raster (default): rasterizes the loaded terrain into the mask so hills hide "
+        .. "what stands behind them. With Async Occluders enabled the threadpool does the "
+        .. "work off the main thread; with it off, the Terrain resolution setting below is "
+        .. "the cost knob (Corners is about a fifth of Half's time and occludes about as "
+        .. "much). The low hardware tier defaults to Raster at Corners.",
     ["OcclusionAggregateTerrain.option.0"] = "Off",
     ["OcclusionAggregateTerrain.option.1"] = "Raster",
-    ["OcclusionAggregateTerrain.option.2"] = "Horizon",
 
     ["OcclusionTerrainResolution.label"] = "Terrain occluder resolution",
     ["OcclusionTerrainResolution.description"] = "How many triangles each terrain subcell "
@@ -158,8 +151,8 @@ return {
         .. "cost. Assumes meshes are CCW-wound, which holds for the vast majority of NIFs; "
         .. "a rare clockwise-wound mesh is simply dropped from the occlusion mask. That can "
         .. "only under-occlude (the object behind it stays visible) and never hides something "
-        .. "that should be drawn. Applies to all occluders - cell meshes, terrain, the "
-        .. "horizon curtain and aggregated terrain. Worth about 0.4 ms per frame in a dense "
+        .. "that should be drawn. Applies to all occluders - cell meshes and aggregated "
+        .. "terrain. Worth about 0.4 ms per frame in a dense "
         .. "city when occluders rasterise on the main thread, which is how the low-tier preset "
         .. "runs; with async on, the saving lands on a worker and does not show in frame time. "
         .. "Turn it off only if you suspect a mis-wound mesh is failing to occlude.",

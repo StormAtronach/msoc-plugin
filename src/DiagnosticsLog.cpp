@@ -65,14 +65,6 @@ void emitPerFrameStatsLine() {
                       << " aggTerrainLands=" << g_stats.aggregateTerrainLands
                       << " aggTerrainTris=" << g_stats.aggregateTerrainTris
                       << " aggTerrainUs=" << g_stats.aggregateTerrainUs
-                      // Horizon-mode counters; zero unless g_frame.aggregateTerrain == 2.
-                      << " horizonBuildUs=" << g_stats.horizonBuildUs
-                      << " horizonRasterUs=" << g_stats.horizonRasterUs
-                      << " horizonLandsFed=" << g_stats.horizonLandsFed
-                      << " horizonVertsFed=" << g_stats.horizonVertsFed
-                      << " horizonColumnsTouched=" << g_stats.horizonColumnsTouched
-                      << " horizonCurtainTris=" << g_stats.horizonCurtainTris
-                      << " horizonAdaptiveEpsD=" << g_stats.horizonAdaptiveEpsD
                       << " landMembershipHit=" << g_caches.terrainMembershipHits
                       << " landMembershipMiss=" << g_caches.terrainMembershipMisses
                       << " landMembershipSize=" << g_caches.terrainMembership.size()

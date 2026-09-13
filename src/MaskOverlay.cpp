@@ -47,8 +47,7 @@ struct ToneMapStats {
 // MOC's near plane, each clipped edge lands at w = mNearDist = 1, and 1/1 is
 // the largest depth the buffer can hold. Everything past the foreground then
 // collapses into the bottom few percent of the ramp as one flat grey, which
-// is what the overlay showed. Horizon mode never had the problem because its
-// curtain carries the far silhouette depth and drops near-plane verts. On a
+// is what the overlay showed. On a
 // log scale equal depth ratios get equal brightness steps, so a wall at 500
 // units and a tower at 5000 stay distinguishable next to ground at 50.
 //

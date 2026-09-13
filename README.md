@@ -63,25 +63,24 @@ applied automatically. The MCM lets you override if needed.
 
 ## Performance characteristics
 
-Per-frame plugin cost measured on a high-tier (AVX2, 8+ thread) reference
-machine, comparing the four meaningful mode combinations in a representative
-exterior scene. All values are total per-frame CPU time spent inside the
-plugin's hot path — *cost*, not *gain*.
+Terrain has two modes, `Off` and `Raster`, and the raster's resolution
+(`Full` / `Half` / `Corners`) is the cost knob. Main-thread microseconds per
+frame for the terrain pass alone, measured 2026-09-13 on a 9-cell exterior
+(Azura's Coast) on a high-tier machine:
 
-| Mode          | aggTerrainUs           | horizonBuildUs | rasterizeUs       | asyncFlushUs | Total visible |
-|---------------|------------------------|----------------|-------------------|--------------|---------------|
-| Sync Horizon  | 0                      | 157            | 430 (full sync)   | 0            | ~581 µs       |
-| Sync Raster   | 177 (walk + sync)      | 0              | 651 (full sync)   | 0            | ~828 µs       |
-| Async Horizon | 0                      | 179            | 6 (curtain only)  | 127          | ~306 µs       |
-| Async Raster  | 13 (walk only)         | 0              | 0–2               | 117          | ~130 µs       |
+| Terrain resolution | triangles | sync (main thread) | async (dispatch + flush) |
+|--------------------|-----------|--------------------|--------------------------|
+| Full               | 14848     | 282 us             | ~36 us                   |
+| Half               | 3712      | 114 us             | ~31 us                   |
+| Corners            | 928       | 54 us              | ~27 us                   |
 
-The async modes shift mask-rasterization off the main thread onto worker
-cores, so the visible main-thread cost collapses. **Async Raster** is the
-cheapest combination and is the default on the mid- and high-tier hardware
-presets. **Sync Horizon** wins among synchronous modes — its bounded-cost
-silhouette curtain is cheaper to construct on the main thread than running
-the full per-shape terrain rasterization synchronously — and is the default
-on the low-tier (no-async) preset.
+All three occluded the same number of objects at that site. The async modes
+shift the rasterization onto worker cores, so the visible main-thread cost
+collapses; **Async Raster at Half** is the default on the mid- and high-tier
+presets. The low-tier (no-async) preset runs **Raster at Corners**. (A 1D
+"Horizon" silhouette-curtain mode existed until 1.6.1; measured properly it
+cost four to five times the synchronous raster at equal resolution and
+occluded less, so it was removed.)
 
 These numbers are the plugin's own CPU cost, not the time it saves
 downstream. The user-visible win is fewer GPU draw calls and vertex-shader
@@ -180,9 +179,10 @@ Open the MCM (Mod Configuration Menu) → **MSOC**. The interesting knobs:
 - **Master enable / interior / exterior toggles** — start with all on. Turn
   off interior culling if you see issues in cells with weird visibility
   rules.
-- **Terrain occluder mode** — `Off / Raster / Horizon`. Default tracks your
-  hardware tier (Raster on multi-core, Horizon on low). Read the in-MCM
-  description if you want to tune; otherwise leave it.
+- **Terrain occluder mode** — `Off / Raster`, plus a resolution dropdown
+  (`Full / Half / Corners`). Defaults track your hardware tier (Half on
+  multi-core, Corners on low). Read the in-MCM description if you want to
+  tune; otherwise leave it.
 - **Async occluders** — controls whether mask-rasterization runs on the
   threadpool or the main thread. Hardware-tier default is correct for most
   users; flip only if you're benchmarking or debugging.
@@ -212,9 +212,9 @@ Each frame, while Morrowind's renderer traverses the scene graph:
 2. **Defer leaves.** Small NiTriShape leaves are queued for later instead of
    being tested against a partially-built mask (avoids same-frame ordering
    false-positives).
-3. **Optional: aggregate terrain.** Either the merged near-scene terrain
-   surface (`Raster`) or a 1D screen-space horizon curtain at the terrain
-   silhouette's far depth (`Horizon`) gets rasterized into the same mask.
+3. **Optional: aggregate terrain.** The merged near-scene terrain surface
+   (the nine active cells, at the chosen resolution) gets rasterized into the
+   same mask.
 4. **Drain.** Every queued leaf gets `TestRect` against the now-complete
    mask. Verdicts: VISIBLE, OCCLUDED, VIEW_CULLED. OCCLUDED leaves skip
    `display()` entirely.

@@ -14,7 +14,7 @@ meaningless), this summarises the WHOLE run three ways:
      session and pick comparable segments between two runs.
   3. A load-bucketed view keyed on terrain lands in view, so two runs with
      different overall scene mixes can still be compared like-for-like
-     (e.g. "horizon-build at 4 terrain lands" in run A vs run B).
+     (e.g. "agg-terrain at 4 terrain lands" in run A vs run B).
 
 Usage:  parse_msoc_log.py [logpath] [nwindows]
 """
@@ -63,11 +63,10 @@ def mean(frames, k):
 # (key, label) for the per-frame timing breakdown.
 TIMINGS = [('frameDeltaUs','frame-total'),('rasterizeUs','rasterize'),('occXformUs','occ-xform'),
            ('drainUs','drain'),('classifyUs','classify'),('displayUs','display'),
-           ('aggTerrainUs','agg-terrain'),('horizonBuildUs','horizon-build'),
-           ('horizonRasterUs','horizon-raster'),('asyncFlushUs','async-flush'),('wakeUs','wake-threads')]
+           ('aggTerrainUs','agg-terrain'),('asyncFlushUs','async-flush'),('wakeUs','wake-threads')]
 
 def terrain_lands(f):
-    return int(num(f, 'aggTerrainLands') + num(f, 'horizonLandsFed'))
+    return int(num(f, 'aggTerrainLands'))
 
 def fnum(f):
     try: return int(f.get('_frame', '-1'))
@@ -126,8 +125,7 @@ def main(path, nwin=6, minframe=0):
         print(f"  box-AABB cache: {100*bh/(bh+bm):.1f}% hit  (hits={int(bh)} miss={int(bm)})")
     print(f"  occluders rasterized/frame: {mean(clean,'rasterized'):.0f}"
           f"   viewCulled/frame: {mean(clean,'viewCulled'):.0f}")
-    print(f"  terrain lands/frame: {mean(clean,'aggTerrainLands'):.1f} raster"
-          f" + {mean(clean,'horizonLandsFed'):.1f} horizon")
+    print(f"  terrain lands/frame: {mean(clean,'aggTerrainLands'):.1f}")
 
     # ---- cache hit rates ----
     print("\n-- cache hit rates (representative run) --")
@@ -149,7 +147,7 @@ def main(path, nwin=6, minframe=0):
     # ---- per-window time series ----
     print(f"\n-- per-window breakdown ({nwin} windows across the representative run) --")
     print(f"  {'frames':>15s} {'cull%':>6s} {'dDelta':>7s} {'drain':>6s} "
-          f"{'disp':>6s} {'rast':>5s} {'hBuild':>6s} {'tLand':>5s} {'tested':>7s}")
+          f"{'disp':>6s} {'rast':>5s} {'aggT':>6s} {'tLand':>5s} {'tested':>7s}")
     W = max(1, len(clean) // nwin)
     i = 0
     while i < len(clean):
@@ -158,21 +156,19 @@ def main(path, nwin=6, minframe=0):
         cr_s = cullrate(seg)[0]
         print(f"  {rng:>15s} {cr_s:6.1f} {pct([num(f,'frameDeltaUs') for f in seg],0.5):7.0f}"
               f" {mean(seg,'drainUs'):6.0f} {mean(seg,'displayUs'):6.0f} {mean(seg,'rasterizeUs'):5.0f}"
-              f" {mean(seg,'horizonBuildUs'):6.0f} {statistics.mean(terrain_lands(f) for f in seg):5.1f}"
+              f" {mean(seg,'aggTerrainUs'):6.0f} {statistics.mean(terrain_lands(f) for f in seg):5.1f}"
               f" {statistics.mean(occ_test(f)[1] for f in seg):7.0f}")
 
     # ---- load-bucketed (like-for-like across runs) ----
-    print("\n-- horizon/raster cost by terrain load (compare same 'lands' row across runs) --")
+    print("\n-- terrain cost by terrain load (compare same 'lands' row across runs) --")
     buckets = {}
     for f in clean:
         buckets.setdefault(terrain_lands(f), []).append(f)
-    print(f"  {'lands':>5s} {'frames':>6s} {'hBuild':>7s} {'hRast':>6s} {'rast':>6s} "
-          f"{'vertsFed':>9s} {'curtTri':>8s}")
+    print(f"  {'lands':>5s} {'frames':>6s} {'aggT':>7s} {'rast':>6s} {'aggTris':>8s}")
     for lands in sorted(buckets):
         seg = buckets[lands]
-        print(f"  {lands:5d} {len(seg):6d} {mean(seg,'horizonBuildUs'):7.0f} {mean(seg,'horizonRasterUs'):6.0f}"
-              f" {mean(seg,'rasterizeUs'):6.0f} {mean(seg,'horizonVertsFed'):9.0f}"
-              f" {mean(seg,'horizonCurtainTris'):8.0f}")
+        print(f"  {lands:5d} {len(seg):6d} {mean(seg,'aggTerrainUs'):7.0f}"
+              f" {mean(seg,'rasterizeUs'):6.0f} {mean(seg,'aggTerrainTris'):8.0f}")
 
     # ---- CCW-only back-face cull A/B ----
     # The option's effect lands on occluderTris + rasterizeUs (back faces

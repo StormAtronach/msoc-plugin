@@ -31,7 +31,6 @@ TIMERS = [
     "occXformUs",     # occluder world-vert transform (the cache-miss rebuild)
     "rasterizeUs",    # occluder rasterisation (MOC RenderTriangles)
     "aggTerrainUs",   # terrain aggregation (incl. buildLandCacheEntry on miss)
-    "horizonBuildUs",
     "classifyUs",     # drain phase-1 verdicts
     "drainUs",        # whole drain
     "displayUs",

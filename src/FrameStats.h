@@ -27,9 +27,8 @@ struct FrameStats {
     uint64_t rasterizedAsOccluder = 0;
     uint64_t occluderTriangles = 0;
     // Set by every path that submits triangles into the mask: per-instance
-    // occluders, aggregate terrain, and the horizon curtain. The drain's
-    // fast path used to infer this from the two counters below, which the
-    // curtain does not touch, so a Horizon-mode frame tested nothing.
+    // occluders and aggregate terrain. The drain's fast path reads this
+    // rather than inferring emptiness from the counters below.
     bool maskHasOccluders = false;
     // Threadpool submits only. The Flush barrier is worth paying for only if
     // something was actually queued; a front-to-back frame that recorded
@@ -57,13 +56,6 @@ struct FrameStats {
     uint64_t aggregateTerrainLands = 0;
     uint64_t aggregateTerrainTris = 0;
     uint64_t aggregateTerrainUs = 0;
-    uint64_t horizonBuildUs = 0;
-    uint64_t horizonRasterUs = 0;
-    uint64_t horizonLandsFed = 0;
-    uint64_t horizonVertsFed = 0;
-    uint64_t horizonColumnsTouched = 0;
-    uint64_t horizonCurtainTris = 0;
-    float horizonAdaptiveEpsD = 0;
 
     // Occluder cache miss-path probes.
     uint64_t classifyOccluderCalls = 0;

@@ -49,8 +49,9 @@ public:
     static bool OcclusionEnableInterior;
     static bool OcclusionEnableExterior;
     static bool OcclusionSkipTerrainOccludees;
-    // Tri-state: 0=Off, 1=Raster, 2=Horizon. Lua side accepts bool too
-    // (true->1, false->0); see Config.cpp's parser.
+    // 0=Off, 1=Raster. Lua side accepts bool too (true->1, false->0), and
+    // the retired value 2 (the Horizon curtain, removed in 1.6.1) reads as
+    // Raster; see Config.cpp's parser.
     static int OcclusionAggregateTerrain;
     static unsigned int OcclusionTerrainResolution;
 
@@ -65,8 +66,7 @@ public:
     // cost of dropping the rare CW-wound mesh from the depth buffer. That
     // loss is a safe under-occlude (the object behind it just isn't
     // culled), never a wrong-cull. Global: applies to per-instance
-    // occluders, aggregate terrain, the horizon curtain, and external-
-    // consumer occluders. See FrameConfig::occluderWinding for the
+    // occluders and aggregate terrain. See FrameConfig::occluderWinding for the
     // (deliberately counter-intuitive) MOC enum mapping.
     static bool OcclusionOccluderCCWOnly;
 

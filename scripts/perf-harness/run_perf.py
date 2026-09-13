@@ -154,8 +154,8 @@ SWEEP_SYNC_VARIANTS = [
     # submission is enqueue-and-forget; here the work is on this thread.
     ("no-ccw", _sync(OcclusionOccluderCCWOnly=False)),
     ("no-f2b", _sync(OcclusionOccluderFrontToBack=False)),
-    # Terrain, including the mode low tier actually defaults to.
-    ("horizon", _sync(OcclusionAggregateTerrain=2)),
+    # Terrain: the resolution low tier actually defaults to, and none.
+    ("corners", _sync(OcclusionTerrainResolution=2)),
     ("terrain-off", _sync(OcclusionAggregateTerrain=0)),
     # Occludee-side knobs.
     ("no-box", _sync(OcclusionOccludeeBoxTest=False)),
@@ -165,7 +165,7 @@ SWEEP_SYNC_VARIANTS = [
     ("budgets", _sync(OcclusionRasterizeBudgetUs=1500,
                       OcclusionClassifyBudgetUs=1500)),
     # The whole low-tier profile bar the mask size, which cannot be set here.
-    ("low-tier", _sync(OcclusionAggregateTerrain=2,
+    ("low-tier", _sync(OcclusionTerrainResolution=2,
                        OcclusionSkipTerrainOccludees=True,
                        OcclusionRasterizeBudgetUs=1500,
                        OcclusionClassifyBudgetUs=1500)),
@@ -191,7 +191,7 @@ SWEEP_VARIANTS = [
     # Where does the mask get built, and is it worth building?
     ("sync", {"EnableMSOC": True, "OcclusionAsyncOccluders": False}),
     ("terrain-off", {"EnableMSOC": True, "OcclusionAggregateTerrain": 0}),
-    ("horizon", {"EnableMSOC": True, "OcclusionAggregateTerrain": 2}),
+    ("corners", {"EnableMSOC": True, "OcclusionTerrainResolution": 2}),
     # Occluder submission throughput.
     ("no-f2b", {"EnableMSOC": True, "OcclusionOccluderFrontToBack": False}),
     ("no-ccw", {"EnableMSOC": True, "OcclusionOccluderCCWOnly": False}),
@@ -573,7 +573,7 @@ def plugin_costs(msoc_log, run=None):
         text = text.split(start, 1)[1]
         text = text.split(end, 1)[0]
     keys = ("rasterizeUs", "drainUs", "classifyUs", "displayUs", "asyncFlushUs",
-            "aggTerrainUs", "horizonBuildUs")
+            "aggTerrainUs")
     acc = {k: [] for k in keys}
     cull, rast = [], []
     for line in text.splitlines():

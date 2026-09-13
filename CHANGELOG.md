@@ -36,8 +36,7 @@ line up with the number already published on Nexus.
   ceiling on every outdoor frame: the ground under the player straddles MOC's
   near plane and each clipped edge lands at w = 1, so everything past the
   foreground collapsed into one flat grey while the near hillside saturated
-  white. Horizon mode never showed it, since the curtain carries the far
-  silhouette depth. Modelled on MGE-XE's shadow-map debug overlay, but
+  white. Modelled on MGE-XE's shadow-map debug overlay, but
   delivered through the engine UI so no render state is touched behind the
   NiDX8 state cache. The readback is armed by Lua asking for the texture, so
   the overlay costs nothing while it is off. It replaces the PFM dump as the
@@ -54,28 +53,34 @@ line up with the number already published on Nexus.
   overlay and, worse, as terrain that occluded far less than it should. Found
   by dumping the mask against the live camera and re-rasterising the same
   patches offline; the coarse quads now wind CCW to match the full path.
-- **Fixed: the Horizon curtain sat at the far skyline depth and occluded almost
-  nothing.** The 1D builder coupled each column's height and depth: depth
-  tracked the height winner, which is the distant skyline ridge, and the
-  erosion pass then took the farthest depth over each sample's neighbourhood.
-  The curtain ended up pinned at the farthest terrain in view (w about 10000 in
-  the test scene) while the raster path reached the near hill at w about 230,
-  so it culled next to nothing. Height and depth are now independent
-  reductions: height still takes the per-column max (the silhouette), depth
-  takes the min, the nearest terrain surface, so the curtain occludes like a
-  coarse raster. The trade is that one depth still covers the whole strip from
-  skyline to screen bottom, so the curtain can over-occlude through a gap in
-  the silhouette; that case is left for a follow-up.
-- **Fixed: Horizon terrain mode culled nothing.** The drain has a fast path that
-  skips every occludee test when it believes the mask is empty, and it decided
-  that by checking two counters - per-instance occluders and aggregated terrain
-  Lands - neither of which the horizon curtain touches. On any frame where no
-  per-instance occluder rasterized, the drain therefore concluded the mask was
-  empty and skipped every occludee test, so the curtain occluded nothing. That
-  is open terrain with little built on it, which is exactly where Horizon mode
-  is the default; a dense city frame submits hundreds of occluders and was
-  never affected. Both that gate and the async flush gate now read facts
-  recorded where the triangles are actually submitted.
+- **Removed the Horizon terrain mode.** The 1D silhouette curtain that the
+  low tier defaulted to never worked: it was fed one vertex per column, and
+  near terrain has a vertex only every 40 to 200 mask columns, so the columns
+  between took their height from the hidden far terrain behind the hill and
+  the curtain settled at eye level. (That scheme came from MGE-XE's
+  distant-land curtain, where ROAM keeps vertices dense along silhouettes;
+  Morrowind's near land is a fixed grid, and MGE-XE G7 has no ROAM terrain.)
+  Rebuilt properly, with each triangle's upper edge written into every column
+  it spans, the depth coupled to the silhouette as the design required, and
+  eight nested depth bands so the curtains could carry near ground under a
+  far ridge, it was a correct, conservative occluder, and that made its cost
+  measurable: 511 us of main-thread time per frame at Half against 114 us for
+  the synchronous Half raster and 54 us for Corners, which also occluded more.
+  A scalar 1D fill spends more column operations on a near triangle than
+  MOC spends SIMD tile operations, so it cannot undercut the rasterizer. The
+  mode and its counters are gone; `OcclusionAggregateTerrain` keeps its
+  integer type with 0 = Off and 1 = Raster, a saved 2 reads as Raster, and
+  the low tier now runs Raster at Corners resolution. The investigation is
+  written up in the moreFPS engineering notes.
+- **Both terrain modes now skip lands outside the 3x3 active grid** around
+  the player's cell. Nothing the engine renders stands behind such terrain,
+  MGE-XE's distant land has its own visibility handling, and the outer lands
+  are the most triangles for the least occlusion.
+- **Fixed: the drain's empty-mask fast path inferred emptiness from two
+  submit counters** instead of asking whether anything had been submitted,
+  so a path that touched neither counter (the since-removed horizon curtain)
+  had its occludees skipped entirely. Both that gate and the async flush gate
+  now read facts recorded where the triangles are actually submitted.
 - **Fixed: a wasted threadpool barrier on budget-limited frames.** With
   front-to-back submission the occluder queue is drained after traversal and a
   spike-clip can bail the tail. The flush gate counted occluders recorded rather

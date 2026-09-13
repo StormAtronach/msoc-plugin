@@ -19,15 +19,12 @@ local default_config = {
     OcclusionSkipTerrainOccludees       = true,
     -- Optional tighter occludee test (object-space box after the sphere).
     OcclusionOccludeeBoxTest            = true,
-    -- LAYER-A-HORIZON: tri-state. 0=Off, 1=Raster (default), 2=Horizon.
-    -- Default Raster — on multi-core CPUs with async occluders enabled
-    -- (the medium/high hardware tiers), the threadpool parallelizes the
-    -- terrain triangle rasterization and Raster outperforms Horizon's
-    -- main-thread vertex projection. The low hardware tier overrides
-    -- this back to 2 (Horizon) since async is off there and Raster's
-    -- cost would surface on the main thread.
-    -- Set to 2 to force Horizon (bounded-cost regardless of scene); 0
-    -- disables terrain in the mask entirely.
+    -- 0=Off, 1=Raster (default on every tier). The cost knob is the
+    -- resolution below: 0=Full, 1=Half, 2=Corners. The low tier sets Corners,
+    -- which at a fifth of Half's synchronous cost occludes about the same.
+    -- (A value of 2 here used to select a 1D "Horizon" silhouette curtain;
+    -- it was removed in 1.6.1 after measuring 4-5x the cost of the raster at
+    -- equal resolution with less occlusion, and now reads as Raster.)
     OcclusionAggregateTerrain           = 1,
     OcclusionTerrainResolution          = 1,
     -- Cull non-CCW occluder faces (assumes ~99% of NIFs are CCW-wound).
@@ -140,10 +137,12 @@ local function applyTierDefaults(plugin, target)
         target.OcclusionMaskHeight         = 128
         target.OcclusionRasterizeBudgetUs  = 1500
         target.OcclusionClassifyBudgetUs   = 1500
-        -- Override the global default (Raster) back to Horizon: with
-        -- async off the rasterization cost surfaces on the main thread,
-        -- and Horizon's bounded-cost projection is cheaper there.
-        target.OcclusionAggregateTerrain   = 2
+        -- With async off the rasterization cost surfaces on the main
+        -- thread, so take the coarsest terrain: Corners rasterizes 928
+        -- triangles for a 9-cell view against Half's 3712, at about a fifth
+        -- of the time, and occluded as much in the 2026-09-13 measurement.
+        target.OcclusionAggregateTerrain   = 1
+        target.OcclusionTerrainResolution  = 2
         -- Keep terrain leaves out of the occludee queue here. Letting them
         -- through saved ~1.9 ms of displayUs per frame in a dense Vivec
         -- exterior on mid/high, because a dense mask reads a useful fraction
@@ -199,6 +198,12 @@ local config = mwse.loadConfig("msoc", default_config) ---@cast config table
 config.confPath = "msoc"
 config.default  = default_config
 
+-- 1.6.1 removed the Horizon terrain mode (value 2). A saved 2 would show as
+-- no selection in the dropdown; the native side already reads it as Raster.
+if config.OcclusionAggregateTerrain == 2 then
+    config.OcclusionAggregateTerrain = 1
+end
+
 -- _Claude_ Tier-default migration. mwse.loadConfig favours saved-JSON
 -- values over default_config — the right semantics for keys the user
 -- has explicitly tuned via MCM, but a footgun for keys whose ideal
@@ -234,6 +239,8 @@ local kTierMigratedKeys = {
     -- 1.6.1: mask size now actually reaches the latch (install runs after
     -- configure), so a stale saved value would take effect for the first time.
     "OcclusionAggregateTerrain",
+    -- 1.6.1: the low tier now picks its terrain resolution (Corners).
+    "OcclusionTerrainResolution",
 }
 
 -- _Claude_ Renamed / removed keys. Each version bump that drops a

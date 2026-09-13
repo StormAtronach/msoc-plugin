@@ -92,10 +92,6 @@ if(MSOC_BUILD_DLL)
         src/Config.cpp
         # Pure hardware-tier classifier (no Configuration/Lua dep; unit-tested).
         src/HardwareTier.cpp
-        # 1D-horizon → curtain occluder used by the Horizon mode of
-        # rasterizeAggregateTerrain. Adapted from MGE-XE's distant-land
-        # equivalent; see src/HorizonOccluder.h for the rationale.
-        src/HorizonOccluder.cpp
         # Debug-only occlusion tint overlay (split out of the patch TU).
         src/DebugTint.cpp
         # Detached watchdog thread that dumps MSOC.forensics.txt every
@@ -103,7 +99,7 @@ if(MSOC_BUILD_DLL)
         # forensics::captureSnapshot() defined in OcclusionPass.cpp.
         src/ForensicsWatchdog.cpp
         src/OcclusionPass.cpp
-        # Terrain occluder aggregation (Raster + Horizon modes).
+        # Terrain occluder aggregation (merged per-Land raster).
         src/TerrainAggregation.cpp
         # MSOC mask buffer + threadpool lifecycle (create/destroy/reconcile).
         src/MaskResources.cpp
@@ -227,12 +223,10 @@ if(MSOC_BUILD_TESTS)
 
     add_executable(msoc_tests
         tests/test_main.cpp
-        tests/horizon_occluder_tests.cpp
         tests/clip_math_tests.cpp  # ClipMath.h is header-only — no .cpp to compile
         tests/profiling_tests.cpp  # Profiling.h is header-only too
         tests/hardware_tier_tests.cpp
         # Units under test — engine-free, already PCH-free.
-        src/HorizonOccluder.cpp
         src/HardwareTier.cpp
     )
 

@@ -115,18 +115,16 @@ local function registerModConfig()
         callback    = applyChange,
     })
 
-    -- LAYER-A-HORIZON: tri-state replaces the previous on/off checkbox.
-    -- Off skips terrain occlusion entirely. Raster submits the merged
-    -- subcell triangle mesh to MOC; Horizon submits a ~120-tri silhouette
-    -- curtain. They have different cost characteristics — Raster wins
-    -- on multi-core+async, Horizon wins on weaker hardware.
+    -- Off skips terrain occlusion entirely; Raster submits the merged
+    -- subcell triangle mesh to MOC. The cost knob is the resolution
+    -- dropdown below it. (A "Horizon" silhouette-curtain mode was removed
+    -- in 1.6.1: it cost more than the raster and occluded less.)
     main:createDropdown({
         label       = i18n("OcclusionAggregateTerrain.label"),
         description = i18n("OcclusionAggregateTerrain.description"),
         options     = {
             { label = i18n("OcclusionAggregateTerrain.option.0"), value = 0 },
             { label = i18n("OcclusionAggregateTerrain.option.1"), value = 1 },
-            { label = i18n("OcclusionAggregateTerrain.option.2"), value = 2 },
         },
         configKey   = "OcclusionAggregateTerrain",
         callback    = applyChange,

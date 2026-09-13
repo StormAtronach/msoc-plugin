@@ -17,9 +17,6 @@
 // Cross-TU shared state (g_frame, the caches, mask consts) for
 // the extracted subsystem TUs (QueryApi.cpp, ...).
 #include "OcclusionInternal.h"
-// LAYER-A-HORIZON: 1D horizon -> curtain occluder used by the Horizon
-// mode of terrain::rasterizeAggregate. See src/HorizonOccluder.h.
-#include "HorizonOccluder.h"
 // Freeze-forensics watchdog. Owns the watchdog thread, its stage-name
 // table, and the spawn gate. This TU implements the read accessor
 // (forensics::captureSnapshot) it calls back into.
@@ -740,9 +737,9 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
             // (fences, banners, leaves) would falsely occlude things
             // behind the transparent parts.
             //
-            // Terrain leaves are never per-leaf occluders. In Raster/Horizon
-            // mode they're already in the buffer as merged per-Land
-            // submissions (re-rasterising here would duplicate them); in Off
+            // Terrain leaves are never per-leaf occluders. In Raster mode
+            // they're already in the buffer as merged per-Land submissions
+            // (re-rasterising here would duplicate them); in Off
             // mode terrain is intentionally absent from the mask (the MCM
             // "Off: no terrain in the occlusion mask"). Either way, skip them.
             const bool isTerrainLeaf = isLandscapeDescendant(self, g_worldLandscapeRoot);
@@ -1006,11 +1003,10 @@ static void drainPendingDisplays() {
     // Fast path: nothing in the mask this frame -> depth buffer is cleared
     // -> every TestRect would return VISIBLE. Skip the loop.
     //
-    // maskHasOccluders is set by every submit path, which is the point of it.
-    // This test used to be "rasterizedAsOccluder == 0 && aggregateTerrainLands
-    // == 0", and the horizon curtain increments neither - so in Horizon mode,
-    // where the curtain is usually the only thing in the mask, the drain
-    // skipped every frame and the curtain culled nothing at all.
+    // maskHasOccluders is set by every submit path, which is the point of it:
+    // this test used to infer emptiness from two submit counters, and a path
+    // that touched neither (the since-removed horizon curtain) never got its
+    // occludees tested at all.
     if (!g_stats.maskHasOccluders) {
         ScopedUsAccumulator tt(g_stats.drainDisplayUs);
         for (const auto& p : g_pendingDisplays) {
@@ -1249,14 +1245,6 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.aggregateTerrainLands = 0;
         g_stats.aggregateTerrainTris = 0;
         g_stats.aggregateTerrainUs = 0;
-        // LAYER-A-HORIZON: per-frame reset for the Horizon-mode counters.
-        g_stats.horizonBuildUs = 0;
-        g_stats.horizonRasterUs = 0;
-        g_stats.horizonLandsFed = 0;
-        g_stats.horizonVertsFed = 0;
-        g_stats.horizonColumnsTouched = 0;
-        g_stats.horizonCurtainTris = 0;
-        g_stats.horizonAdaptiveEpsD = 0.0f;
         g_caches.terrainMembershipHits = 0;
         g_caches.terrainMembershipMisses = 0;
         g_stats.classifyOccluderCalls = 0;
@@ -1328,18 +1316,9 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         // the thin-axis gate; merging reclaims terrain as a useful
         // occluder. Reads the latched g_frame.aggregateTerrain
         // so the mode can't change mid-frame.
-        switch (g_frame.aggregateTerrain) {
-            case 1:
-                g_lastStage = 8;
-                terrain::rasterizeAggregate(camera);
-                break;
-            case 2:
-                g_lastStage = 8;
-                terrain::rasterizeHorizon(camera);
-                break;
-            case 0:
-            default:
-                break;
+        if (g_frame.aggregateTerrain == 1) {
+            g_lastStage = 8;
+            terrain::rasterizeAggregate(camera);
         }
     }
 

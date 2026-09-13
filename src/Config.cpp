@@ -32,8 +32,7 @@ bool Configuration::OcclusionOccludeeBoxTest = false;
 bool Configuration::OcclusionEnableInterior = true;
 bool Configuration::OcclusionEnableExterior = true;
 bool Configuration::OcclusionSkipTerrainOccludees = true;
-// 1 = Raster. config.lua's tier table sends 2 (Horizon) on low tier, where a
-// bounded main-thread cost beats per-subcell raster work.
+// 1 = Raster on every tier; the low tier pairs it with Corners resolution.
 int Configuration::OcclusionAggregateTerrain = 1;
 // 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). See currentTerrainStep().
 unsigned int Configuration::OcclusionTerrainResolution = 1;
@@ -92,15 +91,16 @@ void readUInt(lua_State* L, int tbl, const char* key, unsigned int& out) {
     lua_pop(L, 1);
 }
 
-// Tri-state with legacy-bool acceptance (the key was a bool before
-// LAYER-A): false->0, true->1, int N->clamp(N, 0, 2).
+// 0/1 with legacy acceptance: the key was a bool once (false->0, true->1)
+// and briefly a tri-state whose 2 meant the removed Horizon curtain, so any
+// N > 1 reads as Raster.
 void readTerrainOcclusionMode(lua_State* L, int tbl, const char* key, int& out) {
     lua_getfield(L, tbl, key);
     if (lua_isnumber(L, -1)) {
         const lua_Number n = lua_tonumber(L, -1);
         int v = static_cast<int>(n);
         if (v < 0) v = 0;
-        if (v > 2) v = 2;
+        if (v > 1) v = 1;
         out = v;
     } else if (lua_isboolean(L, -1)) {
         out = lua_toboolean(L, -1) ? 1 : 0;

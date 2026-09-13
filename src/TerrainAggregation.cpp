@@ -1,10 +1,9 @@
 // Terrain occluder aggregation: merges each near Land into one MOC
-// submission (Raster mode) or a 1D horizon curtain (Horizon mode). Split
-// from OcclusionPass.cpp; shared state via OcclusionInternal.h.
+// submission. Split from OcclusionPass.cpp; shared state via
+// OcclusionInternal.h.
 
 #include "OcclusionApi.h"
 #include "OcclusionInternal.h"
-#include "HorizonOccluder.h"
 
 #include "NICamera.h"
 #include "NINode.h"
@@ -38,6 +37,24 @@ static bool frustumCulledSphere(NI::AVObject* obj, NI::Camera* camera) {
         if (d <= -r) return true;
     }
     return false;
+}
+
+// True iff the Land's cell is within the 3x3 active grid around the eye's
+// cell (Chebyshev distance <= 1). Both terrain paths skip anything beyond it:
+// the engine renders nothing there that terrain could hide, distant land is
+// MGE-XE's and has its own visibility handling, and the outer lands are the
+// most triangles for the least occlusion. Land bounds are centred on the
+// cell, so floor(origin / 8192) is the cell coordinate.
+static bool landWithinActiveGrid(NI::AVObject* land, NI::Camera* camera) {
+    constexpr float kCellSize = 8192.0f;
+    const auto& eye = camera->worldTransform.translation;
+    const int eyeCx = static_cast<int>(std::floor(eye.x / kCellSize));
+    const int eyeCy = static_cast<int>(std::floor(eye.y / kCellSize));
+    const int landCx = static_cast<int>(std::floor(land->worldBoundOrigin.x / kCellSize));
+    const int landCy = static_cast<int>(std::floor(land->worldBoundOrigin.y / kCellSize));
+    const int dx = landCx - eyeCx;
+    const int dy = landCy - eyeCy;
+    return dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1;
 }
 
 // Append one terrain TriShape (25v/32t) to the aggregate buffers,
@@ -192,11 +209,9 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
         if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
         auto* subNode = static_cast<NI::Node*>(sub);
 
-        // Bracket this subcell's index- AND vertex-buffer ranges so the
-        // submit path (indices) and the horizon-project path (verts) can
-        // both frustum-cull at subcell granularity.
+        // Bracket this subcell's index range so the submit path can
+        // frustum-cull at subcell granularity.
         const unsigned int firstIdxBefore = static_cast<unsigned int>(entry.indices.size());
-        const unsigned int firstVertBefore = static_cast<unsigned int>(entry.verts.size() / 3);
 
         const auto& shapes = subNode->children;
         for (size_t k = 0; k < shapes.endIndex; ++k) {
@@ -210,13 +225,10 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
 
         const unsigned int firstIdxAfter = static_cast<unsigned int>(entry.indices.size());
         if (firstIdxAfter > firstIdxBefore) {
-            const unsigned int firstVertAfter = static_cast<unsigned int>(entry.verts.size() / 3);
             LandCacheEntry::SubcellRange r;
             r.node = subNode;
             r.firstIdx = firstIdxBefore;
             r.triCount = (firstIdxAfter - firstIdxBefore) / 3;
-            r.firstVert = firstVertBefore;
-            r.vertCount = firstVertAfter - firstVertBefore;
             entry.subcellRanges.push_back(r);
         }
     }
@@ -229,11 +241,10 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
 // the terrain-resolution dropdown changed), and evicts entries whose
 // NiNode wasn't seen this frame.
 //
-// Shared by both terrain modes so neither re-walks the scene graph for
-// geometry it has already transformed: Raster submits the cached verts;
-// Horizon projects them into the 1D silhouette. Precondition:
-// g_worldLandscapeRoot is non-null (both callers guard).
-static void refreshLandCache() {
+// Lands outside the 3x3 active grid are neither built nor kept (they fall
+// to the sweep). Precondition: g_worldLandscapeRoot is non-null (the caller
+// guards).
+static void refreshLandCache(NI::Camera* camera) {
     for (auto& kv : g_caches.land) kv.second.seen = false;
 
     const auto& landChildren = g_worldLandscapeRoot->children;
@@ -241,6 +252,7 @@ static void refreshLandCache() {
         auto* land = landChildren.storage[i].get();
         if (!land) continue;
         if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
+        if (!landWithinActiveGrid(land, camera)) continue;
 
         auto* landNode = static_cast<NI::Node*>(land);
 
@@ -278,229 +290,10 @@ static void refreshLandCache() {
     }
 }
 
-// Horizon-mode terrain occluder. Builds the 1D max-y/max-w horizon by
-// projecting the shared per-Land world-space cache (the same buffers the
-// Raster path submits), then simplifies to ~60 adaptive samples, emits
-// ~120 curtain triangles, and submits those to MOC via sync
-// RenderTriangles. epsD is adaptive (do NOT pass 1e30 like MGE-XE's
-// distant path - see HorizonOccluder.h).
-//
-// Reusing the cache means the per-vertex world transform and the per-
-// shape getModelData/RTTI/alpha-stencil classification are paid once per
-// cell (on cache miss) instead of every frame; the per-frame cost here is
-// just projectWorld + divide + bin. The cache is already downsampled per
-// the terrain-resolution dropdown (Full/Half/Corners), so coarser
-// settings cut the projection count too - the min-z fold in the cache
-// build keeps the silhouette conservative (it can only sink, never rise).
-void rasterizeHorizon(NI::Camera* camera) {
-    if (!g_worldLandscapeRoot) return;
-    if (g_worldLandscapeRoot->getAppCulled()) return;
-
-    // Outer bucket: build = cache refresh + project + simplify + emit.
-    // The inner RenderTriangles also accumulates into g_stats.horizonRasterUs
-    // and g_stats.rasterizeTimeUs.
-    ScopedUsAccumulator timer(g_stats.horizonBuildUs);
-
-    // Build/refresh the shared per-Land cache (mark-and-sweep). The
-    // alpha/stencil gate is applied at cache-build time, so the cached
-    // verts already exclude transparent terrain patches.
-    refreshLandCache();
-
-    auto& horizon = msoc::horizon::HorizonOccluder::getInstance();
-    // 512 cols / 60 samples matches MGE-XE's distant-land path.
-    horizon.init(512, 60);
-    horizon.reset();
-
-    const int resolution = horizon.resolution();
-    const float halfSpan = 0.5f * static_cast<float>(resolution - 1);
-
-    uint64_t landsContributed = 0;
-    uint64_t vertsProjected = 0;
-
-    const auto& landChildren = g_worldLandscapeRoot->children;
-    for (size_t i = 0; i < landChildren.endIndex; ++i) {
-        auto* land = landChildren.storage[i].get();
-        if (!land) continue;
-        if (!land->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
-        if (land->getAppCulled()) continue;
-        if (frustumCulledSphere(land, camera)) continue;
-
-        auto* landNode = static_cast<NI::Node*>(land);
-        auto it = g_caches.land.find(landNode);
-        if (it == g_caches.land.end()) continue;  // refresh guarantees presence
-        const LandCacheEntry& entry = it->second;
-        if (entry.verts.empty()) continue;
-
-        const float* verts = entry.verts.data();
-        bool landFedAny = false;
-
-        // Project one cached world-space vertex range into the horizon.
-        // The cache verts are already world-space, so this is just the
-        // clip projection + divide + column bin.
-        const auto projectRange = [&](unsigned int firstVert, unsigned int vertCount) {
-            const unsigned int end = firstVert + vertCount;
-            for (unsigned int vi = firstVert; vi < end; ++vi) {
-                const float wx = verts[vi * 3 + 0];
-                const float wy = verts[vi * 3 + 1];
-                const float wz = verts[vi * 3 + 2];
-
-                const ClipXYW c = projectWorld(wx, wy, wz);
-                // Near-plane straddling - projection unstable.
-                if (c.w <= kNearClipW) continue;
-
-                const float invW = 1.0f / c.w;
-                const float ndcX = c.x * invW;
-                const float ndcY = c.y * invW;
-
-                // Off-screen X clamps would contaminate column-
-                // boundary sentinels; drop. Below-screen doesn't
-                // occlude anything; drop. Above-screen clamps up
-                // (terrain past the top still defines silhouette).
-                if (ndcX < -1.0f || ndcX > 1.0f) continue;
-                if (ndcY < -1.0f) continue;
-                const float clampedY = (ndcY > 1.0f) ? 1.0f : ndcY;
-
-                int col = static_cast<int>((ndcX + 1.0f) * halfSpan);
-                if (col < 0) col = 0;
-                if (col >= resolution) col = resolution - 1;
-
-                horizon.update(col, clampedY, c.w);
-                ++vertsProjected;
-                landFedAny = true;
-            }
-        };
-
-        // Per-subcell frustum cull. A Land covers 8192x8192; typically
-        // ~5-8 of its 16 subcells are in-frustum. Skipping invisible
-        // ones avoids the projection. Quality is unchanged (the c.w /
-        // ndcX guards above would've rejected these post-projection).
-        if (!entry.subcellRanges.empty()) {
-            for (const auto& range : entry.subcellRanges) {
-                if (range.vertCount == 0) continue;
-                if (range.node && frustumCulledSphere(range.node, camera)) continue;
-                projectRange(range.firstVert, range.vertCount);
-            }
-        } else {
-            // Stale entry built before vertex ranges existed: project
-            // the whole Land at land-frustum granularity.
-            projectRange(0, static_cast<unsigned int>(entry.verts.size() / 3));
-        }
-
-        if (landFedAny) ++landsContributed;
-    }
-
-    if (vertsProjected == 0) return;
-
-    // Simplify -> margin -> emit -> fixup -> submit.
-    constexpr int kMaxSamples = 60;
-    constexpr float kEpsH = 0.01f;
-    constexpr int kTileAlign = 16;
-    constexpr float kNdcYBottom = -1.1f;
-    constexpr float kYSafetyMargin = 0.04f;
-    constexpr float kEpsDFraction = 0.05f;
-    constexpr float kEpsDFloor = 100.0f;
-
-    // D12: adaptive epsD computed from this frame's depth range.
-    // computeAdaptiveEpsD returns +infinity if fewer than 2 cols are
-    // active - equivalent to disabling the depth term, safe fallback.
-    const float adaptiveEpsD = horizon.computeAdaptiveEpsD(kEpsDFraction, kEpsDFloor);
-
-    static msoc::horizon::Sample samples[kMaxSamples];
-    const int nSamples = horizon.simplify(samples, kMaxSamples, kEpsH, adaptiveEpsD, kTileAlign);
-    if (nSamples < 2) return;
-
-    // Conservative erosion pass. simplify() keeps ~60 sparse samples whose
-    // h is the per-column MAX (upper envelope) - emit then bridges the gaps
-    // between samples with a flat top at min(endpoints). That flat top can
-    // sit ABOVE the true silhouette wherever a skyline notch falls between
-    // two samples (over-occluding whatever shows through the gap), and the
-    // amount it sits above shifts frame-to-frame as the winning vertex per
-    // bin and the tile-snap phase change - the source of the flicker.
-    //
-    // Fix: lower each sample's height to the MIN touched height over the
-    // span to its neighbours, and set its depth to the MIN (nearest) over the
-    // same span. Then for any segment [i, i+1], emit's min(s_i.h, s_{i+1}.h)
-    // is <= the raw horizon at every column in the segment (s_i.h already
-    // spans [col_{i-1}, col_{i+1}] >= [col_i, col_{i+1}]), so the curtain is
-    // conservative against the full silhouette regardless of how coarsely
-    // simplify() placed the samples. Nearest depth (not the old MAX/farthest)
-    // is what makes the curtain occlude like a coarse raster instead of
-    // sitting at the distant skyline; the trade is over-occlusion through a
-    // silhouette gap, since one depth covers the whole strip. Sentinel
-    // (untouched) columns are skipped so a see-through gap does not drag a
-    // real segment down; a sample whose whole neighbourhood is sentinel keeps
-    // its sentinel h and emit skips it. The safety margin folds in here.
-    for (int i = 0; i < nSamples; ++i) {
-        const int cLo = (i > 0) ? samples[i - 1].col : samples[i].col;
-        const int cHi = (i + 1 < nSamples) ? samples[i + 1].col : samples[i].col;
-        float hMin = std::numeric_limits<float>::infinity();
-        float dMin = std::numeric_limits<float>::infinity();
-        bool found = false;
-        for (int c = cLo; c <= cHi; ++c) {
-            const float hc = horizon.heightAt(c);
-            if (hc <= -1.0e29f) continue;  // untouched column
-            if (hc < hMin) hMin = hc;
-            const float dc = horizon.depthAt(c);
-            if (dc > 0.0f && dc < dMin) dMin = dc;  // nearest; 0 = untouched depth
-            found = true;
-        }
-        if (found) {
-            samples[i].h = hMin - kYSafetyMargin;
-            if (dMin < std::numeric_limits<float>::infinity()) samples[i].d = dMin;
-        }
-    }
-
-    // Per-frame scratch - function-static so allocations amortise.
-    // Sized for the worst case (every segment emits 6 verts).
-    static std::vector<msoc::horizon::CurtainVertex> curtainVerts;
-    curtainVerts.resize(static_cast<size_t>(6 * (nSamples - 1)));
-    const int triCount = horizon.emitCurtainNDC(samples, nSamples, kNdcYBottom,
-                                                curtainVerts.data(), static_cast<int>(curtainVerts.size()));
-    if (triCount <= 0) return;
-
-    // Convert NDC layout (x, y, z=depth, w=1) -> MOC pre-transformed
-    // layout (x*d, y*d, _, d) in place. Submit with VertexLayout
-    // matching that layout: stride=16, offY=4, offW=12.
-    msoc::horizon::HorizonOccluder::fixupForMOC(curtainVerts.data(), triCount * 3);
-
-    static std::vector<unsigned int> curtainIdx;
-    const int vtxCount = triCount * 3;
-    curtainIdx.resize(static_cast<size_t>(vtxCount));
-    for (int i = 0; i < vtxCount; ++i) {
-        curtainIdx[i] = static_cast<unsigned int>(i);
-    }
-
-    // Sync submit; bypasses the threadpool - ~120 tris is below the
-    // dispatch-overhead break-even. Times into both buckets so total
-    // rasterize cost stays comparable across modes AND the curtain's
-    // own raster cost stays measurable.
-    {
-        ScopedUsAccumulator t1(g_stats.rasterizeTimeUs);
-        ScopedUsAccumulator t2(g_stats.horizonRasterUs);
-        g_msoc->RenderTriangles(
-            reinterpret_cast<const float*>(curtainVerts.data()),
-            curtainIdx.data(), triCount,
-            /*modelToClip=*/nullptr,
-            g_frame.occluderWinding,
-            ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
-            ::MaskedOcclusionCulling::VertexLayout(16, 4, 12));
-    }
-    // The curtain is the whole mask in Horizon mode. Saying so here is what
-    // lets the drain run at all; it increments none of the other counters.
-    g_stats.maskHasOccluders = true;
-
-    // columnsTouched is a linear scan but runs once per frame.
-    g_stats.horizonCurtainTris = static_cast<uint64_t>(triCount);
-    g_stats.horizonLandsFed = landsContributed;
-    g_stats.horizonVertsFed = vertsProjected;
-    g_stats.horizonColumnsTouched = static_cast<uint64_t>(horizon.columnsTouched());
-    g_stats.horizonAdaptiveEpsD = adaptiveEpsD;
-}
-
 // Aggregate terrain rasteriser. Walks WorldLandscape (root -> Land ->
 // 16 subcells -> N NiTriShapes) and submits one combined occluder per
 // visible Land. Individual 25v/32t patches fail the thin-axis gate;
-// merging gives the hill/horizon silhouette that actually occludes
+// merging gives the hill silhouette that actually occludes
 // distant architecture.
 //
 // Must run inside isTopLevel - after ClearBuffer + uploadCameraTransform,
@@ -515,8 +308,9 @@ void rasterizeAggregate(NI::Camera* camera) {
     ScopedUsAccumulator timer(g_stats.aggregateTerrainUs);
 
     // Build/refresh the shared per-Land cache (mark-and-sweep). After
-    // this every live Land has an up-to-date entry in g_caches.land.
-    refreshLandCache();
+    // this every live Land within the active grid has an up-to-date entry
+    // in g_caches.land.
+    refreshLandCache(camera);
 
     const auto& landChildren = g_worldLandscapeRoot->children;
     for (size_t i = 0; i < landChildren.endIndex; ++i) {
@@ -535,6 +329,7 @@ void rasterizeAggregate(NI::Camera* camera) {
         // omitted from cache build - they'd bake view-specific state
         // into a reusable buffer.
         if (land->getAppCulled()) continue;
+        if (!landWithinActiveGrid(land, camera)) continue;
         if (frustumCulledSphere(land, camera)) continue;
         if (entry.triCount == 0) continue;
 

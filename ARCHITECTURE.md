@@ -23,7 +23,7 @@ modules below it. Nothing below the core depends back up into it.
                       - deferred-display drain pipeline              [hot]
                       - install, forensics read-accessor
   ----------------------------------------------------------------------------
-  Subsystems        TerrainAggregation near-Land merge (Raster + Horizon)
+  Subsystems        TerrainAggregation near-Land merge
   (engine-coupled)  MaskResources     MOC buffer + threadpool lifecycle
                     DiagnosticsLog    per-frame stats line (cold path)
                     MaskOverlay       live mask readback -> NI texture (cold)
@@ -41,7 +41,6 @@ modules below it. Nothing below the core depends back up into it.
   Pure leaves       ClipMath      projection / matrix math
   (engine-free,     Profiling     EMA + budget skip/clip decisions
    unit-tested)     HardwareTier  CPU tier classifier
-                    HorizonOccluder 1D silhouette curtain builder
 ```
 
 ### Why the leaf layer exists
@@ -99,7 +98,7 @@ detoured. One top-level pass per scene:
    - scene traversal (`cullShowBody`): large opaque leaves -> `rasterizeTriShape`
      (occluders); small leaves -> deferred queue; `classifyOccluderProperties`
      (OccluderClassify) gates alpha/stencil out of the occluder pass.
-   - `rasterizeAggregateTerrain[Horizon]` (TerrainAggregation) adds terrain.
+   - `terrain::rasterizeAggregate` (TerrainAggregation) adds terrain.
    - drain: `classifyDrainRange` -> `TestRect` verdicts -> `drainPendingDisplays`
      skips `display()` on OCCLUDED leaves. Phase 1 writes nothing phase 2 reads,
      with one deliberate exception: the occludee box cache fills lazily there.
@@ -132,8 +131,8 @@ them along with the published snapshot they served.
 
 `MSOC_BUILD_TESTS` (default ON) builds `msoc_tests` from the pure-leaf modules +
 doctest, gated behind `MSOC_BUILD_DLL` so it builds with no MWSE/LuaJIT/Win32
-(CI-friendly). Covered: ClipMath, Profiling, HorizonOccluder, HardwareTier
-(26 cases / 48203 assertions). The engine-coupled TUs are verified by build/link
+(CI-friendly). Covered: ClipMath, Profiling, HardwareTier
+(16 cases / 48099 assertions). The engine-coupled TUs are verified by build/link
 and the in-game `OcclusionLogAggregate` stats line (parse with
 `scripts/parse_msoc_log.py`).
 
