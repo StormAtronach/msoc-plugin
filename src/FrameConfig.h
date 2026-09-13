@@ -13,7 +13,7 @@
 
 #include "MaskedOcclusionCulling.h"  // BackfaceWinding
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 struct FrameConfig {
     // Exterior defaults, taken from Configuration:: rather than written out
@@ -90,4 +90,4 @@ struct FrameConfig {
     }
 };
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

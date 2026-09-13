@@ -88,7 +88,7 @@ ProbeResult probeMocLink() {
 // assigns it to a UI image element's texture. Creating the texture on the
 // first call is also what arms the per-frame refresh.
 int maskOverlayTexture_lua(lua_State* L) {
-    void* tex = msoc::patch::occlusion::maskOverlayTexture();
+    void* tex = msoc::occlusion::maskOverlayTexture();
     lua_pushnumber(L, static_cast<lua_Number>(reinterpret_cast<uintptr_t>(tex)));
     return 1;
 }
@@ -97,7 +97,7 @@ int maskOverlayTexture_lua(lua_State* L) {
 // Replaces the mwse_dumpOcclusionMask export removed in 1.6.1.
 int dumpMask_lua(lua_State* L) {
     const char* path = luaL_checkstring(L, 1);
-    const bool ok = msoc::patch::occlusion::dumpMaskToPfm(path);
+    const bool ok = msoc::occlusion::dumpMaskToPfm(path);
     lua_pushboolean(L, ok ? 1 : 0);
     return 1;
 }
@@ -106,7 +106,7 @@ int dumpMask_lua(lua_State* L) {
 // install, which may differ from msoc.json after rounding and clamping.
 int maskResolution_lua(lua_State* L) {
     int w = 0, h = 0;
-    msoc::patch::occlusion::maskResolution(&w, &h);
+    msoc::occlusion::maskResolution(&w, &h);
     lua_pushnumber(L, static_cast<lua_Number>(w));
     lua_pushnumber(L, static_cast<lua_Number>(h));
     return 2;
@@ -143,7 +143,7 @@ int install_lua(lua_State*) {
     static bool s_installed = false;
     if (!s_installed) {
         s_installed = true;
-        msoc::patch::occlusion::installPatches();
+        msoc::occlusion::installPatches();
     }
     return 0;
 }

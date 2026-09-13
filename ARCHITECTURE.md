@@ -138,6 +138,17 @@ and the in-game `OcclusionLogAggregate` stats line (parse with
 `scripts/parse_msoc_log.py`).
 
 ## Conventions
+- Namespaces mirror the module map. The trunk is `msoc::occlusion`, and each
+  engine-coupled subsystem owns a sub-namespace: `classify`, `live`, `terrain`,
+  `resources`, `diag`. A call site then says where to look, so
+  `terrain::rasterizeAggregate` beats a flat `rasterizeAggregateTerrain`.
+- Every translation-unit-local type goes in an unnamed namespace. `static`
+  gives internal linkage to a variable or function but cannot be applied to a
+  type, so two same-named file-local structs in different TUs will merge, and
+  the linker will fold any template instantiated on them. That is not
+  theoretical: see the 1.6.0 entry in CHANGELOG.md, where it cost a 108-byte
+  heap overflow on every frame outdoors and was found from a minidump, because
+  an ODR violation is ill-formed-no-diagnostic-required and nothing warns.
 - Formatting is enforced by `.clang-format` (4-space, no tabs, namespace bodies
   not indented, `ColumnLimit 0`). `deps/` is excluded (`DisableFormat`).
 - ASCII only in source.

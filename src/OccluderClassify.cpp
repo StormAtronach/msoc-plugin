@@ -9,7 +9,7 @@
 #include "NIAVObject.h"
 #include "NIProperty.h"
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion::classify {
 
 // Why these can't be occluders:
 //   alpha   - blended/alpha-tested shapes (fences, banners, grates,
@@ -20,7 +20,7 @@ namespace msoc::patch::occlusion {
 //             reflection clip masks, UI cutouts). Same hazard.
 // Both still participate as occludees; only the occluder rasterise
 // pass skips them.
-OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj) {
+OccluderPropertyFlags occluderProperties(NI::AVObject* obj) {
     // Probes gated on g_frame.logEnabled - same contract as
     // ScopedUsAccumulator. Off-path: predicted-not-taken branch + no
     // counter store; on-path: 4 atomic-free uint64 inc per frame's
@@ -48,4 +48,4 @@ OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj) {
     return out;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion::classify

@@ -16,7 +16,7 @@
 // Replaces the mwse_dumpOcclusionMask export removed in 1.6.1; the dump is now
 // reachable from Lua as msoc.dumpMask(path).
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Get-or-create the overlay texture, returned as an opaque NI::SourceTexture*.
 // Null when the mask resources are not live yet or the engine refused the
@@ -37,4 +37,4 @@ bool dumpMaskToPfm(const char* path);
 // texture instead of guessing from msoc.json.
 void maskResolution(int* outWidth, int* outHeight);
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

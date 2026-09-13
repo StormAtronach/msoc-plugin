@@ -9,7 +9,7 @@
 #include <ostream>
 #include <thread>
 
-namespace msoc::patch::occlusion::forensics {
+namespace msoc::occlusion::forensics {
 
 const char* stageName(uint32_t s) {
     switch (s) {
@@ -116,4 +116,4 @@ void spawnIfEnabled(std::ostream& log) {
     }
 }
 
-}  // namespace msoc::patch::occlusion::forensics
+}  // namespace msoc::occlusion::forensics

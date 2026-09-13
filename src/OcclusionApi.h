@@ -9,7 +9,7 @@
 // removed along with the snapshot double buffer that backed it. msoc.dll
 // now exports luaopen_msoc only.
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Install hooks for DX8 Masked Software Occlusion Culling. Hooks
 // always install - EnableMSOC is a runtime gate re-checked every
@@ -20,4 +20,4 @@ namespace msoc::patch::occlusion {
 // otherwise, and torn down on toggle-off.
 void installPatches();
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

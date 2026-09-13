@@ -11,11 +11,11 @@
 #include <atomic>
 #include <cfloat>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion::live {
 
 // Sphere straddling the near plane bails as VISIBLE; TestRect can't
 // project a straddling rect safely.
-::MaskedOcclusionCulling::CullingResult testSphereVisible(
+::MaskedOcclusionCulling::CullingResult testSphere(
     const NI::Point3& center, float radius) {
     const ClipXYW c = projectWorld(center.x, center.y, center.z);
 
@@ -44,9 +44,9 @@ namespace msoc::patch::occlusion {
 
 // Live OBB-vs-mask query: projects the 8 world-space box corners through the
 // live matrix, tests their covered screen rect against g_msoc. Same rect math
-// as testSphereVisible above. corners is 8 (x, y, z) triples. Used by the
+// as testSphere above. corners is 8 (x, y, z) triples. Used by the
 // drain to refine a sphere-VISIBLE occludee with its tighter box.
-::MaskedOcclusionCulling::CullingResult testBoxVisible(const float* corners) {
+::MaskedOcclusionCulling::CullingResult testBox(const float* corners) {
     float ndcMinX = FLT_MAX, ndcMinY = FLT_MAX;
     float ndcMaxX = -FLT_MAX, ndcMaxY = -FLT_MAX;
     float wMin = FLT_MAX;
@@ -85,4 +85,4 @@ namespace msoc::patch::occlusion {
     return g_msoc->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion::live

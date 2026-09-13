@@ -25,7 +25,7 @@
 #include <cstdint>
 #include <iosfwd>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // NI::Camera culling-plane accessors, shared by the core-TU occluder frustum
 // test and TerrainAggregation.cpp. These read named fields now: SharedSE's
@@ -43,14 +43,18 @@ inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
     return cam->usedCullingPlanesBitfield;
 }
 
-// First-of-type alpha/stencil flags from an occluder's ancestor chain;
-// alpha/stencil meshes are excluded from the occluder rasterise pass.
-// Defined in OccluderClassify.cpp (leaf); shared by core-rasterize + Terrain.
+// OccluderClassify.cpp: first-of-type alpha/stencil flags from an occluder's
+// ancestor chain. Alpha and stencil meshes are excluded from the occluder pass.
+// Shared by the core rasterizer and TerrainAggregation.
+namespace classify {
+
 struct OccluderPropertyFlags {
     bool alpha;
     bool stencil;
 };
-OccluderPropertyFlags classifyOccluderProperties(NI::AVObject* obj);
+OccluderPropertyFlags occluderProperties(NI::AVObject* obj);
+
+}  // namespace classify
 
 // Live per-frame state shared with the subsystem TUs (defined in
 // OcclusionPass.cpp).
@@ -73,32 +77,45 @@ extern unsigned int kMsocWidth;           // mask resolution (latched at install
 extern unsigned int kMsocHeight;
 extern uint32_t g_frameCounter;  // top-level frame counter
 
-// Live sphere test against g_msoc (uses the live per-frame projection).
-// Defined in LiveQuery.cpp (leaf); called by the drain (core).
-// Returns Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
-::MaskedOcclusionCulling::CullingResult testSphereVisible(
-    const NI::Point3& center, float radius);
+// LiveQuery.cpp: tests against g_msoc using the live per-frame projection.
+// Both return Intel's CullingResult (VISIBLE / OCCLUDED / VIEW_CULLED).
+namespace live {
 
-// Live OBB test against g_msoc: corners is 8 world-space (x, y, z) triples.
-// Defined in LiveQuery.cpp; used by the drain's optional occludee box test.
-::MaskedOcclusionCulling::CullingResult testBoxVisible(const float* corners);
+::MaskedOcclusionCulling::CullingResult testSphere(const NI::Point3& center, float radius);
 
-// Terrain aggregation entry points (TerrainAggregation.cpp), called by the
-// detour. Raster mode merges each near Land into one submission; Horizon
-// mode rasterizes a 1D silhouette curtain.
-void rasterizeAggregateTerrain(NI::Camera* camera);
-void rasterizeAggregateTerrainHorizon(NI::Camera* camera);
+// corners is 8 world-space (x, y, z) triples. Used by the drain's optional
+// occludee box test.
+::MaskedOcclusionCulling::CullingResult testBox(const float* corners);
 
-// Mask resource lifecycle (MaskResources.cpp). create/ensure are called by
-// installPatches and the detour's top-of-frame reconcile; destroy by the
-// create-failure paths and a toggle-off.
-bool createMSOCResources(std::ostream& log);
-void destroyMSOCResources(std::ostream& log);
-bool ensureMSOCResourcesMatchConfig();
+}  // namespace live
 
-// Emit the per-frame MSOC diagnostic line (DiagnosticsLog.cpp). Called at the
-// tail of the detour; gated internally on the log channels (cold path).
+// TerrainAggregation.cpp, called by the detour. Raster mode merges each near
+// Land into one submission; Horizon mode rasterizes a 1D silhouette curtain.
+namespace terrain {
+
+void rasterizeAggregate(NI::Camera* camera);
+void rasterizeHorizon(NI::Camera* camera);
+
+}  // namespace terrain
+
+// MaskResources.cpp: mask buffer and threadpool lifecycle. create and ensure
+// are called by installPatches and the detour's top-of-frame reconcile;
+// destroy by the create-failure paths and a toggle-off.
+namespace resources {
+
+bool create(std::ostream& log);
+void destroy(std::ostream& log);
+bool ensureMatchesConfig();
+
+}  // namespace resources
+
+// DiagnosticsLog.cpp: the per-frame stats line. Called at the tail of the
+// detour; gated internally on the log channels, so it is a cold path.
+namespace diag {
+
 void emitPerFrameStatsLine();
+
+}  // namespace diag
 
 // Live projection forwarder + clip type alias, shared by the query, drain,
 // and terrain paths. Header-inline so the hot path still inlines fully.
@@ -128,4 +145,4 @@ struct ScopedUsAccumulator {
     }
 };
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

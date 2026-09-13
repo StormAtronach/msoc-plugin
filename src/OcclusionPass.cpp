@@ -18,7 +18,7 @@
 // the extracted subsystem TUs (QueryApi.cpp, ...).
 #include "OcclusionInternal.h"
 // LAYER-A-HORIZON: 1D horizon -> curtain occluder used by the Horizon
-// mode of rasterizeAggregateTerrain. See src/HorizonOccluder.h.
+// mode of terrain::rasterizeAggregate. See src/HorizonOccluder.h.
 #include "HorizonOccluder.h"
 // Freeze-forensics watchdog. Owns the watchdog thread, its stage-name
 // table, and the spawn gate. This TU implements the read accessor
@@ -61,7 +61,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // `log::getLog()` call sites resolved to mwse::log in MWSE proper;
 // this alias keeps them unchanged.
@@ -87,7 +87,7 @@ unsigned int kMsocHeight = 256;
 // CullShow_detour entry.
 float g_worldToClip[16];  // extern in OcclusionInternal.h
 
-// Per-frame matrix metrics for testSphereVisible:
+// Per-frame matrix metrics for live::testSphere:
 //   g_ndcRadiusX/Y: L2 norm of clip.x/y coefficients. NDC half-extent
 //                   of a sphere of radius r at clip-w cw is r*X/cw.
 //   g_wGradMag:     L2 norm of clip.w coefficients. Worst-case clip-w
@@ -189,6 +189,10 @@ using profiling::emaUpdate;
 static uint32_t g_callDepth = 0;
 
 // RAII for g_callDepth. Used exclusively by CullShow_detour.
+// Unnamed namespace, not `static`: `static` cannot give a *type*
+// internal linkage, and an identically named type in another TU would
+// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+namespace {
 struct CallDepthGuard {
     CallDepthGuard() {
         ++g_callDepth;
@@ -198,6 +202,7 @@ struct CallDepthGuard {
     }
     ~CallDepthGuard() { --g_callDepth; }
 };
+}  // namespace
 // Last-checkpoint marker. Stable numbering - DO NOT renumber:
 //   0 idle, 1 entered top-level, 2 wakeThreads, 3 clearBuffer,
 //   4 cellWipe, 5 ageprune, 6 uploadCamera, 7 setMatrix,
@@ -285,6 +290,10 @@ forensics::Snapshot forensics::captureSnapshot() {
 //
 // Only NiTriShape leaves defer; NiNodes stay inline so their subtree
 // keeps contributing occluders during the main pass.
+// Unnamed namespace, not `static`: `static` cannot give a *type*
+// internal linkage, and an identically named type in another TU would
+// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+namespace {
 struct PendingDisplay {
     NI::AVObject* shape;
     NI::Camera* camera;
@@ -298,6 +307,7 @@ struct PendingDisplay {
     // read-only against the caches.
     bool isTerrain;
 };
+}  // namespace
 static std::vector<PendingDisplay> g_pendingDisplays;
 
 // Deferred-occluder queue for the optional front-to-back submission order
@@ -311,14 +321,23 @@ static std::vector<PendingDisplay> g_pendingDisplays;
 // g_caches.occluder (unordered_map node addresses are stable across insertions,
 // valid until cell-change wipe - same lifetime guarantee the threadpool relies
 // on). Reused across frames; cleared after the submit loop.
+// Unnamed namespace, not `static`: `static` cannot give a *type*
+// internal linkage, and an identically named type in another TU would
+// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+namespace {
 struct PendingOccluder {
     const OccluderCacheEntry* cache;
     float dist2;  // squared eye->worldBoundOrigin distance, sort key
 };
+}  // namespace
 static std::vector<PendingOccluder> g_pendingOccluders;
 
 // Drain phase-1 verdict slots, populated by classifyDrainRange and
 // consumed by phase 2.
+// Unnamed namespace, not `static`: `static` cannot give a *type*
+// internal linkage, and an identically named type in another TU would
+// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+namespace {
 enum class DrainVerdict : uint8_t {
     Visible,         // VISIBLE; call display()
     Occluded,        // OCCLUDED; skip display (or tint+display in debug)
@@ -330,11 +349,12 @@ enum class DrainVerdict : uint8_t {
 
 struct DrainSlot {
     DrainVerdict verdict;
-    // True only when testSphereVisible actually ran. False for
+    // True only when live::testSphere actually ran. False for
     // Skip*/CachedOccluded. Phase 2 uses this to gate counter
     // increments that fired only on the !reused branch pre-refactor.
     bool ranTestRect;
 };
+}  // namespace
 
 static std::vector<DrainSlot> g_drainSlots;
 
@@ -730,7 +750,7 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
                 auto& cacheEntry = g_caches.occluderEntry(self);
                 if (!cacheEntry.propsResolved) {
                     if (g_frame.logEnabled) ++g_caches.occluderMisses;
-                    const auto p = classifyOccluderProperties(self);
+                    const auto p = classify::occluderProperties(self);
                     cacheEntry.alpha = p.alpha;
                     cacheEntry.stencil = p.stencil;
                     cacheEntry.propsResolved = true;
@@ -864,7 +884,7 @@ static bool occludeeBoxOccluded(NI::AVObject* shape) {
         corners[c * 3 + 1] = ry * s + T.y;
         corners[c * 3 + 2] = rz * s + T.z;
     }
-    return testBoxVisible(corners) == ::MaskedOcclusionCulling::OCCLUDED;
+    return live::testBox(corners) == ::MaskedOcclusionCulling::OCCLUDED;
 }
 
 static void classifyDrainRange(size_t lo, size_t hi) {
@@ -946,7 +966,7 @@ static void classifyDrainRange(size_t lo, size_t hi) {
         // Phase-1 wall time is bracketed once on the main thread; no
         // per-call timing here (worker CPU time != wall time).
         ::MaskedOcclusionCulling::CullingResult r;
-        r = testSphereVisible(
+        r = live::testSphere(
             p.shape->worldBoundOrigin, p.shape->worldBoundRadius);
         slot.ranTestRect = true;
         switch (r) {
@@ -1139,7 +1159,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
                 // g_msoc + threadpool now; toggle-off tears them
                 // down (joins workers, frees ~57MB). Returns false
                 // on alloc failure -> vanilla cullShowBody this frame.
-                const bool resourcesLive = ensureMSOCResourcesMatchConfig();
+                const bool resourcesLive = resources::ensureMatchesConfig();
                 const bool sceneEnabled = resourcesLive && (isInterior
                                                                 ? Configuration::OcclusionEnableInterior
                                                                 : Configuration::OcclusionEnableExterior);
@@ -1311,11 +1331,11 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         switch (g_frame.aggregateTerrain) {
             case 1:
                 g_lastStage = 8;
-                rasterizeAggregateTerrain(camera);
+                terrain::rasterizeAggregate(camera);
                 break;
             case 2:
                 g_lastStage = 8;
-                rasterizeAggregateTerrainHorizon(camera);
+                terrain::rasterizeHorizon(camera);
                 break;
             case 0:
             default:
@@ -1415,7 +1435,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
             g_prevFrameEndUs = 0;
         }
 
-        emitPerFrameStatsLine();
+        diag::emitPerFrameStatsLine();
     }
 }
 
@@ -1469,7 +1489,7 @@ void installPatches() {
         << (Configuration::EnableMSOC ? "true" : "false")
         << std::endl;
 
-    // Must run before createMSOCResources so the snapshot buffer
+    // Must run before resources::create so the snapshot buffer
     // and threadpool see the tier-resolved size. Aligns to MOC's
     // SUB_TILE_WIDTH=8 / SUB_TILE_HEIGHT=4 and clamps - tiny
     // resolutions trip MOC's tile math, huge ones blow out the
@@ -1495,7 +1515,7 @@ void installPatches() {
     // Hooks always install. Resources are allocated here when
     // EnableMSOC starts on, lazily on first MCM toggle-on otherwise.
     if (Configuration::EnableMSOC) {
-        createMSOCResources(log);
+        resources::create(log);
     } else {
         log << "MSOC: starting with EnableMSOC=false; resources will be allocated on first MCM toggle-on." << std::endl;
     }
@@ -1534,4 +1554,4 @@ void installPatches() {
         << kMsocWidth << "x" << kMsocHeight << " tile buffer)." << std::endl;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

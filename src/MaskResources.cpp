@@ -13,20 +13,20 @@
 #include <ostream>
 #include <thread>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion::resources {
 
 // Set when a threadpool was considered and deliberately not built (one usable
 // worker). Without it the reconciler re-runs the whole decision every frame,
 // because it only early-outs on a pool that exists, and re-logs the refusal -
 // tens of megabytes of identical lines over a session on a dual-core machine.
-// Cleared in destroyMSOCResources so an MCM toggle re-evaluates.
+// Cleared in destroy() so an MCM toggle re-evaluates.
 static bool s_threadpoolDeclined = false;
 
 // Allocate g_msoc + g_threadpool. Idempotent. Returns false on
 // allocation failure (callers treat as permanent disable). Called
 // from installPatches at startup and from the detour's ensure-helper
 // on MCM toggle-on.
-bool createMSOCResources(std::ostream& log) {
+bool create(std::ostream& log) {
     if (g_msoc && (g_threadpool || s_threadpoolDeclined)) return true;
 
     if (!g_msoc) {
@@ -118,13 +118,13 @@ bool createMSOCResources(std::ostream& log) {
         } catch (const std::exception& e) {
             log << "MSOC: threadpool creation threw: " << e.what()
                 << "; freeing partial state, occlusion disabled this session." << std::endl;
-            destroyMSOCResources(log);
+            destroy(log);
             return false;
         } catch (...) {
             log << "MSOC: threadpool creation threw non-std exception; "
                    "freeing partial state, occlusion disabled this session."
                 << std::endl;
-            destroyMSOCResources(log);
+            destroy(log);
             return false;
         }
 
@@ -143,7 +143,7 @@ bool createMSOCResources(std::ostream& log) {
 // ensure no async work is in flight (between frames, g_msocActive
 // false). Threadpool dtor joins all workers - bounded but blocking,
 // up to a few ms.
-void destroyMSOCResources(std::ostream& log) {
+void destroy(std::ostream& log) {
     // Unconditional: a toggle off/on must re-evaluate the pool decision even
     // if there was nothing left to free.
     s_threadpoolDeclined = false;
@@ -168,14 +168,14 @@ void destroyMSOCResources(std::ostream& log) {
 // Idempotent reconciler called at the safe top-of-frame point.
 // Returns true when resources are live and MSOC can run; false
 // when disabled or creation failed.
-bool ensureMSOCResourcesMatchConfig() {
+bool ensureMatchesConfig() {
     auto& log = log::getLog();
     if (Configuration::EnableMSOC) {
-        return createMSOCResources(log);
+        return create(log);
     } else {
-        destroyMSOCResources(log);
+        destroy(log);
         return false;
     }
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion::resources

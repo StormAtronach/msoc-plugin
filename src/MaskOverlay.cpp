@@ -15,7 +15,7 @@
 #include <ostream>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 namespace {
 
@@ -201,4 +201,4 @@ bool dumpMaskToPfm(const char* path) {
     return true;
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion

@@ -21,7 +21,7 @@
 #include <limits>  // numeric_limits; was reaching this through the PCH
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion::terrain {
 
 // ============================================================
 // Terrain aggregation
@@ -197,7 +197,7 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
             auto* shape = shapes.storage[k].get();
             if (!shape) continue;
             if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
-            const auto p = classifyOccluderProperties(shape);
+            const auto p = classify::occluderProperties(shape);
             if (p.alpha || p.stencil) continue;
             appendTerrainShape(entry.verts, entry.indices, static_cast<NI::TriShape*>(shape), step);
         }
@@ -286,7 +286,7 @@ static void refreshLandCache() {
 // the terrain-resolution dropdown (Full/Half/Corners), so coarser
 // settings cut the projection count too - the min-z fold in the cache
 // build keeps the silhouette conservative (it can only sink, never rise).
-void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
+void rasterizeHorizon(NI::Camera* camera) {
     if (!g_worldLandscapeRoot) return;
     if (g_worldLandscapeRoot->getAppCulled()) return;
 
@@ -499,7 +499,7 @@ void rasterizeAggregateTerrainHorizon(NI::Camera* camera) {
 //
 // Uses g_caches.land to amortise the per-Land walk + vertex transform.
 // Mark-and-sweep evicts entries whose NiNode wasn't seen this frame.
-void rasterizeAggregateTerrain(NI::Camera* camera) {
+void rasterizeAggregate(NI::Camera* camera) {
     if (!g_worldLandscapeRoot) return;
     if (g_worldLandscapeRoot->getAppCulled()) return;
 
@@ -592,4 +592,4 @@ void rasterizeAggregateTerrain(NI::Camera* camera) {
     }
 }
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion::terrain

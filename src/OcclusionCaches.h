@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace msoc::patch::occlusion {
+namespace msoc::occlusion {
 
 // Per-Land merged occluder cache. Key = per-Land NiNode under
 // WorldLandscape; value = world-space vertex+index buffers prebuilt
@@ -182,4 +182,4 @@ struct OcclusionCaches {
 
 extern OcclusionCaches g_caches;
 
-}  // namespace msoc::patch::occlusion
+}  // namespace msoc::occlusion
