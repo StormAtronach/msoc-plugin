@@ -192,7 +192,17 @@ extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     // pushed msoc.json; until then the plugin is loaded but inert. A log
     // reading "plugin loaded" with no later "installing occlusion patches"
     // means main.lua is older than the DLL.
+#ifdef NDEBUG
+    constexpr const char* kBuildConfig = "release";
+#else
+    constexpr const char* kBuildConfig = "DEBUG";
+#endif
+    // The configuration goes in the log because both builds are called
+    // msoc.dll and a deployed debug binary is otherwise indistinguishable from
+    // a slow release one. Reading 10.87 ms instead of 7.19 and calling it a
+    // regression is a real way to lose an hour.
     msoc::log::getLog() << "MSOC: loaded, awaiting msoc.install() from main.lua."
+                        << " build=" << kBuildConfig
                         << " simd=" << simdLevelName(probe.impl)
                         << " (" << msoc::simdCapSource() << ")"
                         << " tier=" << msoc::hardwareTierName(tier) << std::endl;

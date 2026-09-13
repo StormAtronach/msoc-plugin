@@ -197,11 +197,19 @@ if(MSOC_BUILD_DLL)
     set_property(TARGET msoc PROPERTY
         INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
-    # Drop the built DLL straight into the test mod's lib dir so include("msoc")
-    # can find it without manual copying.
+    # Release drops straight into the test mod's lib dir so include("msoc")
+    # finds it without manual copying.
+    #
+    # Debug deliberately does NOT. Both configurations produce msoc.dll, so
+    # sharing an output directory means a debug build silently replaces the
+    # release artifact, and anything that deploys from that path then ships a
+    # debug binary. That happened: a debug build made to inspect symbols
+    # overwrote the release DLL, the deploy copied it, and the next
+    # measurement read 10.87 ms where the release build reads 7.19, which
+    # looked exactly like a 50% performance regression.
     set_target_properties(msoc PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY         "${CMAKE_SOURCE_DIR}/test-mod/MWSE/lib"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_SOURCE_DIR}/test-mod/MWSE/lib"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/debug-lib"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/test-mod/MWSE/lib"
         OUTPUT_NAME "msoc"
     )
