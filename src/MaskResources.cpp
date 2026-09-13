@@ -6,6 +6,7 @@
 #include "OcclusionInternal.h"
 #include "Config.h"
 #include "Log.h"
+#include "SimdCap.h"
 
 #include <algorithm>
 #include <exception>
@@ -32,7 +33,7 @@ bool createMSOCResources(std::ostream& log) {
         // Documents intent; it does not gate anything. The AVX-512 TU is not
         // built at all as of 1.6.0 (see deps/msoc/NOTICE), so Create() cannot
         // return an AVX-512 implementation even when asked.
-        g_msoc = ::MaskedOcclusionCulling::Create(::MaskedOcclusionCulling::AVX2);
+        g_msoc = ::MaskedOcclusionCulling::Create(msoc::simdCap());
         if (!g_msoc) {
             log << "MSOC: MaskedOcclusionCulling::Create() returned null; occlusion disabled." << std::endl;
             return false;

@@ -85,10 +85,37 @@ on the low-tier (no-async) preset.
 
 These numbers are the plugin's own CPU cost, not the time it saves
 downstream. The user-visible win is fewer GPU draw calls and vertex-shader
-invocations on culled leaves. How that translates into FPS depends on
-whether your scene was CPU-draw-bound or GPU-bound to begin with, and on how
-much of the view is actually hidden — in a dense city the culler pays for
-itself several times over, on an open plain it is a small net cost.
+invocations on culled leaves.
+
+### Where it helps, and where it does not
+
+The cost above is close to constant. What the plugin returns is not: it
+depends entirely on how much of the view is hidden behind something else. So
+the same build is a large win in one place and a small loss in another.
+
+Measured for 1.6.0 across four exterior sites, culler off against culler on:
+
+| site | cull rate | result |
+|------|-----------|--------|
+| Old Ebonheart | 90% | **−22%** (108 → 139 fps) |
+| Narsis | 77% | **−14%** (74 → 87 fps) |
+| Balmora | 51% | −4% (210 → 218 fps) |
+| Vivec, Foreign Quarter | 11% | +1% (232 → 230 fps) |
+
+**The pattern is worth understanding before you judge a number.** The plugin
+wins in dense architecture and roughly breaks even on open ground, and the
+places where it breaks even are the places already running at 200 fps. It has
+never been a large loss on the hardware it most helps: on a simulated
+four-core machine the same two dense cities gain 2.3 to 2.6 ms a frame, more
+than on a fast CPU, because the drawing it avoids costs more there.
+
+The one case that is still a real regression is a sparse exterior on a weak
+CPU. Vivec on four cores measures +1.07 ms, a 16% loss, on a frame that was
+already running at 151 fps. If you spend your time in open terrain on older
+hardware and you can see the difference, turn the master switch off; the
+plugin has no way to work that out for itself. Attempts to make it decide
+automatically are written up in the moreFPS notes and none of them was
+reliable enough to ship.
 
 ### Cell-cross cost
 

@@ -106,6 +106,14 @@ line up with the number already published on Nexus.
   hand-maintained copy, and the camera's culling-plane count is read rather
   than assumed to be six. `src/` drops from 6278 to 5206 lines.
 
+- Documented where the culler is a net loss. It wins in dense architecture and
+  breaks even on open ground, and the places where it breaks even are already
+  running at 200 fps. The one real regression left is a sparse exterior on a
+  weak CPU: Vivec on four cores costs 16%, on a frame that was at 151 fps. An
+  adaptive switch that turned the pass off in those scenes was prototyped three
+  times and none of the three was reliable, so 1.6.0 ships the measurements and
+  the master toggle instead of a mechanism that guesses.
+
 **Upgrading:** `main.lua` and `msoc.dll` must be updated together. A new DLL with
 an old `main.lua` loads but never installs its hooks, and says so in `MSOC.log`;
 an old DLL with a new `main.lua` works as it did before, and says so too.

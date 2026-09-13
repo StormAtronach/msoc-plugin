@@ -12,6 +12,7 @@
 #include "MaskOverlay.h"
 #include "MaskedOcclusionCulling.h"
 #include "OcclusionApi.h"
+#include "SimdCap.h"
 
 extern "C" {
 #include "lua.h"
@@ -52,7 +53,7 @@ struct ProbeResult {
 // return. Re-enabling it means restoring the TU to MOC_SOURCES and setting
 // Intel's USE_AVX512, not removing this argument.
 ProbeResult probeMocLink() {
-    auto* moc = MaskedOcclusionCulling::Create(MaskedOcclusionCulling::AVX2);
+    auto* moc = MaskedOcclusionCulling::Create(msoc::simdCap());
     if (!moc) return {"Create() returned null", -1};
 
     moc->SetResolution(64, 32);
@@ -192,7 +193,9 @@ extern "C" __declspec(dllexport) int luaopen_msoc(lua_State* L) {
     // reading "plugin loaded" with no later "installing occlusion patches"
     // means main.lua is older than the DLL.
     msoc::log::getLog() << "MSOC: loaded, awaiting msoc.install() from main.lua."
-                        << std::endl;
+                        << " simd=" << simdLevelName(probe.impl)
+                        << " (" << msoc::simdCapSource() << ")"
+                        << " tier=" << msoc::hardwareTierName(tier) << std::endl;
 
     return 1;
 }

@@ -112,6 +112,28 @@ def start_results_dir():
         fh.write(os.path.basename(RESULTS) + "\n")
     return RESULTS
 
+# Keys installPatches latches. Changing them mid-session does nothing, so the
+# driver writes them into msoc.json before launch and groups variants by them.
+RESTART_ONLY = ("OcclusionMaskWidth", "OcclusionMaskHeight",
+                "OcclusionForensicsWatchdog")
+
+MSOC_JSON = os.path.join(MO2_ROOT, "mods", "Configuration", "MWSE", "config",
+                         "msoc.json")
+MSOC_JSON_BACKUP = MSOC_JSON + ".perfbak"
+
+# --sweep mask: the mask resolutions the three hardware tiers ship. One launch
+# per size. "on" is the high-tier default and the baseline the others compare
+# against, so it keeps the name the summary looks for.
+SWEEP_MASK_VARIANTS = [
+    ("off", {"EnableMSOC": False}),
+    ("on", {"EnableMSOC": True,
+            "OcclusionMaskWidth": 512, "OcclusionMaskHeight": 256}),
+    ("mask-384", {"EnableMSOC": True,
+                  "OcclusionMaskWidth": 384, "OcclusionMaskHeight": 192}),
+    ("mask-256", {"EnableMSOC": True,
+                  "OcclusionMaskWidth": 256, "OcclusionMaskHeight": 128}),
+]
+
 SYNC = {"EnableMSOC": True, "OcclusionAsyncOccluders": False}
 
 
@@ -245,15 +267,21 @@ def restore_vsync():
         print("mgeXE.toml restored")
 
 
-def child_env(vsync):
+def child_env(args):
     """Environment for the game process.
 
     DXVK reads DXVK_CONFIG for inline overrides, so the layer below MGE cannot
     re-impose a present interval, and nothing is written into the install.
+
+    MSOC_SIMD_CAP goes here rather than into msoc.json because the plugin
+    probes the MOC link during luaopen_msoc, before main.lua has pushed any
+    config across. It is a testing lever, not a user setting.
     """
     env = dict(os.environ)
-    if not vsync:
+    if not args.vsync:
         env["DXVK_CONFIG"] = "d3d9.presentInterval = 0"
+    if getattr(args, "simd", None):
+        env["MSOC_SIMD_CAP"] = args.simd
     return env
 
 
@@ -281,14 +309,47 @@ def kill_game():
     time.sleep(2)
 
 
+# i7-14700KF topology: 8 P-cores with hyperthreading on logical 0-15, then 12
+# E-cores on 16-27. Named masks so a run is readable without counting bits.
+AFFINITY_PRESETS = {
+    "ecore2": 0x30000,       # 2 E-cores
+    "ecore4": 0xF0000,       # 4 E-cores, the default weak-CPU profile
+    "ecore8": 0xFF0000,      # 8 E-cores
+    "pcore2": 0x00003,       # 2 threads of one P-core, for comparison
+    "pcore4": 0x0000F,
+    "all": 0,                # 0 means leave it alone
+}
+
+
+def apply_affinity(mask):
+    """Pin the running game to a processor mask. Returns True if it took."""
+    if not mask:
+        return False
+    ps = ("$p = Get-Process Morrowind -ErrorAction SilentlyContinue; "
+          "if ($p) { $p.ProcessorAffinity = [IntPtr]%d; "
+          "'affinity 0x%X' } else { 'no process' }" % (mask, mask))
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception as exc:
+        print("    affinity failed: %s" % exc)
+        return False
+    print("    %s" % out)
+    return "affinity" in out
+
+
 def launch(args):
     """Start the game, retrying once if the process never appears."""
+    mask = AFFINITY_PRESETS.get(args.affinity, 0) if args.affinity else 0
     for attempt in (1, 2):
-        subprocess.Popen([MO2_EXE, MO2_SHORTCUT], env=child_env(args.vsync),
+        subprocess.Popen([MO2_EXE, MO2_SHORTCUT], env=child_env(args),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(30):
             time.sleep(1)
             if _running("Morrowind.exe"):
+                # After the process exists, before it has done much: the engine
+                # is still loading, so nothing measured has run wide yet.
+                apply_affinity(mask)
                 return True
         print("    launch attempt %d produced no game process; retrying" % attempt)
         kill_game()
@@ -308,7 +369,50 @@ def remove_harness():
         os.remove(SPEC_FILE)
 
 
-def run_site(label, variants, args, site=None, mode="measure", repeats=1):
+def patch_msoc_json(overrides):
+    """Write restart-only keys into the game's msoc.json. Returns True if it
+    changed anything, so the caller knows to restore."""
+    if not overrides:
+        return False
+    if not os.path.isfile(MSOC_JSON):
+        print("  note: %s not found; cannot set restart-only keys" % MSOC_JSON)
+        return False
+    if not os.path.isfile(MSOC_JSON_BACKUP):
+        shutil.copy(MSOC_JSON, MSOC_JSON_BACKUP)
+    with open(MSOC_JSON, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    cfg.update(overrides)
+    with open(MSOC_JSON, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+    print("  msoc.json <- %s" % json.dumps(overrides))
+    return True
+
+
+def restore_msoc_json():
+    if os.path.isfile(MSOC_JSON_BACKUP):
+        shutil.copy(MSOC_JSON_BACKUP, MSOC_JSON)
+        os.remove(MSOC_JSON_BACKUP)
+        print("  msoc.json restored")
+
+
+def restart_key_signature(config):
+    """The restart-only slice of a variant's config, as a hashable key."""
+    return tuple(sorted((k, config[k]) for k in RESTART_ONLY if k in config))
+
+
+def group_by_restart_keys(variants):
+    """[(signature, [variant, ...]), ...] preserving the declared order."""
+    groups, order = {}, []
+    for name, config in variants:
+        sig = restart_key_signature(config)
+        if sig not in groups:
+            groups[sig] = []
+            order.append(sig)
+        groups[sig].append((name, config))
+    return [(sig, groups[sig]) for sig in order]
+
+
+def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""):
     """One game session covering every variant and repeat at one site.
 
     Returns a list of parsed result dicts, one per pass, in the order the
@@ -401,7 +505,10 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1):
     kill_game()
 
     os.makedirs(RESULTS, exist_ok=True)
-    safe = label.replace("/", "_")
+    # Sessions at one site that differ only in restart-only keys would all
+    # write to <site>.mwse.log and clobber each other, so the group tag goes
+    # in the filename.
+    safe = (label + tag).replace("/", "_")
     for src, tag in ((MWSE_LOG, "mwse"), (MSOC_LOG, "msoc")):
         if os.path.isfile(src):
             shutil.copy(src, os.path.join(RESULTS, "%s.%s.log" % (safe, tag)))
@@ -658,8 +765,14 @@ def main():
                     help="rotate the view every N frames during sampling (default 300)")
     ap.add_argument("--views", type=int, default=8,
                     help="how many bearings to rotate through (default 8)")
+    ap.add_argument("--affinity", choices=sorted(AFFINITY_PRESETS),
+                    help="pin the game to a subset of logical processors. "
+                         "ecore4 is the weak-CPU profile on this machine")
+    ap.add_argument("--simd", choices=["sse2", "sse41", "avx2"],
+                    help="cap the rasterizer's instruction set. sse41 is what "
+                         "the low hardware tier actually exists for")
     ap.add_argument("--sweep", nargs="?", const="async", default=None,
-                    choices=["async", "sync"],
+                    choices=["async", "sync", "mask"],
                     help="sweep one knob at a time instead of just on/off. "
                          "'sync' pins the rasterizer to the main thread for "
                          "every variant, as the low-tier preset runs it")
@@ -677,6 +790,8 @@ def main():
         variants = SWEEP_VARIANTS
     elif args.sweep == "sync":
         variants = SWEEP_SYNC_VARIANTS
+    elif args.sweep == "mask":
+        variants = SWEEP_MASK_VARIANTS
     if args.only:
         wanted = {s.strip() for s in args.only.split(",")}
         variants = [v for v in variants if v[0] in wanted]
@@ -700,7 +815,9 @@ def main():
     # One launch per site amortises the ~100s of startup over every pass in it;
     # --relaunch pays it per measurement.
     per_pass = args.settle + args.warmup + args.sample + 10
-    launches = total if args.relaunch else len(sites)
+    # One launch per site, or per restart-key group within a site.
+    groups = len(group_by_restart_keys(variants))
+    launches = total if args.relaunch else len(sites) * groups
     print("  %d launch(es), ~%d min estimated"
           % (launches, round((launches * 100 + total * per_pass) / 60.0)))
 
@@ -726,14 +843,42 @@ def main():
                         for r in run_site(label, [(name, config)], args, site, repeats=1):
                             by_variant.setdefault(name, []).append(r)
             else:
-                print("")
-                print("[%s] %d variant(s) x %d repeat(s) in one session"
-                      % (site_name, len(variants), args.repeats))
-                for r in run_site(site_name, variants, args, site,
-                                  repeats=args.repeats):
-                    # "site/variant#rep" -> variant
-                    head = r["run"].split("#", 1)[0]
-                    by_variant.setdefault(head.rsplit("/", 1)[-1], []).append(r)
+                # One session per group of variants that share their
+                # restart-only keys. With none set that is a single session, as
+                # before; a mask sweep gets one launch per resolution because
+                # installPatches latches the size and will not re-read it.
+                groups = group_by_restart_keys(variants)
+                # With one group, repeats live inside the single session as
+                # before. With several, each group needs its own launch, so
+                # repeating inside a session would compare variants measured in
+                # different sessions using an error bar estimated within one.
+                # That is how the first mask sweep came to report two wins
+                # against a baseline session whose drain time was an outlier.
+                # Cycle the groups instead, so session drift lands on all of
+                # them.
+                cycles = 1 if len(groups) == 1 else args.repeats
+                per_session = args.repeats if len(groups) == 1 else 1
+                for cycle in range(cycles):
+                    for sig, group in groups:
+                        print("")
+                        print("[%s] %d variant(s) x %d in session%s%s"
+                              % (site_name, len(group), per_session,
+                                 (" cycle %d/%d" % (cycle + 1, cycles)) if cycles > 1 else "",
+                                 (" " + json.dumps(dict(sig))) if sig else ""))
+                        patched_json = patch_msoc_json(dict(sig))
+                        tag = "-c%d" % (cycle + 1) if cycles > 1 else ""
+                        if sig:
+                            tag += "-" + "-".join(str(v) for _k, v in sig)
+                        try:
+                            rs = run_site(site_name, group, args, site,
+                                          repeats=per_session, tag=tag)
+                        finally:
+                            if patched_json:
+                                restore_msoc_json()
+                        for r in rs:
+                            # "site/variant#rep" -> variant
+                            head = r["run"].split("#", 1)[0]
+                            by_variant.setdefault(head.rsplit("/", 1)[-1], []).append(r)
 
             for name, _config in variants:
                 reps = by_variant.get(name) or []
