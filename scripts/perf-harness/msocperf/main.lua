@@ -27,6 +27,8 @@
 local SPEC_NAME = "msocperf_spec"
 
 local msocPlugin = include("msoc")
+local anatomy = include("msocperf.anatomy")
+local batchcensus = include("msocperf.batchcensus")
 
 local spec = nil
 do
@@ -162,18 +164,64 @@ end
 local passIndex = 0
 local currentRun = tostring(spec.run)
 
+--- Read or write one config key, routing by prefix.
+---
+--- Keys named `mwse:Foo` address MWSE's own `mwse.configuration`, which binds
+--- its C++ statics by reference (`sol::var(std::ref(value))`), so a write here
+--- reaches the engine patch immediately. Everything else is an msoc key.
+---
+--- Routing them through the same pass list is what allows an MWSE-side patch to
+--- be A/B'd interleaved within one session, instead of across two launches where
+--- session drift lands entirely on one side of the comparison.
+local function configGet(key)
+    local mwseKey = key:match("^mwse:(.+)$")
+    if mwseKey then
+        local ok, value = pcall(function() return mwse.getConfig(mwseKey) end)
+        return ok and value or nil
+    end
+    -- `lua:Name` addresses a plain global, for behaviour that lives in a mod's
+    -- Lua rather than in any config - e.g. a per-call rayTest parameter, which
+    -- no C++ flag can reach because tes3.rayTest overwrites it from the call.
+    local luaKey = key:match("^lua:(.+)$")
+    if luaKey then
+        return rawget(_G, luaKey)
+    end
+    return require("msoc.config").config[key]
+end
+
+local function configSet(key, value)
+    local mwseKey = key:match("^mwse:(.+)$")
+    if mwseKey then
+        -- mwse.setConfig is the public accessor; the usertype behind it is a
+        -- local of initialize.lua and `mwse.configuration` does not exist.
+        -- (Every mwse: pass before 2026-09-14 09:20 failed here silently
+        -- apart from a log line, so those sweeps never flipped their flag.)
+        local ok, err = pcall(function()
+            local applied, e = mwse.setConfig(mwseKey, value)
+            if not applied then error(tostring(e)) end
+        end)
+        if not ok then say("config %s failed: %s", key, tostring(err)) end
+        return
+    end
+    local luaKey = key:match("^lua:(.+)$")
+    if luaKey then
+        rawset(_G, luaKey, value)
+        return
+    end
+    require("msoc.config").config[key] = value
+end
+
 -- Every key any pass touches, with the value it had before the first pass ran.
--- Passes write into the shared cfg.config table, so without this a sweep is
--- cumulative: once one pass sets OcclusionAsyncOccluders = false it stays false
--- for every pass after it, and the results describe a config nobody asked for.
+-- Passes write into shared config tables, so without this a sweep is cumulative:
+-- once one pass sets OcclusionAsyncOccluders = false it stays false for every
+-- pass after it, and the results describe a config nobody asked for.
 local baseline = {}
 do
-    local cfg = require("msoc.config")
     for _, pass in ipairs(passes) do
         for k in pairs(pass.config) do
             if baseline[k] == nil then
                 -- false is a legitimate value, so record presence separately.
-                baseline[k] = { value = cfg.config[k] }
+                baseline[k] = { value = configGet(k) }
             end
         end
     end
@@ -273,7 +321,8 @@ local function report()
     end
     local drift = math.abs(span - windowSeconds) / windowSeconds
     if drift > 0.15 then
-        say("WARN run=%s sampled %.1fs of a %.0fs window (%.0f%% off)",
+        -- No literal percent sign: mwse.log formats the message a second time.
+        say("WARN run=%s sampled %.1fs of a %.0fs window, off by %.0f pct",
             currentRun, span, windowSeconds, drift * 100)
     end
     local toMs = 1000.0
@@ -301,6 +350,54 @@ local function report()
     say("RESULT run=%s frames=%d meanMs=%.3f p50Ms=%.3f p95Ms=%.3f p99Ms=%.3f meanFps=%.1f",
         currentRun, #deltas, m,
         pct(sorted, 0.50), pct(sorted, 0.95), pct(sorted, 0.99), 1000.0 / m)
+
+    -- Spike structure.
+    --
+    -- The DXVK frametime graph at Narsis shows a flat ~8 ms baseline with a
+    -- regular train of spikes to ~23 ms, and the mean sits well above the
+    -- median - so the frame budget is not steady-state throughput, it is
+    -- periodic stalls. Percentiles say a tail exists but not whether it is
+    -- periodic, and periodicity is what identifies the owner: a stable interval
+    -- points at a timer, a jittery one at garbage collection or streaming.
+    --
+    -- Spikes are measured against the median rather than the mean, because the
+    -- mean is itself inflated by the thing being measured.
+    local median = pct(sorted, 0.50)
+    local threshold = median * 1.5
+    local spikes, spikeMs, prevIndex = 0, 0.0, nil
+    local gaps = {}
+    for i = 1, #deltas do
+        if deltas[i] > threshold then
+            spikes = spikes + 1
+            spikeMs = spikeMs + (deltas[i] - median)
+            if prevIndex then gaps[#gaps + 1] = i - prevIndex end
+            prevIndex = i
+        end
+    end
+
+    if spikes > 0 then
+        table.sort(gaps)
+        local gapMed = #gaps > 0 and gaps[math.ceil(#gaps / 2)] or 0
+        -- Spread of the gaps around their median says periodic vs irregular.
+        local jitter = 0.0
+        if #gaps > 1 then
+            local sum = 0.0
+            for _, g in ipairs(gaps) do sum = sum + math.abs(g - gapMed) end
+            jitter = sum / #gaps / math.max(1, gapMed)
+        end
+        -- How much of the mean the spikes are responsible for: if this is large,
+        -- optimising steady-state work cannot move the mean much.
+        local excessPerFrame = spikeMs / #deltas
+        -- No literal percent signs: mwse.log runs string.format over the message
+        -- again, so a "%" that survives say()'s own format breaks the second one.
+        say("SPIKES run=%s count=%d pctFrames=%.2f thresholdMs=%.2f "
+            .. "everyNframes=%d jitter=%.2f excessMs=%.3f pctOfMean=%.1f maxMs=%.2f",
+            currentRun, spikes, 100.0 * spikes / #deltas, threshold,
+            gapMed, jitter, excessPerFrame, 100.0 * excessPerFrame / m,
+            sorted[#sorted])
+    else
+        say("SPIKES run=%s none above %.2f ms", currentRun, threshold)
+    end
 
     -- Per-view means show how much the bearing mattered. A site where these
     -- vary wildly is one where a single-view measurement would have been
@@ -376,6 +473,295 @@ local function gotoSite(site)
     return true
 end
 
+-- ------------------------------------------------------------ bvhtest mode
+
+--- Run the BVH correctness A/B once the harness is actually standing at the
+--- site.
+---
+--- The benchmark is meaningless wherever the save happens to start, so it is
+--- sequenced after gotoSite and a settle rather than fired from a blind timer
+--- off the `loaded` event, which would race travel.
+local function runBvhTest()
+    local bvhtest = include("msocperf.bvhtest")
+    if not bvhtest then
+        say("BVHTEST module failed to load")
+        say("DONE")
+        return
+    end
+
+    tes3.setPlayerControlState({ enabled = false })
+    if spec.gameHour then
+        tes3.setGlobal("GameHour", spec.gameHour)
+    end
+
+    if spec.site and not gotoSite(spec.site) then
+        say("BVHTEST site unavailable")
+        say("DONE")
+        return
+    end
+
+    local settle = spec.settleSeconds or 3
+    local warmup = spec.warmupSeconds or 8
+    timer.start({ type = timer.real, duration = settle, callback = function()
+        faceSegment(0)
+        -- Warm up first: a cold cell is still committing references and loading
+        -- meshes, and the "warm" pass is supposed to measure query cost only.
+        timer.start({ type = timer.real, duration = warmup, callback = function()
+            local ok = bvhtest.run({ rays = spec.bvhRays or 400 })
+            say("BVHTEST %s", ok and "PASS" or "FAIL")
+            say("DONE")
+        end })
+    end })
+end
+
+-- -------------------------------------------------------- lua profile mode
+
+--- Attribute main-thread Lua time to individual mods.
+---
+--- VTune can say lua51.dll is 21% of the main thread but not *which script*:
+--- its samples land in the interpreter loop and hash internals, not in mod code.
+--- ProFi hooks the Lua VM itself, so it reports per-function file and line.
+---
+--- The hook makes everything slower, so this is an attribution run, never a
+--- timing run - read the RELATIVE column and ignore the absolute frame times.
+local function runLuaProfile()
+    local ProFi = include("ProFi.Profi")
+    if not ProFi then
+        say("LUAPROFILE ProFi unavailable (is the MWSE Profiler 2 mod enabled?)")
+        say("DONE")
+        return
+    end
+
+    tes3.setPlayerControlState({ enabled = false })
+    if spec.gameHour then
+        tes3.setGlobal("GameHour", spec.gameHour)
+    end
+
+    if spec.site and not gotoSite(spec.site) then
+        say("LUAPROFILE site unavailable")
+        say("DONE")
+        return
+    end
+
+    local settle = spec.settleSeconds or 3
+    local warmup = spec.warmupSeconds or 8
+    local window = spec.profileSeconds or spec.sampleSeconds or 30
+    local report = spec.profileReport or "msocperf_profi.txt"
+
+    timer.start({ type = timer.real, duration = settle, callback = function()
+        faceSegment(0)
+        say("warmup %ss before profiling", tostring(warmup))
+        timer.start({ type = timer.real, duration = warmup, callback = function()
+            -- Rotate through the same bearings the timing runs use, so the
+            -- profile covers the spread of views rather than one lucky one.
+            local turns, seg = 0, 0
+            local rotate
+            rotate = function()
+                seg = seg + 1
+                faceSegment(seg)
+                turns = turns + 1
+                if turns < segments then
+                    timer.start({ type = timer.real, duration = window / segments,
+                                  callback = rotate })
+                end
+            end
+            timer.start({ type = timer.real, duration = window / segments,
+                          callback = rotate })
+
+            ProFi:start()
+            say("LUAPROFILE profiling %ss over %d views", tostring(window), segments)
+            timer.start({ type = timer.real, duration = window, callback = function()
+                ProFi:stop()
+                local ok, err = pcall(function() ProFi:writeReport(report) end)
+                if ok then
+                    say("LUAPROFILE wrote %s", report)
+                else
+                    say("LUAPROFILE writeReport failed: %s", tostring(err))
+                end
+                say("DONE")
+            end })
+        end })
+    end })
+end
+
+-- ------------------------------------------------------------ anatomy mode
+
+--- Travel to the site, let the cell settle, then census the draw population.
+---
+--- Nothing here is timed. The walk reads what the engine is holding, which is
+--- a property of the place rather than of a frame, so it runs once and outside
+--- any sample window.
+local function runAnatomy()
+    if not anatomy then
+        say("ANATOMY module failed to load")
+        say("DONE")
+        return
+    end
+
+    tes3.setPlayerControlState({ enabled = false })
+    if spec.gameHour then
+        tes3.setGlobal("GameHour", spec.gameHour)
+    end
+
+    if spec.site and not gotoSite(spec.site) then
+        say("ANATOMY site unavailable")
+        say("DONE")
+        return
+    end
+
+    -- References keep committing for a while after positionCell returns, and a
+    -- walk that starts too early reports a half-built cell as the answer.
+    local settle = spec.settleSeconds or 8
+    say("settling %ss before the walk", tostring(settle))
+    timer.start({
+        type = timer.real,
+        duration = settle,
+        callback = function()
+            faceSegment(0)
+            local ok, err = pcall(anatomy.collect,
+                                  spec.site and spec.site.name or "here")
+            if not ok then say("ANATOMY failed: %s", tostring(err)) end
+            -- Batching ceiling census, same walk cadence as the anatomy. See
+            -- docs/plans/active-grid-batching-plan.md for what the BATCH
+            -- lines mean.
+            if batchcensus then
+                -- Three type sets, so the collapse is comparable across them:
+                -- statics only, OpenMW's active-grid paging set, and that plus
+                -- lights (which OpenMW never pages).
+                local siteName = spec.site and spec.site.name or "here"
+                for _, variant in ipairs({
+                    { label = "static", types = {} },
+                    { label = "openmw", types = { "activator", "container", "door" } },
+                    { label = "openmw+light", types = { "activator", "container", "door", "light" } },
+                }) do
+                    local okb, errb = pcall(batchcensus.collect, siteName, variant.types, variant.label)
+                    if not okb then say("BATCH failed (%s): %s", variant.label, tostring(errb)) end
+                end
+            end
+            say("DONE")
+        end,
+    })
+end
+
+--- Optional visual check: after the warmup of each pass, face fixed bearings
+--- and save MGE screenshots named after the pass, so batching-on and -off
+--- frames from one session can be diffed pixel for pixel.
+--- Toggle mode: the player never moves. At each bearing one frame with
+--- batching off and one with it on, about a second apart, so the only thing
+--- that differs between the pair is the batching. This is the comparison that
+--- survives session drift (time of day, clouds, NPCs, camera restore).
+local function takeToggleScreenshots(label, done)
+    local tag = tostring(label):gsub("[^%w]+", "_")
+    local bearings = spec.screenshotBearings or { 0, 1, 2, 3, 4, 5, 6, 7 }
+    local key = spec.screenshotToggleKey or "EnableStaticBatching"
+    local i = 0
+    local function shot(state, cb)
+        mwse.setConfig(key, state)
+        timer.start({ type = timer.real, duration = 0.9, callback = function()
+            local path = string.format("Screenshots/msocperf_%s_b%d_%s.png", tag, bearings[i], state and "on" or "off")
+            local ok, err = pcall(mge.saveScreenshot, { path = path })
+            say("SCREENSHOT run=%s bearing=%d %s=%s %s", tostring(label), bearings[i], key, tostring(state),
+                ok and path or ("failed: " .. tostring(err)))
+            -- mge.saveScreenshot captures the next rendered frame, not the
+            -- current one. Nothing may change (config, orientation) until that
+            -- frame has been presented, or the file shows the next state.
+            timer.start({ type = timer.real, duration = 0.4, callback = cb })
+        end })
+    end
+    local function nextBearing()
+        i = i + 1
+        if not bearings[i] then
+            mwse.setConfig(key, false)
+            faceSegment(0)
+            done()
+            return
+        end
+        faceSegment(bearings[i])
+        -- The first-person camera turns toward the new orientation over a
+        -- couple of seconds rather than snapping; a shot taken during the turn
+        -- pairs with one taken after it as if they were different bearings.
+        -- Own the view explicitly: poll the camera vector and shoot only once
+        -- it has held still for several consecutive checks.
+        local last, still, polls = nil, 0, 0
+        local function waitSettled()
+            local v = nil
+            pcall(function() v = tes3.getCameraVector() end)
+            polls = polls + 1
+            if v and last and math.abs(v.x - last.x) < 1e-5 and math.abs(v.y - last.y) < 1e-5 and math.abs(v.z - last.z) < 1e-5 then
+                still = still + 1
+            else
+                still = 0
+            end
+            last = v
+            if still >= 6 or polls >= 80 then
+                if polls >= 80 then say("SCREENSHOT camera never settled at bearing %d", bearings[i]) end
+                shot(false, function() shot(true, nextBearing) end)
+                return
+            end
+            timer.start({ type = timer.real, duration = 0.1, callback = waitSettled })
+        end
+        timer.start({ type = timer.real, duration = 0.2, callback = waitSettled })
+    end
+    nextBearing()
+end
+
+local function takeScreenshots(label, done)
+    if not spec.screenshots then
+        done()
+        return
+    end
+    if spec.screenshotToggle then
+        takeToggleScreenshots(label, done)
+        return
+    end
+    local tag = tostring(label):gsub("[^%w]+", "_")
+    local bearings = spec.screenshotBearings or { 0, 1, 2, 3, 4, 5, 6, 7 }
+    -- Two sets: at the player's eye, then (if the mobile's collision can be
+    -- switched off so the player holds still in the air) from `elevate` units
+    -- up, where the rooftops and the whole active grid fill the view.
+    local elevate = spec.screenshotElevate or 1200
+    local groundPos = tes3.player.position:copy()
+    local sets = { { suffix = "", z = 0 } }
+    local elevated = false
+    pcall(function()
+        tes3.mobilePlayer.movementCollision = false
+        elevated = tes3.mobilePlayer.movementCollision == false
+    end)
+    if elevated then sets[#sets + 1] = { suffix = "h", z = elevate } end
+    local si, i = 1, 0
+    local function nextShot()
+        i = i + 1
+        local set = sets[si]
+        local b = bearings[i]
+        if not b then
+            si, i = si + 1, 0
+            set = sets[si]
+            if not set then
+                pcall(function()
+                    tes3.player.position = groundPos
+                    tes3.mobilePlayer.movementCollision = true
+                end)
+                faceSegment(0)
+                done()
+                return
+            end
+            b = bearings[1]
+            i = 1
+        end
+        pcall(function()
+            tes3.player.position = tes3vector3.new(groundPos.x, groundPos.y, groundPos.z + set.z)
+        end)
+        faceSegment(b)
+        timer.start({ type = timer.real, duration = 0.6, callback = function()
+            local path = string.format("Screenshots/msocperf_%s_b%d%s.png", tag, b, set.suffix)
+            local ok, err = pcall(mge.saveScreenshot, { path = path })
+            say("SCREENSHOT run=%s bearing=%d%s %s", tostring(label), b, set.suffix, ok and path or ("failed: " .. tostring(err)))
+            timer.start({ type = timer.real, duration = 0.4, callback = nextShot })
+        end })
+    end
+    nextShot()
+end
+
 --- Apply one pass's config, let it settle, warm up, then sample.
 ---
 --- Defined as an assignment because report() forward-declares it: the two call
@@ -398,10 +784,10 @@ runNextPass = function()
     -- Reset every swept key first, so each pass is measured against the same
     -- starting config rather than against whatever the previous pass left.
     for k, slot in pairs(baseline) do
-        cfg.config[k] = slot.value
+        configSet(k, slot.value)
     end
     for k, v in pairs(pass.config) do
-        cfg.config[k] = v
+        configSet(k, v)
     end
     cfg.syncToNative(msocPlugin)
     say("PASS %d/%d run=%s %s", passIndex, #passes, currentRun, describe(pass.config))
@@ -422,6 +808,7 @@ runNextPass = function()
                 type = timer.real,
                 duration = warmup,
                 callback = function()
+                    takeScreenshots(currentRun, function()
                     timestamps, segmentOf = {}, {}
                     frameInSegment, segment = 0, 0
                     faceSegment(0)
@@ -435,6 +822,7 @@ runNextPass = function()
                     say("sampling %ss, rotating every %d frames over %d views",
                         tostring(sample), rotateEvery, segments)
                     timer.start({ type = timer.real, duration = sample, callback = report })
+                    end)
                 end,
             })
         end,
@@ -482,6 +870,12 @@ event.register("loaded", function()
     timer.start({
         type = timer.real,
         duration = 3,
-        callback = (MODE == "scan") and runScan or startMeasure,
+        callback = function()
+            if MODE == "scan" then return runScan() end
+            if MODE == "anatomy" then return runAnatomy() end
+            if MODE == "luaprofile" then return runLuaProfile() end
+            if MODE == "bvhtest" then return runBvhTest() end
+            return startMeasure()
+        end,
     })
 end)

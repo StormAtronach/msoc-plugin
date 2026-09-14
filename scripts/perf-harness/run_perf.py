@@ -86,6 +86,12 @@ MGE_TOML_BACKUP = MGE_TOML + ".perfbak"
 GAME_ROOT = r"D:\GOG\Morrowind\Morrowind"
 MWSE_LOG = os.path.join(GAME_ROOT, "MWSE.log")
 MSOC_LOG = os.path.join(GAME_ROOT, "MSOC.log")
+# MGE XE's own log, where the instancing probe reports. Captured alongside the
+# other two so a probe run leaves its numbers in the results directory.
+MGE_LOG = os.path.join(GAME_ROOT, "mgeXE.log")
+# ProFi writes through io.open with a relative path, which resolves against the
+# game's working directory.
+PROFI_REPORT = os.path.join(GAME_ROOT, "msocperf_profi.txt")
 
 # The spec is delivered as an MWSE config file inside the deployed mod, so the
 # game reads it through MO2's virtual file system at
@@ -134,6 +140,120 @@ SWEEP_MASK_VARIANTS = [
                   "OcclusionMaskWidth": 256, "OcclusionMaskHeight": 128}),
 ]
 
+# --sweep exprcache: MWSE's mwscript expression memoization, A/B'd inside one
+# session. `mwse:` keys address mwse.configuration, whose C++ statics are bound
+# by reference, so the patch flips live between passes - which matters because
+# two separate launches put all session drift on one side of the comparison, and
+# the first attempt at this lost its second launch to a failed save load.
+# Baseline keeps the name "on" so the summary compares against it.
+# --sweep physics: MWSE's per-mesh triangle BVH plus the per-bone bound rejection
+# for skinned picks, A/B'd inside one session. UsePhysicsOptimizations gates both
+# and is bound by reference, so it flips live between passes and session drift
+# lands on both sides of the comparison rather than all on one.
+# --sweep accurateskinned: Crafting Framework's activation raytest asks for
+# exact skinned hit detection, which is the one path a model-space triangle BVH
+# cannot accelerate. It is a per-call rayTest parameter, so no C++ flag reaches
+# it; the deployed StaticActivator.lua reads a global instead and this flips it
+# between interleaved passes. Baseline keeps the name "on".
+# --sweep asyncwait: does the culler's async rasterizer pace the frame? With
+# async on, CullingThreadpool::Flush spin-yields on the main thread until the
+# queue drains, which a CPU-time profiler cannot distinguish from work. With it
+# off the rasterizer runs inline and there is no wait at all, so if the frame is
+# paced by that spin rather than by throughput, this is where it shows.
+SWEEP_ASYNCWAIT_VARIANTS = [
+    ("on", {"EnableMSOC": True, "OcclusionAsyncOccluders": True}),
+    ("async-off", {"EnableMSOC": True, "OcclusionAsyncOccluders": False}),
+]
+
+SWEEP_ACCURATESKINNED_VARIANTS = [
+    ("on", {"EnableMSOC": True, "lua:__harnessAccurateSkinned": True}),
+    ("skinned-off", {"EnableMSOC": True, "lua:__harnessAccurateSkinned": False}),
+]
+
+SWEEP_PHYSICS_VARIANTS = [
+    ("on", {"EnableMSOC": True, "mwse:UsePhysicsOptimizations": True}),
+    ("physics-off", {"EnableMSOC": True, "mwse:UsePhysicsOptimizations": False}),
+]
+
+SWEEP_EXPRCACHE_VARIANTS = [
+    ("on", {"EnableMSOC": True, "mwse:UseScriptExpressionCache": True}),
+    ("exprcache-off", {"EnableMSOC": True, "mwse:UseScriptExpressionCache": False}),
+]
+
+# --sweep renderskip: what does one static draw cost? MWSE's render-skip probe
+# hides a hashed fraction of batchable static shapes from NiNode::Display and
+# nothing else (picks, collision, lights and line of sight keep the originals),
+# so the slope of frame time against hidden draws is ms per draw for exactly
+# the population active-grid batching would merge. The -small and -large
+# variants hide only shapes in a triangle-count window; solving the two
+# slopes together (ms per hidden draw, ms per hidden triangle) separates
+# per-draw from per-triangle cost. All three run with the culler off: a
+# shape hidden before CullShow also leaves MSOC's occluder mask, so a
+# culler-on arm would measure the mask, not the draw. The [RenderSkip]
+# lines in MWSE.log carry the hidden and skipped counts.
+# See docs/plans/active-grid-batching-plan.md, Phase 0b.
+def _renderskip(percent, min_tris=0, max_tris=1000000, msoc=False):
+    return {"EnableMSOC": msoc,
+            "mwse:EnableRenderSkipProbe": True,
+            "mwse:RenderSkipPercent": percent,
+            "mwse:RenderSkipMinTriangles": min_tris,
+            "mwse:RenderSkipMaxTriangles": max_tris}
+
+
+def _renderskip_variants(msoc=False, min_tris=0, max_tris=1000000):
+    out = [("on", _renderskip(0, min_tris, max_tris, msoc))]
+    for p in (25, 50, 75, 100):
+        out.append(("skip%d" % p, _renderskip(p, min_tris, max_tris, msoc)))
+    return out
+
+
+SWEEP_RENDERSKIP_VARIANTS = _renderskip_variants()
+SWEEP_RENDERSKIP_SMALL_VARIANTS = _renderskip_variants(max_tris=64)
+SWEEP_RENDERSKIP_LARGE_VARIANTS = _renderskip_variants(min_tris=256)
+
+
+# --sweep batching: the static batching prototype (MWSE StaticBatching.cpp)
+# against the occlusion culler, interleaved in one session. "on" is the MSOC
+# baseline the summary compares against; "batch" is batching alone with the
+# culler off; "off" is neither; "both" is informational (batching removes the
+# culler's occluders, plan section 4.8). -openmw widens the batched types to
+# OpenMW's paging set (statics, activators, containers, doors).
+def _batching(msoc, batching, types=1):
+    return {"EnableMSOC": msoc,
+            "mwse:EnableRenderSkipProbe": False,
+            "mwse:EnableStaticBatching": batching,
+            "mwse:StaticBatchingTypes": types}
+
+
+def _batching_variants(types=1):
+    return [("on", _batching(True, False, types)),
+            ("batch", _batching(False, True, types)),
+            ("off", _batching(False, False, types)),
+            ("both", _batching(True, True, types))]
+
+
+SWEEP_BATCHING_VARIANTS = _batching_variants()
+SWEEP_BATCHING_OPENMW_VARIANTS = _batching_variants(types=15)
+
+
+# --sweep batching-bins: batching alone at three bin sizes against the culler
+# and neither. Narsis at bin 2048 built 2305 batches for 4592 members and
+# returned nothing; coarser bins trade batch count against the light cap.
+def _batching_bin(bin_size):
+    d = _batching(False, True, 1)
+    d["mwse:StaticBatchingBinSize"] = bin_size
+    return d
+
+
+SWEEP_BATCHING_BINS_VARIANTS = [
+    ("on", _batching(True, False, 1)),
+    ("bin2048", _batching_bin(2048)),
+    ("bin4096", _batching_bin(4096)),
+    ("bin8192", _batching_bin(8192)),
+    ("off", _batching(False, False, 1)),
+]
+
+
 SYNC = {"EnableMSOC": True, "OcclusionAsyncOccluders": False}
 
 
@@ -154,8 +274,8 @@ SWEEP_SYNC_VARIANTS = [
     # submission is enqueue-and-forget; here the work is on this thread.
     ("no-ccw", _sync(OcclusionOccluderCCWOnly=False)),
     ("no-f2b", _sync(OcclusionOccluderFrontToBack=False)),
-    # Terrain: the resolution low tier actually defaults to, and none.
-    ("corners", _sync(OcclusionTerrainResolution=2)),
+    # Terrain, including the mode low tier actually defaults to.
+    ("horizon", _sync(OcclusionAggregateTerrain=2)),
     ("terrain-off", _sync(OcclusionAggregateTerrain=0)),
     # Occludee-side knobs.
     ("no-box", _sync(OcclusionOccludeeBoxTest=False)),
@@ -165,7 +285,7 @@ SWEEP_SYNC_VARIANTS = [
     ("budgets", _sync(OcclusionRasterizeBudgetUs=1500,
                       OcclusionClassifyBudgetUs=1500)),
     # The whole low-tier profile bar the mask size, which cannot be set here.
-    ("low-tier", _sync(OcclusionTerrainResolution=2,
+    ("low-tier", _sync(OcclusionAggregateTerrain=2,
                        OcclusionSkipTerrainOccludees=True,
                        OcclusionRasterizeBudgetUs=1500,
                        OcclusionClassifyBudgetUs=1500)),
@@ -191,7 +311,7 @@ SWEEP_VARIANTS = [
     # Where does the mask get built, and is it worth building?
     ("sync", {"EnableMSOC": True, "OcclusionAsyncOccluders": False}),
     ("terrain-off", {"EnableMSOC": True, "OcclusionAggregateTerrain": 0}),
-    ("corners", {"EnableMSOC": True, "OcclusionTerrainResolution": 2}),
+    ("horizon", {"EnableMSOC": True, "OcclusionAggregateTerrain": 2}),
     # Occluder submission throughput.
     ("no-f2b", {"EnableMSOC": True, "OcclusionOccluderFrontToBack": False}),
     ("no-ccw", {"EnableMSOC": True, "OcclusionOccluderCCWOnly": False}),
@@ -278,6 +398,10 @@ def child_env(args):
     config across. It is a testing lever, not a user setting.
     """
     env = dict(os.environ)
+    if getattr(args, "instprobe", False):
+        env["MGE_INSTPROBE"] = "1"
+        if getattr(args, "instprobe_window", None):
+            env["MGE_INSTPROBE_WINDOW"] = str(args.instprobe_window)
     if not args.vsync:
         env["DXVK_CONFIG"] = "d3d9.presentInterval = 0"
     if getattr(args, "simd", None):
@@ -444,7 +568,7 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
     absent from the list.
     """
     kill_game()
-    for f in (MWSE_LOG, MSOC_LOG):
+    for f in (MWSE_LOG, MSOC_LOG, MGE_LOG, PROFI_REPORT):
         if os.path.isfile(f):
             os.remove(f)
 
@@ -453,6 +577,8 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
         "save": args.save,
         "warmupSeconds": args.warmup,
         "sampleSeconds": args.sample,
+        "screenshots": bool(getattr(args, "screenshots", False)),
+        "screenshotToggle": bool(getattr(args, "screenshot_toggle", False)),
         "settleSeconds": args.settle,
         "gameHour": args.hour,
         "variants": [{"name": n, "config": c} for n, c in variants],
@@ -462,6 +588,8 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
         "minRefs": args.min_refs,
         "rotateEveryFrames": args.rotate_every,
         "viewSegments": args.views,
+        "profileSeconds": getattr(args, "profile_seconds", None) or args.sample,
+        "bvhRays": getattr(args, "bvh_rays", None) or 400,
     }
     os.makedirs(SPEC_DIR, exist_ok=True)
     with open(SPEC_FILE, "w", encoding="utf-8") as fh:
@@ -533,9 +661,18 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
     # write to <site>.mwse.log and clobber each other, so the group tag goes
     # in the filename.
     safe = (label + tag).replace("/", "_")
-    for src, tag in ((MWSE_LOG, "mwse"), (MSOC_LOG, "msoc")):
+    for src, tag in ((MWSE_LOG, "mwse"), (MSOC_LOG, "msoc"), (MGE_LOG, "mge")):
         if os.path.isfile(src):
             shutil.copy(src, os.path.join(RESULTS, "%s.%s.log" % (safe, tag)))
+    if os.path.isfile(PROFI_REPORT):
+        shutil.copy(PROFI_REPORT, os.path.join(RESULTS, "%s.profi.txt" % safe))
+    # Screenshots the harness Lua saved through mge.saveScreenshot, moved so a
+    # later session cannot overwrite them.
+    shots_dir = os.path.join(GAME_ROOT, "Screenshots")
+    if os.path.isdir(shots_dir):
+        for name in sorted(os.listdir(shots_dir)):
+            if name.startswith("msocperf_"):
+                shutil.move(os.path.join(shots_dir, name), os.path.join(RESULTS, name))
 
     if not result:
         print("  no result (timeout or skip)")
@@ -573,7 +710,7 @@ def plugin_costs(msoc_log, run=None):
         text = text.split(start, 1)[1]
         text = text.split(end, 1)[0]
     keys = ("rasterizeUs", "drainUs", "classifyUs", "displayUs", "asyncFlushUs",
-            "aggTerrainUs")
+            "aggTerrainUs", "horizonBuildUs")
     acc = {k: [] for k in keys}
     cull, rast = [], []
     for line in text.splitlines():
@@ -761,6 +898,223 @@ def do_scan(args):
     return 0
 
 
+def _anatomy_fields(text):
+    """Pull the key=value pairs out of one site's ANATOMY lines.
+
+    The `visible` line repeats several key names from the totals line with the
+    culled shapes removed, so its keys are prefixed rather than merged - without
+    that it silently overwrites the totals and every number in the table
+    describes the visible subset while claiming to describe everything.
+    """
+    out = {}
+    for line in text.splitlines():
+        if "[msocperf] ANATOMY " not in line:
+            continue
+        body = line.split("[msocperf] ANATOMY ", 1)[1].strip()
+        head = body.split(" ", 1)[0]
+        # topmesh/toptex/topgeom are per-entry lists, not key=value lines.
+        if head in ("topmesh", "toptex", "topgeom"):
+            continue
+        prefix = "vis_" if head == "visible" else ""
+        for tok in body.split():
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                out[prefix + k] = v
+    return out
+
+
+def do_anatomy(args):
+    """Census what each site actually asks the engine to draw.
+
+    Not a timing run. The walk counts references, shapes, geometry-data
+    identities and textures in the loaded cell, which is a property of the
+    place rather than of a frame, so one pass per site is the whole
+    measurement and there is nothing to repeat or interleave.
+
+    The number the whole exercise is for is `geomShare`: shapes divided by
+    distinct `niGeometryData.uniqueID`. Above 1 means the engine already hands
+    one buffer pair to several shapes and instancing can key on it as the graph
+    stands. At 1, with `meshShare` well above it, the loader clones geometry per
+    reference and any draw-call collapse has to dedupe against the mesh path
+    and build its own buffers first - a much larger job, and the one worth
+    knowing about before committing to either.
+    """
+    patched = False if args.vsync else disable_vsync()
+    print("  results -> %s" % start_results_dir())
+    deploy_dll(args.dll)
+    deploy_harness()
+
+    sites = load_sites()
+    if args.sites:
+        wanted = {s.strip() for s in args.sites.split(",")}
+        sites = [s for s in sites if s["name"] in wanted]
+    if args.here:
+        sites = [None]
+
+    names = []
+    try:
+        for site in sites:
+            name = site["name"] if site else "here"
+            names.append(name)
+            print("")
+            print("[anatomy] %s" % name)
+            run_site(name, [("anatomy", {})], args, site, mode="anatomy")
+    finally:
+        if not args.keep:
+            remove_harness()
+        if patched:
+            restore_vsync()
+        kill_game()
+
+    rows = []
+    for name in names:
+        log = os.path.join(RESULTS, "%s.mwse.log" % name.replace("/", "_"))
+        if not os.path.isfile(log):
+            continue
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            f = _anatomy_fields(fh.read())
+        if f:
+            rows.append((name, f))
+
+    if not rows:
+        print("")
+        print("no anatomy produced - check the copied MWSE logs in %s" % RESULTS)
+        return 1
+
+    print("")
+    hdr = "%-16s %6s %7s %7s %7s %6s %9s %9s %9s %8s"
+    print(hdr % ("site", "refs", "shapes", "visible", "skinned", "alpha",
+                 "visGeomID", "geomShare", "visShare", "texMerge"))
+    for name, f in rows:
+        print(hdr % (name, f.get("refs", "?"), f.get("shapes", "?"),
+                     f.get("vis_shapes", "?"), f.get("skinned", "?"),
+                     f.get("alpha", "?"), f.get("vis_geomID", "?"),
+                     f.get("geomShare", "?"), f.get("vis_geomShare", "?"),
+                     f.get("vis_texMerge", "?")))
+
+    print("")
+    print("visible    shapes left after appCull - what reaches the renderer")
+    print("geomShare  shapes per distinct NiGeometryData - >1 means buffers are")
+    print("           already shared and instancing can key on the graph as-is")
+    print("visShare   the same ratio over the visible population only")
+    print("meshShare  shapes per distinct source mesh - the ceiling a dedupe")
+    print("           against the mesh path could reach if geomShare is ~1")
+    print("texMerge   shapes per distinct base texture - the state-merge axis")
+    print("")
+    print("Per-site detail (top meshes, textures, triangle histogram) is in the")
+    print("copied MWSE logs under %s" % RESULTS)
+    return 0
+
+
+def do_bvhtest(args):
+    """Prove the physics optimisation returns identical results to vanilla.
+
+    A model-space triangle BVH cannot describe skinned geometry, and the per-bone
+    bound rejection that handles the skinned case is conservative by argument
+    rather than by construction: a vertex blended across two bones can sit outside
+    both bounds. This is the check that settles it on real content, by comparing
+    every hit of every ray against a run with the optimisation disabled.
+    """
+    patched = False if args.vsync else disable_vsync()
+    print("  results -> %s" % start_results_dir())
+    deploy_dll(args.dll)
+    deploy_harness()
+
+    sites = load_sites()
+    if args.sites:
+        wanted = {s.strip() for s in args.sites.split(",")}
+        sites = [s for s in sites if s["name"] in wanted]
+    if args.here:
+        sites = [None]
+
+    verdicts = []
+    try:
+        for site in sites:
+            name = site["name"] if site else "here"
+            print("")
+            print("[bvhtest] %s" % name)
+            run_site(name, [("bvhtest", {})], args, site, mode="bvhtest")
+            log = os.path.join(RESULTS, "%s.mwse.log" % name.replace("/", "_"))
+            verdict = "no result"
+            if os.path.isfile(log):
+                text = open(log, encoding="utf-8", errors="replace").read()
+                for line in text.splitlines():
+                    if "[bvhtest]" in line and ("=== PASS" in line or "=== FAIL" in line):
+                        verdict = line.split("[bvhtest]", 1)[1].strip()
+                    elif "[msocperf] BVHTEST " in line:
+                        verdicts.append((name, line.split("BVHTEST ", 1)[1].strip(), verdict))
+                        break
+                else:
+                    verdicts.append((name, "no verdict", verdict))
+    finally:
+        if not args.keep:
+            remove_harness()
+        if patched:
+            restore_vsync()
+        kill_game()
+
+    print("")
+    for name, result, detail in verdicts:
+        print("%-16s %-6s %s" % (name, result, detail))
+    if not verdicts:
+        print("no bvhtest verdicts - check the copied MWSE logs in %s" % RESULTS)
+        return 1
+    return 0 if all(r == "PASS" for _, r, _ in verdicts) else 1
+
+
+def do_luaprofile(args):
+    """Profile the Lua VM at each site and keep the ProFi reports.
+
+    VTune attributes main-thread time to lua51.dll but cannot say which script:
+    its samples land in the interpreter loop, not in mod code. ProFi hooks the VM
+    and reports per function, file and line, which is the only way to turn a
+    "Lua is 28% of the frame" number into something actionable.
+
+    The hook costs a great deal of speed, so nothing here is a timing result.
+    Compare the RELATIVE column between entries, never the frame times.
+    """
+    patched = False if args.vsync else disable_vsync()
+    print("  results -> %s" % start_results_dir())
+    deploy_dll(args.dll)
+    deploy_harness()
+
+    sites = load_sites()
+    if args.sites:
+        wanted = {s.strip() for s in args.sites.split(",")}
+        sites = [s for s in sites if s["name"] in wanted]
+    if args.here:
+        sites = [None]
+
+    names = []
+    try:
+        for site in sites:
+            name = site["name"] if site else "here"
+            names.append(name)
+            print("")
+            print("[luaprofile] %s" % name)
+            run_site(name, [("luaprofile", {})], args, site, mode="luaprofile")
+    finally:
+        if not args.keep:
+            remove_harness()
+        if patched:
+            restore_vsync()
+        kill_game()
+
+    found = False
+    for name in names:
+        path = os.path.join(RESULTS, "%s.profi.txt" % name.replace("/", "_"))
+        if os.path.isfile(path):
+            found = True
+            print("")
+            print("[%s] %s" % (name, path))
+    if not found:
+        print("")
+        print("no ProFi report produced - is the 'MWSE Profiler 2' mod enabled?")
+        return 1
+    print("")
+    print("Summarise with: python scripts/perf-harness/analyze_profi.py")
+    return 0
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -774,6 +1128,27 @@ def main():
     ap.add_argument("--sites", help="comma-separated site names to run")
     ap.add_argument("--here", action="store_true",
                     help="skip site travel; measure wherever the save already is")
+    ap.add_argument("--bvhtest", action="store_true",
+                    help="run the BVH correctness A/B at each site: identical ray "
+                         "results with the optimisation on vs off, compared bit for "
+                         "bit. Needs a build with UsePhysicsOptimizations")
+    ap.add_argument("--bvh-rays", type=int, default=None,
+                    help="bvhtest: rays per pass (default 400)")
+    ap.add_argument("--luaprofile", action="store_true",
+                    help="attribute main-thread Lua time to individual mods with "
+                         "ProFi (needs the MWSE Profiler 2 mod). The VM hook makes "
+                         "everything slower: read RELATIVE shares, not frame times")
+    ap.add_argument("--profile-seconds", type=int, default=None,
+                    help="luaprofile: profiling window in seconds (default --sample)")
+    ap.add_argument("--instprobe", action="store_true",
+                    help="enable MGE's instancing-feasibility probe; needs a "
+                         "d3d8.dll built with it. Perturbs frame time - the run "
+                         "measures draw structure, not speed")
+    ap.add_argument("--instprobe-window", type=int, default=None,
+                    help="frames per probe report window (default 120)")
+    ap.add_argument("--anatomy", action="store_true",
+                    help="census the active-cell draw population at each site "
+                         "(shapes, geometry sharing, textures); no timing")
     ap.add_argument("--scan", action="store_true",
                     help="enumerate exterior cells by reference count and write sites.json")
     ap.add_argument("--min-refs", type=int, default=250,
@@ -799,15 +1174,21 @@ def main():
                     help="cap the rasterizer's instruction set. sse41 is what "
                          "the low hardware tier actually exists for")
     ap.add_argument("--sweep", nargs="?", const="async", default=None,
-                    choices=["async", "sync", "mask"],
+                    choices=["async", "sync", "mask", "exprcache", "physics", "accurateskinned",
+                             "asyncwait", "renderskip", "renderskip-small", "renderskip-large", "batching", "batching-openmw", "batching-bins"],
                     help="sweep one knob at a time instead of just on/off. "
                          "'sync' pins the rasterizer to the main thread for "
-                         "every variant, as the low-tier preset runs it")
+                         "every variant, as the low-tier preset runs it. "
+                         "'exprcache' A/Bs MWSE's mwscript expression memoization")
     ap.add_argument("--settle", type=int, default=3,
                     help="seconds after applying a variant before warmup (default 3)")
     ap.add_argument("--relaunch", action="store_true",
                     help="one game process per measurement instead of one per site "
                          "(much slower; use to check the in-session toggle)")
+    ap.add_argument("--screenshot-toggle", action="store_true",
+                    help="with --screenshots: per bearing, one frame with EnableStaticBatching off and one with it on, without moving")
+    ap.add_argument("--screenshots", action="store_true",
+                    help="save MGE screenshots at fixed bearings after each pass warmup, copied into the results dir")
     ap.add_argument("--vsync", action="store_true",
                     help="leave vsync as configured (default disables it)")
     args = ap.parse_args()
@@ -819,6 +1200,26 @@ def main():
         variants = SWEEP_SYNC_VARIANTS
     elif args.sweep == "mask":
         variants = SWEEP_MASK_VARIANTS
+    elif args.sweep == "exprcache":
+        variants = SWEEP_EXPRCACHE_VARIANTS
+    elif args.sweep == "physics":
+        variants = SWEEP_PHYSICS_VARIANTS
+    elif args.sweep == "accurateskinned":
+        variants = SWEEP_ACCURATESKINNED_VARIANTS
+    elif args.sweep == "asyncwait":
+        variants = SWEEP_ASYNCWAIT_VARIANTS
+    elif args.sweep == "renderskip":
+        variants = SWEEP_RENDERSKIP_VARIANTS
+    elif args.sweep == "renderskip-small":
+        variants = SWEEP_RENDERSKIP_SMALL_VARIANTS
+    elif args.sweep == "renderskip-large":
+        variants = SWEEP_RENDERSKIP_LARGE_VARIANTS
+    elif args.sweep == "batching":
+        variants = SWEEP_BATCHING_VARIANTS
+    elif args.sweep == "batching-openmw":
+        variants = SWEEP_BATCHING_OPENMW_VARIANTS
+    elif args.sweep == "batching-bins":
+        variants = SWEEP_BATCHING_BINS_VARIANTS
     if args.only:
         wanted = {s.strip() for s in args.only.split(",")}
         variants = [v for v in variants if v[0] in wanted]
@@ -828,6 +1229,15 @@ def main():
 
     if args.scan:
         return do_scan(args)
+
+    if args.anatomy:
+        return do_anatomy(args)
+
+    if args.luaprofile:
+        return do_luaprofile(args)
+
+    if args.bvhtest:
+        return do_bvhtest(args)
 
     sites = load_sites()
     if args.sites:
