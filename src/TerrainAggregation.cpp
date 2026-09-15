@@ -510,9 +510,9 @@ static void refreshLandCache(NI::Camera* camera) {
     }
 }
 
-// Aggregate terrain rasteriser. Walks WorldLandscape (root -> Land ->
-// 16 subcells -> N NiTriShapes) and submits one combined occluder per
-// visible Land. Individual 25v/32t patches fail the thin-axis gate;
+// Aggregate terrain. Walks WorldLandscape (root -> Land -> 16 subcells ->
+// N NiTriShapes) and queues one occluder per visible subcell of each
+// visible Land; the pass submits the queue near-to-far with the meshes. Individual 25v/32t patches fail the thin-axis gate;
 // merging gives the hill silhouette that actually occludes
 // distant architecture.
 //
@@ -556,62 +556,37 @@ void rasterizeAggregate(NI::Camera* camera) {
         // Per-subcell frustum cull. ~5-8 of a Land's 16 subcells are
         // typically in-frustum; skipping the rest trades one big
         // submission for N small ones with fewer total triangles -
-        // net win on per-tile cost and async queue pressure.
+        // net win on per-tile cost and async queue pressure. Each visible
+        // subcell is queued with the squared eye distance of its bound
+        // centre; the pass submits the queue near-to-far with the meshes.
         //
         // Empty subcellRanges fallback (stale cache from before the
-        // field landed) submits the whole entry as one range.
+        // field landed) queues the whole entry as one range.
+        const auto& eye = camera->worldTransform.translation;
+        const auto dist2To = [&](const NI::AVObject* obj) {
+            const auto& o = obj->worldBoundOrigin;
+            const float dx = o.x - eye.x, dy = o.y - eye.y, dz = o.z - eye.z;
+            return dx * dx + dy * dy + dz * dz;
+        };
         unsigned int submittedTris = 0;
         if (!entry.subcellRanges.empty()) {
             for (const auto& range : entry.subcellRanges) {
                 if (range.triCount == 0) continue;
                 if (range.node && frustumCulledSphere(range.node, camera)) continue;
-
-                if (g_asyncThisFrame) {
-                    ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
-                    g_threadpool->RenderTriangles(
-                        entry.verts.data(),
-                        entry.indices.data() + range.firstIdx,
-                        static_cast<int>(range.triCount),
-                        g_frame.occluderWinding,
-                        ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
-                    ++g_stats.asyncJobsQueued;
-                } else {
-                    ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
-                    g_msoc->RenderTriangles(
-                        entry.verts.data(),
-                        entry.indices.data() + range.firstIdx,
-                        static_cast<int>(range.triCount),
-                        g_worldToClip,
-                        g_frame.occluderWinding,
-                        ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
-                        ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
-                }
+                enqueueOccluder(entry.verts.data(), entry.indices.data() + range.firstIdx, range.triCount,
+                                dist2To(range.node ? static_cast<NI::AVObject*>(range.node) : land), true);
                 submittedTris += range.triCount;
             }
         } else {
             // Fallback path - single submission for the whole Land.
-            if (g_asyncThisFrame) {
-                ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
-                g_threadpool->RenderTriangles(entry.verts.data(), entry.indices.data(),
-                                              static_cast<int>(entry.triCount),
-                                              g_frame.occluderWinding,
-                                              ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
-                ++g_stats.asyncJobsQueued;
-            } else {
-                ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
-                g_msoc->RenderTriangles(entry.verts.data(), entry.indices.data(),
-                                        static_cast<int>(entry.triCount), g_worldToClip,
-                                        g_frame.occluderWinding,
-                                        ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
-                                        ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
-            }
+            enqueueOccluder(entry.verts.data(), entry.indices.data(), entry.triCount, dist2To(land), true);
             submittedTris = entry.triCount;
         }
 
+        // Triangles and maskHasOccluders are counted at submit time, in the
+        // queue flush, so the stats match what actually rasterised.
         if (submittedTris > 0) {
             ++g_stats.aggregateTerrainLands;
-            g_stats.aggregateTerrainTris += submittedTris;
-            g_stats.maskHasOccluders = true;
         }
     }
 }

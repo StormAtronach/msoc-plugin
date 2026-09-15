@@ -323,8 +323,14 @@ static std::vector<PendingDisplay> g_pendingDisplays;
 // otherwise merge. See the superseded parallel line in CHANGELOG for what that cost once.
 namespace {
 struct PendingOccluder {
-    const OccluderCacheEntry* cache;
-    float dist2;  // squared eye->worldBoundOrigin distance, sort key
+    // Packed float[3] world-space vertices and an index list, the same
+    // layout for meshes (OccluderCacheEntry) and terrain (LandCacheEntry
+    // subcell ranges), so one submit loop serves both.
+    const float* verts;
+    const unsigned int* indices;
+    unsigned int triCount;
+    float dist2;    // squared distance from the eye to the bound centre
+    bool terrain;   // routes the stats; the raster call is identical
 };
 }  // namespace
 static std::vector<PendingOccluder> g_pendingOccluders;
@@ -590,7 +596,9 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
     if (g_frame.occluderFrontToBack) {
         const auto& o = shape->worldBoundOrigin;
         const float dx = o.x - eye.x, dy = o.y - eye.y, dz = o.z - eye.z;
-        g_pendingOccluders.push_back({&cache, dx * dx + dy * dy + dz * dz});
+        g_pendingOccluders.push_back({cache.worldVerts.data(), cache.indices.data(),
+                                      static_cast<unsigned int>(cache.outTriCount),
+                                      dx * dx + dy * dy + dz * dz, false});
         return true;
     }
 
@@ -621,11 +629,30 @@ static bool rasterizeTriShape(NI::TriBasedGeometry* shape, const NI::Point3& eye
     return true;
 }
 
-// Drain the deferred front-to-back occluder queue: sort near-to-far and submit.
-// Called by the detour after cullShowBody, before the threadpool Flush. Mirrors
+// Terrain subcells enter the same queue as the meshes (TerrainAggregation
+// calls this once per visible subcell) so that near-to-far ordering holds
+// across both. Order matters even with MOC's accurate tile update: when the
+// far terrain went in first, a subtile on the terrain's horizon held the
+// terrain in one layer with the other layer still clear, and a building
+// triangle covering that subtile only partly was merged into the terrain's
+// layer - the nearer of the two in depth - at the terrain's depth. Every
+// building pixel in that subtile then read as far terrain: a dark band
+// along the horizon right through the building. With the building first
+// the terrain fails the per-pixel depth test there and changes nothing.
+void enqueueOccluder(const float* verts, const unsigned int* indices, unsigned int triCount,
+                     float dist2, bool terrain) {
+    g_pendingOccluders.push_back({verts, indices, triCount, dist2, terrain});
+}
+
+// Drain the deferred occluder queue: sort near-to-far and submit. Called by
+// the detour after cullShowBody, before the threadpool Flush. Meshes are
+// queued here only under OcclusionOccluderFrontToBack (otherwise they went
+// straight to the rasteriser during traversal); terrain always is, which
+// with front-to-back off means terrain after the meshes. Mirrors
 // rasterizeTriShape's submit (winding, layout, async vs direct) exactly; the
-// budget spike-clip still applies so a dense frame bails the tail. Occluders
-// are counted here (not at record time) so the counter matches what rasterised.
+// budget spike-clip still applies so a dense frame bails the tail, farthest
+// first. Counted here (not at record time) so the counters match what
+// rasterised.
 static void submitPendingOccluders() {
     if (g_pendingOccluders.empty()) return;
     std::sort(g_pendingOccluders.begin(), g_pendingOccluders.end(),
@@ -636,24 +663,25 @@ static void submitPendingOccluders() {
             g_budget.rasterizeBudgetTrips = 1;
             break;
         }
-        const OccluderCacheEntry& c = *po.cache;
         if (g_asyncThisFrame) {
             ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
-            g_threadpool->RenderTriangles(c.worldVerts.data(), c.indices.data(),
-                                          static_cast<int>(c.outTriCount),
+            g_threadpool->RenderTriangles(po.verts, po.indices, static_cast<int>(po.triCount),
                                           g_frame.occluderWinding,
                                           ::MaskedOcclusionCulling::CLIP_PLANE_ALL);
             ++g_stats.asyncJobsQueued;
         } else {
             ScopedUsAccumulator t(g_stats.rasterizeTimeUs);
-            g_msoc->RenderTriangles(c.worldVerts.data(), c.indices.data(),
-                                    static_cast<int>(c.outTriCount), g_worldToClip,
+            g_msoc->RenderTriangles(po.verts, po.indices, static_cast<int>(po.triCount), g_worldToClip,
                                     g_frame.occluderWinding,
                                     ::MaskedOcclusionCulling::CLIP_PLANE_ALL,
                                     ::MaskedOcclusionCulling::VertexLayout(12, 4, 8));
         }
-        g_stats.occluderTriangles += c.outTriCount;
-        ++g_stats.rasterizedAsOccluder;
+        if (po.terrain) {
+            g_stats.aggregateTerrainTris += po.triCount;
+        } else {
+            g_stats.occluderTriangles += po.triCount;
+            ++g_stats.rasterizedAsOccluder;
+        }
         g_stats.maskHasOccluders = true;
     }
     g_pendingOccluders.clear();
@@ -1310,12 +1338,13 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         }
         g_msocActive = true;
 
-        // Aggregate terrain. Submit merged per-Land occluders so
-        // hill silhouettes are in the buffer before non-terrain
-        // leaves reach the drain. Individual 25v/32t patches fail
-        // the thin-axis gate; merging reclaims terrain as a useful
-        // occluder. Reads the latched g_frame.aggregateTerrain
-        // so the mode can't change mid-frame.
+        // Aggregate terrain. Refresh the per-Land cache and queue the
+        // visible subcells as occluders; they are submitted with the
+        // meshes, near to far, after traversal (submitPendingOccluders),
+        // so hill silhouettes are in the buffer before the drain.
+        // Individual 25v/32t patches fail the thin-axis gate; merging
+        // reclaims terrain as a useful occluder. Reads the latched
+        // g_frame.aggregateTerrain so the mode can't change mid-frame.
         if (g_frame.aggregateTerrain == 1) {
             g_lastStage = 8;
             terrain::rasterizeAggregate(camera);
@@ -1326,9 +1355,9 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
     cullShowBody(self, edx, camera);
 
     if (isTopLevel) {
-        // Front-to-back: submit the occluders deferred during traversal, sorted
-        // near-to-far, before the Flush. No-op unless OcclusionOccluderFrontToBack
-        // is on (the queue stays empty otherwise).
+        // Submit the queued occluders (terrain subcells always; meshes too
+        // under OcclusionOccluderFrontToBack), sorted near-to-far, before
+        // the Flush.
         submitPendingOccluders();
 
         // Aggregate-terrain also goes through the threadpool, so

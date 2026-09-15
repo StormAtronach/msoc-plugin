@@ -89,8 +89,14 @@ namespace live {
 
 }  // namespace live
 
-// TerrainAggregation.cpp, called by the detour. Merges each near Land into
-// one occluder submission.
+// OcclusionPass.cpp. Queue a packed-float[3] triangle list for the near-to-far
+// submit after traversal; dist2 is the squared eye distance of its bound
+// centre. `terrain` only routes the stats.
+void enqueueOccluder(const float* verts, const unsigned int* indices, unsigned int triCount,
+                     float dist2, bool terrain);
+
+// TerrainAggregation.cpp, called by the detour. Refreshes the per-Land cache
+// and queues each visible subcell as an occluder.
 namespace terrain {
 
 void rasterizeAggregate(NI::Camera* camera);

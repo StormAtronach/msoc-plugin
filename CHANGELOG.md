@@ -142,6 +142,22 @@ the raster at Corners resolution. Nexus lists the previous release as 1.5.
   Main-thread raster time rose about 10% with everything on the main thread
   (358 to 398 us); nothing measurable with async on. CMake option
   `MSOC_MOC_ACCURATE_MASK`, default on.
+- **Fixed: the terrain's horizon line cut a dark band through nearer
+  buildings.** Terrain was rasterised before every mesh. With MOC's accurate
+  update that is still the wrong order: a subtile on the terrain's horizon
+  then holds the far terrain in one layer with the other layer empty, and a
+  building triangle that covers the subtile only partly (any internal edge
+  of the building's tessellation) is merged into the layer nearest to it in
+  depth, the terrain's, at the terrain's depth. Every building pixel in that
+  subtile read as far terrain, a band following the horizon through the
+  wall. Terrain subcells now join the same near-to-far queue as the meshes
+  (with front-to-back off they follow the meshes), so the building goes in
+  first and the terrain fails the per-pixel depth test behind it. At Gnisis
+  the band is gone and occlusion with terrain on rose from 444 to 516 of
+  ~850 occludees (meshes alone: ~470; terrain had been making culling
+  *worse*). `aggTerrainUs` now covers the cache refresh and queueing only;
+  the terrain's rasteriser time lands in `rasterizeUs` with the meshes, and
+  `aggTerrainTris` counts what was actually submitted.
 - **Fixed: the downsampled terrain (Half / Corners) had cracks along every
   patch boundary, and could sit above the real ground.** The coarse builder
   folded dropped vertices into kept ones with a one-sided window, so the two
