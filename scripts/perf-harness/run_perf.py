@@ -83,9 +83,13 @@ DEPLOY_HARNESS = os.path.join(DEPLOY_MOD, "MWSE", "mods", "msocperf")
 MGE_TOML = os.path.join(MO2_ROOT, "mods", "Configuration", "Root", "mgeXE.toml")
 MGE_TOML_BACKUP = MGE_TOML + ".perfbak"
 
-GAME_ROOT = r"D:\GOG\Morrowind\Morrowind"
-MWSE_LOG = os.path.join(GAME_ROOT, "MWSE.log")
-MSOC_LOG = os.path.join(GAME_ROOT, "MSOC.log")
+# The game writes its logs into its own directory, which MO2 virtualises and
+# flushes to overwrite/Root only after the process exits. So these are read
+# after each session, never polled; live progress comes from the progress
+# file the in-game mod writes to an absolute path (see run_site).
+LOG_ROOT = os.path.join(MO2_ROOT, "overwrite", "Root")
+MWSE_LOG = os.path.join(LOG_ROOT, "MWSE.log")
+MSOC_LOG = os.path.join(LOG_ROOT, "MSOC.log")
 
 # The spec is delivered as an MWSE config file inside the deployed mod, so the
 # game reads it through MO2's virtual file system at
@@ -135,6 +139,64 @@ SWEEP_MASK_VARIANTS = [
 ]
 
 SYNC = {"EnableMSOC": True, "OcclusionAsyncOccluders": False}
+
+# --tier: the hardware-tier presets from config.lua's applyTierDefaults, written
+# into msoc.json for the session. Needed because mwse.loadConfig prefers the
+# saved JSON over the tier probe, so pinning the game to four E-cores alone
+# leaves the saved high-tier values in force.
+TIER_PRESETS = {
+    "low": {
+        "OcclusionAsyncOccluders": False,
+        "OcclusionThreadpoolBinsW": 2,
+        "OcclusionThreadpoolBinsH": 1,
+        "OcclusionMaskWidth": 256,
+        "OcclusionMaskHeight": 128,
+        "OcclusionRasterizeBudgetUs": 1500,
+        "OcclusionClassifyBudgetUs": 1500,
+        "OcclusionAggregateTerrain": 1,
+        "OcclusionTerrainResolution": 2,
+        "OcclusionSkipTerrainOccludees": True,
+    },
+    "mid": {
+        "OcclusionAsyncOccluders": True,
+        "OcclusionThreadpoolBinsW": 2,
+        "OcclusionThreadpoolBinsH": 2,
+        "OcclusionMaskWidth": 384,
+        "OcclusionMaskHeight": 192,
+        "OcclusionRasterizeBudgetUs": 3000,
+        "OcclusionClassifyBudgetUs": 3000,
+        "OcclusionAggregateTerrain": 1,
+        "OcclusionTerrainResolution": 1,
+        "OcclusionSkipTerrainOccludees": False,
+    },
+    "high": {
+        "OcclusionAsyncOccluders": True,
+        "OcclusionThreadpoolBinsW": 4,
+        "OcclusionThreadpoolBinsH": 2,
+        "OcclusionMaskWidth": 512,
+        "OcclusionMaskHeight": 256,
+        "OcclusionRasterizeBudgetUs": 0,
+        "OcclusionClassifyBudgetUs": 0,
+        "OcclusionAggregateTerrain": 1,
+        "OcclusionTerrainResolution": 1,
+        "OcclusionSkipTerrainOccludees": False,
+    },
+}
+
+# Session-wide overrides written into msoc.json with the tier preset: the
+# mask overlay costs a readback per frame on every culler-on variant and
+# nothing on "off", and the cost columns need the aggregate stats line.
+HARNESS_OVERRIDES = {"DebugMaskOverlay": False, "OcclusionLogAggregate": True}
+
+# --sweep terrain: is terrain worth processing at all? "on" is whatever the
+# session's preset holds; "no-terrain" removes terrain from the mask and from
+# the occludee queue.
+SWEEP_TERRAIN_VARIANTS = [
+    ("off", {"EnableMSOC": False}),
+    ("on", {"EnableMSOC": True}),
+    ("no-terrain", {"EnableMSOC": True, "OcclusionAggregateTerrain": 0,
+                    "OcclusionSkipTerrainOccludees": True}),
+]
 
 
 def _sync(**kw):
@@ -293,18 +355,22 @@ def _running(exe):
     return exe.lower() in out.lower()
 
 
-def kill_game():
-    """Kill the game and MO2, and wait until they are really gone.
+def kill_game(game_only=False):
+    """Kill the game (and, unless game_only, MO2), and wait until gone.
 
     Launching while a previous MO2 is still shutting down silently does
-    nothing, which showed up as a variant that produced no log at all.
+    nothing, which showed up as a variant that produced no log at all. But
+    MO2 is also what flushes the game's virtual logs to overwrite/Root once
+    the game process is gone, so a session kills the game first, collects
+    the logs, and only then closes MO2.
     """
-    for exe in ("Morrowind.exe", "ModOrganizer.exe"):
+    exes = ("Morrowind.exe",) if game_only else ("Morrowind.exe", "ModOrganizer.exe")
+    for exe in exes:
         subprocess.run(["taskkill", "/F", "/IM", exe],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(20):
         time.sleep(1)
-        if not (_running("Morrowind.exe") or _running("ModOrganizer.exe")):
+        if not any(_running(exe) for exe in exes):
             break
     time.sleep(2)
 
@@ -448,7 +514,14 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
         if os.path.isfile(f):
             os.remove(f)
 
+    os.makedirs(RESULTS, exist_ok=True)
+    safe = (label + tag).replace("/", "_")
+    progress_file = os.path.join(RESULTS, "%s.progress.log" % safe)
+    if os.path.isfile(progress_file):
+        os.remove(progress_file)
+
     spec = {
+        "progressFile": progress_file.replace("\\", "/"),
         "run": label,
         "save": args.save,
         "warmupSeconds": args.warmup,
@@ -485,10 +558,10 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
     result, progress = None, None
     while time.time() < deadline:
         time.sleep(3)
-        if not os.path.isfile(MWSE_LOG):
+        if not os.path.isfile(progress_file):
             continue
         try:
-            text = open(MWSE_LOG, encoding="utf-8", errors="replace").read()
+            text = open(progress_file, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
 
@@ -526,16 +599,24 @@ def run_site(label, variants, args, site=None, mode="measure", repeats=1, tag=""
             result = [m.groupdict() for m in RESULT_RE.finditer(text)]
             break
 
-    kill_game()
+    kill_game(game_only=True)
 
-    os.makedirs(RESULTS, exist_ok=True)
+    # MO2 flushes the virtual logs to overwrite/Root once the process is gone,
+    # which can take several seconds. Wait for logs newer than this session's
+    # launch rather than copying a stale pair from the previous one.
+    for _ in range(40):
+        if all(os.path.isfile(f) and os.path.getmtime(f) > started for f in (MWSE_LOG, MSOC_LOG)):
+            break
+        time.sleep(1)
     # Sessions at one site that differ only in restart-only keys would all
     # write to <site>.mwse.log and clobber each other, so the group tag goes
     # in the filename.
-    safe = (label + tag).replace("/", "_")
-    for src, tag in ((MWSE_LOG, "mwse"), (MSOC_LOG, "msoc")):
-        if os.path.isfile(src):
-            shutil.copy(src, os.path.join(RESULTS, "%s.%s.log" % (safe, tag)))
+    for src, kind in ((MWSE_LOG, "mwse"), (MSOC_LOG, "msoc")):
+        if os.path.isfile(src) and os.path.getmtime(src) > started:
+            shutil.copy(src, os.path.join(RESULTS, "%s.%s.log" % (safe, kind)))
+        else:
+            print("  warning: no fresh %s at %s" % (kind, src))
+    kill_game()
 
     if not result:
         print("  no result (timeout or skip)")
@@ -798,8 +879,12 @@ def main():
     ap.add_argument("--simd", choices=["sse2", "sse41", "avx2"],
                     help="cap the rasterizer's instruction set. sse41 is what "
                          "the low hardware tier actually exists for")
+    ap.add_argument("--tier", choices=sorted(TIER_PRESETS),
+                    help="write this hardware tier's preset into msoc.json for "
+                         "the run (restored afterwards); combine with --affinity "
+                         "and --simd to simulate that hardware")
     ap.add_argument("--sweep", nargs="?", const="async", default=None,
-                    choices=["async", "sync", "mask"],
+                    choices=["async", "sync", "mask", "terrain"],
                     help="sweep one knob at a time instead of just on/off. "
                          "'sync' pins the rasterizer to the main thread for "
                          "every variant, as the low-tier preset runs it")
@@ -819,6 +904,8 @@ def main():
         variants = SWEEP_SYNC_VARIANTS
     elif args.sweep == "mask":
         variants = SWEEP_MASK_VARIANTS
+    elif args.sweep == "terrain":
+        variants = SWEEP_TERRAIN_VARIANTS
     if args.only:
         wanted = {s.strip() for s in args.only.split(",")}
         variants = [v for v in variants if v[0] in wanted]
@@ -868,7 +955,15 @@ def main():
                             label += "#%d" % (rep + 1)
                         print("")
                         print("[%s] %s" % (label, json.dumps(config)))
-                        for r in run_site(label, [(name, config)], args, site, repeats=1):
+                        overrides = dict(HARNESS_OVERRIDES)
+                        overrides.update(TIER_PRESETS.get(args.tier, {}))
+                        patched_json = patch_msoc_json(overrides)
+                        try:
+                            rs = run_site(label, [(name, config)], args, site, repeats=1)
+                        finally:
+                            if patched_json:
+                                restore_msoc_json()
+                        for r in rs or []:
                             by_variant.setdefault(name, []).append(r)
             else:
                 # One session per group of variants that share their
@@ -893,7 +988,10 @@ def main():
                               % (site_name, len(group), per_session,
                                  (" cycle %d/%d" % (cycle + 1, cycles)) if cycles > 1 else "",
                                  (" " + json.dumps(dict(sig))) if sig else ""))
-                        patched_json = patch_msoc_json(dict(sig))
+                        overrides = dict(HARNESS_OVERRIDES)
+                        overrides.update(TIER_PRESETS.get(args.tier, {}))
+                        overrides.update(dict(sig))
+                        patched_json = patch_msoc_json(overrides)
                         tag = "-c%d" % (cycle + 1) if cycles > 1 else ""
                         if sig:
                             tag += "-" + "-".join(str(v) for _k, v in sig)

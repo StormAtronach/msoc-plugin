@@ -40,8 +40,20 @@ end
 -- "bad argument #1 to 'format'". Passing the text as an argument to "%s" keeps
 -- it out of that second format pass, which fixes the whole class rather than
 -- requiring every call site to avoid percent signs.
+-- Every line also goes to spec.progressFile, an absolute path outside MO2's
+-- virtual file system: MO2 keeps MWSE.log virtual until the game exits, so
+-- the driver cannot watch it for progress. The file is the only live signal.
+local progressFile = spec and spec.progressFile or nil
 local function say(fmt, ...)
-    mwse.log("%s", "[msocperf] " .. string.format(fmt, ...))
+    local line = "[msocperf] " .. string.format(fmt, ...)
+    mwse.log("%s", line)
+    if progressFile then
+        local f = io.open(progressFile, "ab")
+        if f then
+            f:write(line, "\n")
+            f:close()
+        end
+    end
 end
 
 mwse.log("[msocperf] harness loaded; spec=%s", spec and "present" or "absent")
