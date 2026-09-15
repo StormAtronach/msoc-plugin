@@ -75,7 +75,7 @@ end
 --- "Hardware tier: High (AVX2, 20 threads)", from the plugin's own probe.
 local function hardwareLine()
     if not msoc or not msoc.hardwareTier then
-        return i18n("sidebar.hardware.unknown")
+        return i18n("sidebar.hardwareUnknown")
     end
     local tier = tostring(msoc.hardwareTier)
     tier = tier:sub(1, 1):upper() .. tier:sub(2)

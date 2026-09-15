@@ -6,7 +6,7 @@ return {
 
     ["sidebar.title"] = "MSOC %{version}",
     ["sidebar.hardware"] = "Hardware tier: %{tier} (%{simd}, %{threads} threads)",
-    ["sidebar.hardware.unknown"] = "Hardware tier: unknown (msoc.dll not loaded)",
+    ["sidebar.hardwareUnknown"] = "Hardware tier: unknown (msoc.dll not loaded)",
     ["sidebar.body"] = "Software occlusion culling. Every frame, large opaque meshes are "
         .. "drawn into a small depth mask and everything else is tested against it; "
         .. "what is fully hidden is never sent to the GPU.\n\n"
