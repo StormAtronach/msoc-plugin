@@ -60,6 +60,14 @@ return {
         .. "rasterisation + queries stop the next frame. The CullShow detour "
         .. "remains installed either way.",
 
+    ["ToggleHotkey.label"] = "Toggle hotkey",
+    ["ToggleHotkey.description"] = "Optional key that flips the master switch above during "
+        .. "play, for before-and-after comparisons without opening this menu. Unbound by "
+        .. "default. Modifier combinations are allowed. The key is ignored while a menu or "
+        .. "the console is open, and the change is saved like an edit made here.",
+    ["hotkey.enabled"] = "MSOC occlusion culling: on",
+    ["hotkey.disabled"] = "MSOC occlusion culling: off",
+
     ["OcclusionEnableInterior.label"] = "Enable in interiors",
     ["OcclusionEnableInterior.description"] = "Interior scenes with lots of walls and doors "
         .. "(Vivec cantons, tombs, Dwemer ruins) are the highest-benefit case for "

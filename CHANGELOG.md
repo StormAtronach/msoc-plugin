@@ -207,6 +207,11 @@ the raster at Corners resolution. Nexus lists the previous release as 1.5.
   missing for up to four frames after the camera clears its occluder. The
   saved value is re-applied on this update; set it back in the MCM if the
   tests are worth more to you than the pop-in.
+- **Added a toggle hotkey.** An optional key on the MCM General page flips
+  the master switch during play, for before-and-after comparisons without
+  opening the menu. Unbound by default; modifier combinations are allowed;
+  ignored while a menu or the console is open. The toggle is saved like an
+  MCM edit and confirmed with a message box.
 - **The MCM is reorganised.** Five pages, General / Occluders / Occludees /
   Performance / Debug, with settings grouped under headed categories; the
   sidebar shows the plugin version, the detected hardware tier and links to

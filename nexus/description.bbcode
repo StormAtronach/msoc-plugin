@@ -1,0 +1,142 @@
+[size=4][b]MSOC plugin[/b][/size]
+
+CPU-side occlusion culling for Morrowind. Each frame the plugin software-rasterizes a coarse depth mask from opaque near-scene geometry, then tests every small mesh leaf (NiTriShape and NiTriStrips) against it before the engine draws it. Leaves that fall fully behind the mask are skipped. The GPU gets fewer draw calls and fewer vertex-shader invocations on geometry the player would never have seen.
+
+The plugin runs standalone. It needs nothing beyond MWSE, and nothing else has to know it is there.
+
+[size=4][b]Where it helps, and where it does not[/b][/size]
+
+The plugin's own cost is close to constant. What it returns depends entirely on how much of the view is hidden behind something else, so the same build is a large win in one place and a small loss in another. Measured across four exterior sites, culler off against culler on:
+
+[code]
+site                     cull rate   result
+Old Ebonheart            90%         -22%  (108 to 139 fps)
+Narsis                   77%         -14%  ( 74 to  87 fps)
+Balmora                  51%          -4%  (210 to 218 fps)
+Vivec, Foreign Quarter   11%          +1%  (232 to 230 fps)
+[/code]
+
+It wins in dense architecture and roughly breaks even on open ground, and the places where it breaks even are already running at 200 fps. On a simulated four-core machine the two dense cities gain more than on a fast CPU, because the drawing it avoids costs more there.
+
+The one case that is still a real regression is a sparse exterior on a weak CPU. Vivec on four cores measures a 16% loss on a frame that was already at 151 fps. If you spend your time in open terrain on older hardware and can see the difference, turn the master switch off. The plugin has no way to work that out for itself.
+
+[size=4][b]Hardware notes[/b][/size]
+
+Most of the runtime cost lives in two places: software rasterization of near-scene occluders into the mask, and the per-leaf queries against it. Both parallelize well on multi-core CPUs via Intel's Masked Software Occlusion Culling threadpool.
+
+[list]
+[*][b]Modern multi-core CPUs (4+ cores, AVX2).[/b] The threadpool amortizes the mask-build cost across workers and the main-thread query path stays cheap. This is where the plugin earns its keep.
+[*][b]Older or dual-core CPUs (Sandy / Ivy Bridge era, SSE4.1 only).[/b] The threadpool's wake / flush / suspend overhead per frame outweighs the parallelism win. The plugin detects this on first launch and selects the low-tier preset, which runs rasterization on the main thread at a lower mask and terrain resolution. Results on this hardware vary with scene density; see the site table above.
+[/list]
+
+You do not need to think about any of this. The plugin detects the tier and applies it, and the MCM lets you override it.
+
+[size=4][b]Requirements[/b][/size]
+
+[list]
+[*][b]Morrowind[/b] (vanilla Morrowind.exe). OpenMW is not supported; the plugin links against MWSE, which only targets the original engine.
+[*][b]MWSE[/b] (recent build). The plugin loads via the MWSE Lua loader.
+[*][b]Windows 8 or newer.[/b] Worker threads park on WaitOnAddress.
+[*][b]CPU with SSE4.1.[/b] The rasterizer uses AVX2 where available and SSE4.1 otherwise. A fallback below SSE4.1 exists but is not recommended.
+[*]No Visual C++ redistributable is needed; the runtime is linked in.
+[/list]
+
+MGE-XE is neither required nor involved. Any version, or none, is fine.
+
+[size=4][b]Performance characteristics[/b][/size]
+
+Terrain has two modes, Off and Raster, and the raster's resolution (Full / Half / Corners) is the cost knob. Main-thread microseconds per frame for the terrain pass alone, measured on a nine-cell exterior on a high-tier machine:
+
+[code]
+terrain resolution   triangles   sync (main thread)   async (dispatch + flush)
+Full                 14848       282 us               ~36 us
+Half                  3712       114 us               ~31 us
+Corners                928        54 us               ~27 us
+[/code]
+
+All three occluded the same number of objects at that site. The async modes shift the rasterization onto worker cores, so the visible main-thread cost collapses. Async Raster at Half is the default on the mid and high tiers; the low tier runs Raster at Corners on the main thread.
+
+These numbers are the plugin's own CPU cost, not the time it saves downstream. The user-visible win is fewer GPU draw calls and vertex-shader invocations on culled leaves.
+
+On a cell transition the plugin's share of the hitch is about 1.7 ms on the crossing frame, mostly the engine's own teardown of the outgoing cell's meshes, which the plugin's caches release at that point. The larger spike on the following frame is the engine loading the new cell; the plugin does nothing on that frame.
+
+[size=4][b]Installation[/b][/size]
+
+The archive is the mod folder itself. Drop its contents into your Morrowind Data Files directory, or install it with a mod manager. Both halves have to land under Data Files:
+
+[code]
+Data Files/MWSE/lib/msoc.dll
+Data Files/MWSE/mods/msoc/main.lua
+Data Files/MWSE/mods/msoc/config.lua
+Data Files/MWSE/mods/msoc/mcm.lua
+Data Files/MWSE/mods/msoc/overlay.lua
+Data Files/MWSE/mods/msoc/i18n/eng.lua
+[/code]
+
+The LICENSE, LICENSE-Apache-2.0.txt and NOTICE files do nothing in game.
+
+After install, launch Morrowind. The plugin probes the hardware on first run and writes a sensible config to MWSE/config/msoc.json. Tweak it via the MCM afterwards.
+
+When upgrading, update msoc.dll and the Lua files together. A new DLL with old Lua files loads but does not install its hooks, and says so in MSOC.log. An upgrade re-applies the hardware-tier defaults once.
+
+[size=4][b]Configuration[/b][/size]
+
+Open the MCM and pick MSOC. The menu knows which hardware tier the plugin detected and says so. The sidebar shows the plugin version and the tier with its SIMD level and thread count, and the Performance page lists the values that tier picked, including the two that live only in msoc.json (mask size and the per-phase time budgets). Hover any setting to read its description in the sidebar. Each page has a reset to the tier's defaults. On a plugin update the tier-picked values and any retuned defaults are re-applied once, so a new release's tuning reaches you; your other edits stay.
+
+Five pages:
+
+[list]
+[*][b]General.[/b] The master switch; the toggle hotkey, unbound by default, which flips the master switch during play and is ignored while a menu or the console is open; the interior and exterior switches; the terrain occluder mode (Off or Raster) and its resolution (Full / Half / Corners, Half on multi-core and Corners on the low tier); and the verdict cache, which reuses a "hidden" verdict for a number of frames. The cache ships at 0 so a mesh reappears the frame it becomes visible.
+[*][b]Occluders.[/b] Which meshes are drawn into the mask: size bands per interior and exterior cell, a triangle cap, front-to-back submission and back-face culling. The defaults admit architecture and large rocks and leave clutter out.
+[*][b]Occludees.[/b] How the mask is queried: depth slack, the smallest size worth testing, a tighter box test after the bounding sphere, and the rule that geometry drawn with the depth test off is never culled.
+[*][b]Performance.[/b] Whether the mask is built on worker threads or the main thread, and how many threads and screen bins. The tier default is right for most users; change it only to benchmark or debug.
+[*][b]Debug.[/b] Show the occlusion mask draws the live mask in the top-right corner, bright for near occluder depth and black where nothing was written. Three tints mark occluders yellow, culled shapes red (drawn anyway, so you can see what would have been skipped) and tested-visible shapes green. Three log toggles write per-frame culling events, periodic aggregate stats and cell-cross spikes to MSOC.log; the aggregate stats are what to attach to a bug report. Everything on this page costs frame time or disk.
+[/list]
+
+The hardware-tier defaults:
+
+[code]
+tier   CPU profile              async   mask       phase budgets
+low    no AVX2, or <= 4 threads off     256x128    on
+mid    AVX2, 5-8 threads        on      384x192    on
+high   AVX2, > 8 threads        on      512x256    off
+[/code]
+
+If you do not know which tier you landed in, the MCM sidebar names it, and so do the first lines of MWSE.log after launch (hardwareTier=...).
+
+[size=4][b]How it works[/b][/size]
+
+Each frame, while Morrowind's renderer traverses the scene graph:
+
+[list=1]
+[*][b]Rasterize occluders.[/b] The plugin submits large opaque mesh leaves to Intel's Masked Software Occlusion Culling rasterizer as occluders into a coarse depth mask. Alpha-blended, alpha-tested and stencil shapes never occlude, since their holes would falsely hide what stands behind them.
+[*][b]Defer leaves.[/b] It queues small leaves instead of testing them against a half-built mask, which avoids same-frame ordering false positives.
+[*][b]Terrain.[/b] The near-scene terrain surface, the nine active cells at the chosen resolution, joins the queue with the meshes, and the plugin submits everything nearest first.
+[*][b]Drain.[/b] The plugin tests every queued leaf against the now-complete mask. Leaves that read as occluded skip display() entirely. It never tests geometry the renderer draws with the depth test off, such as detection-spell markers, and never uses it as an occluder; the engine draws that geometry through walls on purpose.
+[/list]
+
+The mask lives and dies inside one frame: cleared at the top of the pass, built during traversal, read on the drain, handed to nobody. Per-phase time budgets absorb worst-case spikes such as cell loads and sudden reveals, so the per-frame cost stays bounded.
+
+[size=4][b]Compatibility and known limitations[/b][/size]
+
+[list]
+[*][b]MGE-XE.[/b] Any version, including none. The plugin and MGE-XE share nothing but the frame.
+[*][b]Other MWSE mods.[/b] The plugin detours Morrowind's cullShow, the per-frame scene-graph traversal that does frustum culling and dispatches display() calls. If another mod does CPU occlusion or intercepts the same function, disable one of them.
+[*][b]Save games.[/b] No save-game state. Toggling the plugin is reversible per launch.
+[*][b]Seam leaks.[/b] Very occasionally an object that is fully hidden is still drawn, because two abutting occluder meshes leave a one-pixel gap in the mask. This costs a few pixels of overdraw that were going to be that colour anyway and is not visible. Fixing it would trade an invisible artifact for flicker on visible objects, so it is left alone.
+[*][b]Sparse exteriors on weak CPUs.[/b] See the site table at the top. The master switch is the answer for now.
+[/list]
+
+[size=4][b]Source and license[/b][/size]
+
+Source: [url=https://github.com/StormAtronach/msoc-plugin]github.com/StormAtronach/msoc-plugin[/url]. The changelog there carries the full write-up of each release.
+
+MIT-licensed. Bundles a modified copy of Intel's Masked Software Occlusion Culling under Apache License 2.0; see LICENSE, LICENSE-Apache-2.0.txt and NOTICE in the archive for the full text and the list of modifications.
+
+[size=4][b]Credits[/b][/size]
+
+[list]
+[*][b]Intel[/b] for [url=https://github.com/GameTechDev/MaskedOcclusionCulling]Masked Software Occlusion Culling[/url], the rasterizer and threadpool this project builds on.
+[*][b]The MWSE team[/b] for the engine-patching and Lua infrastructure.
+[*][b]The MGE-XE team[/b], whose shadow-map debug overlay is the model for the occlusion-mask overlay here.
+[/list]

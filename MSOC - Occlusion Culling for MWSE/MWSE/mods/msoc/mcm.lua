@@ -154,6 +154,14 @@ local function registerModConfig()
         configKey   = "EnableMSOC",
         callback    = applyChange,
     })
+    -- hotkey.lua reads the combo on every keyDown; nothing to push across.
+    culling:createKeyBinder({
+        label             = i18n("ToggleHotkey.label"),
+        description       = i18n("ToggleHotkey.description"),
+        configKey         = "ToggleHotkey",
+        allowCombinations = true,
+        allowMouse        = false,
+    })
     culling:createOnOffButton({
         label       = i18n("OcclusionEnableInterior.label"),
         description = i18n("OcclusionEnableInterior.description"),

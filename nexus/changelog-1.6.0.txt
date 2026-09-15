@@ -1,0 +1,22 @@
+1.6.0
+
+- Removed the MGE-XE integration exports. No released MGE-XE ever called them, and keeping them cost a second mask buffer and a worker round trip on every frame. msoc.dll no longer exports an occlusion API; MGE-XE of any version, or none, is fine.
+- Removed light culling. It was opt-in, never showed a clear win, and needed a second engine hook. First launch drops its two config keys from msoc.json.
+- Removed the Horizon terrain mode. Measured properly it cost four to five times the raster at the same resolution and occluded less. Terrain is now Off or Raster, with a resolution setting (Full / Half / Corners). A saved Horizon setting reads as Raster; the low hardware tier runs Raster at Corners.
+- New: an optional hotkey (MCM General page, unbound by default) flips the master switch during play, for before-and-after comparisons.
+- New: a live occlusion-mask overlay. "Show occlusion mask" on the Debug page draws the mask the rasterizer is building in the top-right corner.
+- Fixed: downsampled terrain (Half and Corners) was wound backwards and mostly discarded, so the mask was missing much of the terrain silhouette.
+- Fixed: far geometry could punch holes and dark patches into nearer occluders in the mask. The rasterizer now uses Intel's accurate tile update; the threaded and single-threaded paths produce the same mask.
+- Fixed: the terrain's horizon line cut a dark band through nearer buildings. Terrain is now submitted with the meshes, nearest first. At the test site the occluded count with terrain on went from 444 to 516 of about 850.
+- Fixed: cracks along coarse terrain patch seams, and coarse terrain that could sit above the real ground and hide objects standing on it.
+- The plugin no longer rasterizes terrain outside the 3x3 active cells. Nothing the engine draws stands behind it.
+- Fixed: x-ray effects such as Enhanced Detection's markers flickered or vanished behind walls. Geometry drawn with the depth test off is never culled and never used as an occluder.
+- Fixed: the mask overlay did not appear at load when saved on.
+- Verdict caching is off by default. The plugin re-tests a hidden mesh every frame, so it reappears the frame it becomes visible instead of up to four frames later.
+- The MCM is reorganised into five pages (General, Occluders, Occludees, Performance, Debug), with each setting's description in the sidebar and the detected hardware tier shown.
+- The hardware-tier defaults now live in one place. A saved mask resolution takes effect at launch, where before it was silently ignored. The upgrade re-applies the tier keys once.
+- Fixed: a stale bounding-box cache entry could survive its mesh and cause a wrong cull.
+- Fixed: the per-frame budget could not see threaded rasterization time, so its spike protection never engaged with async on.
+- Fixed: an over-counted "rasterized" statistic and per-frame log spam on single-worker machines.
+- AVX-512 is no longer built; it was never selected at runtime.
+- Upgrading: update msoc.dll and the Lua files together. A new DLL with old Lua files loads but does not install its hooks, and says so in MSOC.log.

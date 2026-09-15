@@ -12,6 +12,9 @@
 local default_config = {
     -- Master gate.
     EnableMSOC                          = true,
+    -- Optional key that flips the master gate during play (hotkey.lua).
+    -- MWSE key-combo table; keyCode=false is the MCM's "unbound".
+    ToggleHotkey                        = { keyCode = false },
 
     -- Scene gates.
     OcclusionEnableInterior             = true,

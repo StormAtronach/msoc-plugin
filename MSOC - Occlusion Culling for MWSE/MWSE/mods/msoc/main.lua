@@ -68,3 +68,7 @@ require("msoc.mcm")
 -- MCM toggle loaded it, so a saved-on overlay did nothing at launch and had
 -- to be toggled off and on.
 require("msoc.overlay")
+
+-- hotkey.lua registers the keyDown handler for the optional toggle key
+-- (config.ToggleHotkey, unbound by default).
+require("msoc.hotkey")
