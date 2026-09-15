@@ -4,6 +4,7 @@
 
 #include "OcclusionApi.h"
 #include "OcclusionInternal.h"
+#include "Log.h"
 
 #include "NICamera.h"
 #include "NINode.h"
@@ -16,8 +17,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>  // numeric_limits; was reaching this through the PCH
+#include <utility>
 #include <vector>
 
 namespace msoc::occlusion::terrain {
@@ -57,13 +60,11 @@ static bool landWithinActiveGrid(NI::AVObject* land, NI::Camera* camera) {
     return dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1;
 }
 
-// Append one terrain TriShape (25v/32t) to the aggregate buffers,
-// transforming to world space and offsetting indices. Mirrors
-// rasterizeTriShape's vertex math without the gates/skinning/thin-
-// axis paths.
-static void appendTerrainShape(std::vector<float>& aggVerts,
-                               std::vector<unsigned int>& aggIdx, NI::TriShape* shape,
-                               unsigned int step) {
+// Append one terrain TriShape (25v/32t) at full resolution: every source
+// vertex and every source triangle, world-transformed, indices offset. Mirrors
+// rasterizeTriShape's vertex math without the gates/skinning/thin-axis paths.
+static void appendTerrainShapeFull(std::vector<float>& aggVerts,
+                                   std::vector<unsigned int>& aggIdx, NI::TriShape* shape) {
     auto data = shape->getModelData();
     if (!data) return;
     const unsigned short vcount = data->getActiveVertexCount();
@@ -77,84 +78,6 @@ static void appendTerrainShape(std::vector<float>& aggVerts,
     const auto& T = xf.translation;
     const float s = xf.scale;
 
-    // Downsample fast path. Terrain subcells are 5x5 row-major grids
-    // (25v/32t). step=2 -> 3x3 (8 tris); step=4 -> 2x2 (2 tris). Sample
-    // every step-th vertex; min-z over the dropped neighbours so the
-    // silhouette can only shrink (conservative under-occlude). Other
-    // vcount/step combos fall through to full-resolution. Only 2/4
-    // divide the 4-quad edge cleanly without dropping the seam.
-    if (vcount == 25 && (step == 2 || step == 4)) {
-        // Coarse-grid axis count: step=2 -> 3 verts/edge, step=4 -> 2.
-        const unsigned int n = (4u / step) + 1u;
-        const unsigned int baseVert = static_cast<unsigned int>(aggVerts.size() / 3);
-        aggVerts.resize(aggVerts.size() + static_cast<size_t>(n * n) * 3);
-        float* out = aggVerts.data() + baseVert * 3;
-
-        // For each kept (cr, cc), take min-world-z over the source-
-        // grid neighbourhood. Right/bottom seam verts are only
-        // covered by the last-row/column kept vertex - the seam
-        // already matches the next subcell exactly.
-        for (unsigned int cr = 0; cr < n; ++cr) {
-            for (unsigned int cc = 0; cc < n; ++cc) {
-                const unsigned int sr0 = cr * step;
-                const unsigned int sc0 = cc * step;
-                const unsigned int sr1 = (cr + 1 == n) ? sr0 : sr0 + (step - 1);
-                const unsigned int sc1 = (cc + 1 == n) ? sc0 : sc0 + (step - 1);
-
-                float minWz = std::numeric_limits<float>::infinity();
-                float keepX = 0, keepY = 0;
-                // XY anchored at (sr0, sc0); only Z is min-folded.
-                for (unsigned int sr = sr0; sr <= sr1; ++sr) {
-                    for (unsigned int sc = sc0; sc <= sc1; ++sc) {
-                        const auto& v = data->vertex[sr * 5 + sc];
-                        const float rx = R.m0.x * v.x + R.m0.y * v.y + R.m0.z * v.z;
-                        const float ry = R.m1.x * v.x + R.m1.y * v.y + R.m1.z * v.z;
-                        const float rz = R.m2.x * v.x + R.m2.y * v.y + R.m2.z * v.z;
-                        const float wx = rx * s + T.x;
-                        const float wy = ry * s + T.y;
-                        const float wz = rz * s + T.z;
-                        if (sr == sr0 && sc == sc0) {
-                            keepX = wx;
-                            keepY = wy;
-                        }
-                        if (wz < minWz) minWz = wz;
-                    }
-                }
-                float* dst = out + (cr * n + cc) * 3;
-                dst[0] = keepX;
-                dst[1] = keepY;
-                dst[2] = minWz;
-            }
-        }
-
-        // (n-1)*(n-1)*2 triangles. Winding must match the full-resolution
-        // path, which copies the source patches' own CCW order: the same
-        // OcclusionOccluderCCWOnly gate (BACKFACE_CW) runs at submit time, so
-        // a coarse quad emitted CW is silently culled. It was, and with the
-        // default Half/CCW-only config that dropped most of the downsampled
-        // terrain from the mask and left black fractures across the hills.
-        // (v00, v01, v10) + (v10, v01, v11) is CCW under this row-major grid;
-        // verified against every dumped patch.
-        const unsigned int qN = n - 1;
-        aggIdx.reserve(aggIdx.size() + static_cast<size_t>(qN * qN) * 6);
-        for (unsigned int qr = 0; qr < qN; ++qr) {
-            for (unsigned int qc = 0; qc < qN; ++qc) {
-                const unsigned int v00 = baseVert + (qr * n + qc);
-                const unsigned int v01 = baseVert + (qr * n + (qc + 1));
-                const unsigned int v10 = baseVert + ((qr + 1) * n + qc);
-                const unsigned int v11 = baseVert + ((qr + 1) * n + (qc + 1));
-                aggIdx.push_back(v00);
-                aggIdx.push_back(v01);
-                aggIdx.push_back(v10);
-                aggIdx.push_back(v10);
-                aggIdx.push_back(v01);
-                aggIdx.push_back(v11);
-            }
-        }
-        return;
-    }
-
-    // Full-resolution path: copy every source vert + every source tri.
     const unsigned int baseVert = static_cast<unsigned int>(aggVerts.size() / 3);
     aggVerts.resize(aggVerts.size() + static_cast<size_t>(vcount) * 3);
     float* out = aggVerts.data() + baseVert * 3;
@@ -193,6 +116,301 @@ static unsigned int currentTerrainStep() {
     }
 }
 
+// Coarse terrain (Half / Corners) is built per Land from the cell's 65x65
+// vertex grid, not per 5x5 patch. A cell is 64x64 quads of 128 units; its
+// 256 patches share edge vertices as separate copies. Downsampling keeps
+// every step-th grid vertex and folds the dropped ones in by taking the
+// MINIMUM world-Z over the fine vertices its coarse triangles cover (a
+// window of radius step-1 less the far halves of the two quads its
+// diagonal cuts it off from):
+//
+//   - The window is symmetric, so the two patches on either side of a seam
+//     compute the same value for the vertex they share. The old per-patch
+//     fold used the one-sided window [r, r+step-1], so the patch that owned
+//     a seam vertex as its LAST row kept the exact height while its
+//     neighbour folded rows 0..step-1 under it, and the surfaces disagreed
+//     by up to hundreds of units along every patch boundary. That was the
+//     thin dashed crack in the Half/Corners mask.
+//   - Radius step-1 is what makes the coarse surface conservative. Every
+//     dropped vertex lies within the window of BOTH kept vertices it sits
+//     between, so the straight coarse edge between them stays at or below
+//     it. The one-sided window only bounded one end: a dip right after a
+//     kept row sat under a lerp that never saw it, so the coarse surface
+//     could rise above the real terrain there and over-occlude.
+//
+// Coarse quads are 16/step per subcell edge, so they never straddle a
+// subcell; each is emitted into the range of the subcell its fine quads came
+// from, keeping the per-subcell frustum cull. A coarse quad is emitted only
+// when every fine quad under it came from an accepted patch (no alpha or
+// stencil) and all four corners exist, so a missing patch leaves a hole
+// rather than a lid. Cell-to-cell seams still clamp the window at the cell
+// edge on each side, so a crack can remain along a cell boundary (one line
+// per cell edge, versus one per patch edge before); closing that needs the
+// neighbour cell's rows and is not done here.
+namespace {
+
+constexpr int kFineN = 65;              // vertices per cell edge
+constexpr int kFineQuads = 64;          // quads per cell edge
+constexpr float kFineSpacing = 128.0f;  // world units per fine quad
+constexpr float kLandSize = 8192.0f;
+
+struct CoarsePatch {
+    int subcell;           // index into CoarseWorkspace::subNodes
+    float x[25], y[25], z[25];
+};
+
+struct CoarseWorkspace {
+    std::vector<NI::Node*> subNodes;   // every NiNode child of the Land, in child order
+    std::vector<CoarsePatch> patches;  // accepted 25-vertex patches, world space
+    std::vector<float> z;              // [65*65] min world-Z seen at that grid vertex
+    std::vector<uint8_t> have;         // [65*65] 1 once any accepted patch supplied it
+    std::vector<int16_t> quadSub;      // [64*64] subcell of the accepted patch owning the fine quad, -1 = none
+    std::vector<int> coarseIdx;        // [n*n] index into the entry's verts, -1 = absent
+};
+
+}  // namespace
+
+static void buildCoarseLand(LandCacheEntry& entry, NI::Node* landNode, unsigned int step) {
+    static CoarseWorkspace ws;
+    ws.subNodes.clear();
+    ws.patches.clear();
+
+    // Pass 1: collect every accepted patch in world space. A patch is a
+    // 25-vertex NiTriShape under a subcell NiNode; alpha/stencil ones are
+    // not occluders. The Land can hold any number of subcell nodes (the
+    // engine keeps several shapes per patch position), so nothing is capped.
+    int shapesSeen = 0, rejected = 0, oddCount = 0;
+    const auto& subcells = landNode->children;
+    for (size_t j = 0; j < subcells.endIndex; ++j) {
+        auto* sub = subcells.storage[j].get();
+        if (!sub || !sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
+        auto* subNode = static_cast<NI::Node*>(sub);
+        const int si = static_cast<int>(ws.subNodes.size());
+        ws.subNodes.push_back(subNode);
+        const auto& shapes = subNode->children;
+        for (size_t k = 0; k < shapes.endIndex; ++k) {
+            auto* shape = shapes.storage[k].get();
+            if (!shape || !shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
+            ++shapesSeen;
+            const auto p = classify::occluderProperties(shape);
+            if (p.alpha || p.stencil) {
+                ++rejected;
+                continue;
+            }
+            auto* tri = static_cast<NI::TriShape*>(shape);
+            auto data = tri->getModelData();
+            if (!data || data->vertex == nullptr || data->getActiveVertexCount() != 25) {
+                ++oddCount;
+                continue;
+            }
+            const auto& xf = tri->worldTransform;
+            const auto& R = xf.rotation;
+            const auto& T = xf.translation;
+            const float s = xf.scale;
+            ws.patches.emplace_back();
+            CoarsePatch& cp = ws.patches.back();
+            cp.subcell = si;
+            for (int i = 0; i < 25; ++i) {
+                const auto& v = data->vertex[i];
+                cp.x[i] = (R.m0.x * v.x + R.m0.y * v.y + R.m0.z * v.z) * s + T.x;
+                cp.y[i] = (R.m1.x * v.x + R.m1.y * v.y + R.m1.z * v.z) * s + T.y;
+                cp.z[i] = (R.m2.x * v.x + R.m2.y * v.y + R.m2.z * v.z) * s + T.z;
+            }
+        }
+    }
+    if (ws.patches.empty()) return;
+
+    // Cell origin: the Land's minimum vertex x/y is the cell's south-west
+    // corner, a multiple of the cell size; the rounding absorbs float error.
+    float minX = std::numeric_limits<float>::infinity();
+    float minY = std::numeric_limits<float>::infinity();
+    for (const CoarsePatch& cp : ws.patches) {
+        for (int i = 0; i < 25; ++i) {
+            if (cp.x[i] < minX) minX = cp.x[i];
+            if (cp.y[i] < minY) minY = cp.y[i];
+        }
+    }
+    const float x0 = std::floor(minX / kLandSize + 0.5f) * kLandSize;
+    const float y0 = std::floor(minY / kLandSize + 0.5f) * kLandSize;
+
+    // Pass 2: fill the 65x65 grid and mark each patch's 4x4 fine quads with
+    // the subcell that owns them.
+    ws.z.assign(kFineN * kFineN, std::numeric_limits<float>::infinity());
+    ws.have.assign(kFineN * kFineN, 0);
+    ws.quadSub.assign(kFineQuads * kFineQuads, -1);
+    int outside = 0, extentFail = 0;
+    for (const CoarsePatch& cp : ws.patches) {
+        int gMinI = kFineN, gMinJ = kFineN, gMaxI = -1, gMaxJ = -1;
+        for (int i = 0; i < 25; ++i) {
+            const int gi = static_cast<int>(std::lround((cp.x[i] - x0) / kFineSpacing));
+            const int gj = static_cast<int>(std::lround((cp.y[i] - y0) / kFineSpacing));
+            if (gi < 0 || gi >= kFineN || gj < 0 || gj >= kFineN) {
+                ++outside;
+                continue;
+            }
+            const size_t idx = static_cast<size_t>(gj) * kFineN + gi;
+            if (cp.z[i] < ws.z[idx]) ws.z[idx] = cp.z[i];
+            ws.have[idx] = 1;
+            if (gi < gMinI) gMinI = gi;
+            if (gj < gMinJ) gMinJ = gj;
+            if (gi > gMaxI) gMaxI = gi;
+            if (gj > gMaxJ) gMaxJ = gj;
+        }
+        if (gMaxI - gMinI == 4 && gMaxJ - gMinJ == 4) {
+            for (int qj = gMinJ; qj < gMinJ + 4; ++qj) {
+                for (int qi = gMinI; qi < gMinI + 4; ++qi) {
+                    ws.quadSub[static_cast<size_t>(qj) * kFineQuads + qi] = static_cast<int16_t>(cp.subcell);
+                }
+            }
+        } else {
+            ++extentFail;
+        }
+    }
+
+    // Coarse vertices: kept grid vertex (r, c) = (cr*step, cc*step), z = the
+    // minimum over the fine vertices its coarse triangles pass over. The
+    // coarse surface is linear inside each triangle (v00, v01, v10) +
+    // (v10, v01, v11), diagonal r + c = step, so a corner only has to bound
+    // the fine vertices that get a nonzero barycentric weight from it in
+    // one of the (up to six) triangles touching it: the square window of
+    // radius step-1 minus the far half of the two quads whose diagonal cuts
+    // the corner off. That is the tightest window that keeps the coarse
+    // surface under the real terrain everywhere (the difference is
+    // piecewise linear on the fine grid, so checking the fine vertices is
+    // enough), and it keeps ridges 2-4 points of coverage higher than the
+    // full square did. Offsets are enumerated once per build.
+    const int istep = static_cast<int>(step);
+    const int n = kFineQuads / istep + 1;
+    static std::vector<std::pair<int, int>> offsets;
+    offsets.clear();
+    for (int qr = -istep; qr <= 0; qr += istep) {
+        for (int qc = -istep; qc <= 0; qc += istep) {
+            // The two triangles of the quad whose origin is (qr, qc); the
+            // corner under consideration is (0, 0) in these coordinates.
+            const int tri[2][3][2] = {{{qr, qc}, {qr, qc + istep}, {qr + istep, qc}},
+                                      {{qr + istep, qc}, {qr, qc + istep}, {qr + istep, qc + istep}}};
+            for (const auto& t : tri) {
+                int self = -1;
+                for (int k = 0; k < 3; ++k) {
+                    if (t[k][0] == 0 && t[k][1] == 0) self = k;
+                }
+                if (self < 0) continue;
+                const int r1 = t[(self + 1) % 3][0], c1 = t[(self + 1) % 3][1];
+                const int r2 = t[(self + 2) % 3][0], c2 = t[(self + 2) % 3][1];
+                const float det = static_cast<float>(r1 * c2 - r2 * c1);
+                for (int r = qr; r <= qr + istep; ++r) {
+                    for (int c = qc; c <= qc + istep; ++c) {
+                        const float w1 = static_cast<float>(r * c2 - r2 * c) / det;
+                        const float w2 = static_cast<float>(r1 * c - r * c1) / det;
+                        const float w0 = 1.0f - w1 - w2;
+                        if (w0 > 1.0e-6f && w1 > -1.0e-6f && w2 > -1.0e-6f) {
+                            const std::pair<int, int> o{r, c};
+                            if (std::find(offsets.begin(), offsets.end(), o) == offsets.end()) offsets.push_back(o);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ws.coarseIdx.assign(static_cast<size_t>(n) * n, -1);
+    for (int cr = 0; cr < n; ++cr) {
+        for (int cc = 0; cc < n; ++cc) {
+            const int r = cr * istep;
+            const int c = cc * istep;
+            float zMin = std::numeric_limits<float>::infinity();
+            bool any = false;
+            for (const auto& o : offsets) {
+                const int rr = r + o.first, c2 = c + o.second;
+                if (rr < 0 || rr >= kFineN || c2 < 0 || c2 >= kFineN) continue;
+                const size_t idx = static_cast<size_t>(rr) * kFineN + c2;
+                if (!ws.have[idx]) continue;
+                any = true;
+                if (ws.z[idx] < zMin) zMin = ws.z[idx];
+            }
+            if (!any) continue;
+            ws.coarseIdx[static_cast<size_t>(cr) * n + cc] = static_cast<int>(entry.verts.size() / 3);
+            entry.verts.push_back(x0 + static_cast<float>(c) * kFineSpacing);
+            entry.verts.push_back(y0 + static_cast<float>(r) * kFineSpacing);
+            entry.verts.push_back(zMin);
+        }
+    }
+
+    // Coarse quads, grouped by the subcell that owns their fine quads so the
+    // per-subcell frustum cull keeps working. (v00, v01, v10) + (v10, v01,
+    // v11) with v01 = +x and v10 = +y is CCW seen from above, the winding
+    // the source patches use and the CCW-only occluder gate expects.
+    int quadsEmitted = 0, quadsMixed = 0, quadsAbsent = 0;
+    for (int si = 0; si < static_cast<int>(ws.subNodes.size()); ++si) {
+        const unsigned int firstIdx = static_cast<unsigned int>(entry.indices.size());
+        for (int cr = 0; cr + 1 < n; ++cr) {
+            for (int cc = 0; cc + 1 < n; ++cc) {
+                const int r = cr * istep;
+                const int c = cc * istep;
+                // Only quads whose every fine quad belongs to subcell si.
+                bool mine = true;
+                for (int qj = r; mine && qj < r + istep; ++qj) {
+                    for (int qi = c; qi < c + istep; ++qi) {
+                        if (ws.quadSub[static_cast<size_t>(qj) * kFineQuads + qi] != si) {
+                            mine = false;
+                            break;
+                        }
+                    }
+                }
+                if (!mine) continue;
+                const int v00 = ws.coarseIdx[static_cast<size_t>(cr) * n + cc];
+                const int v01 = ws.coarseIdx[static_cast<size_t>(cr) * n + cc + 1];
+                const int v10 = ws.coarseIdx[static_cast<size_t>(cr + 1) * n + cc];
+                const int v11 = ws.coarseIdx[static_cast<size_t>(cr + 1) * n + cc + 1];
+                if (v00 < 0 || v01 < 0 || v10 < 0 || v11 < 0) {
+                    ++quadsAbsent;
+                    continue;
+                }
+                ++quadsEmitted;
+                entry.indices.push_back(static_cast<unsigned int>(v00));
+                entry.indices.push_back(static_cast<unsigned int>(v01));
+                entry.indices.push_back(static_cast<unsigned int>(v10));
+                entry.indices.push_back(static_cast<unsigned int>(v10));
+                entry.indices.push_back(static_cast<unsigned int>(v01));
+                entry.indices.push_back(static_cast<unsigned int>(v11));
+            }
+        }
+        const unsigned int lastIdx = static_cast<unsigned int>(entry.indices.size());
+        if (lastIdx > firstIdx) {
+            LandCacheEntry::SubcellRange range;
+            range.node = ws.subNodes[si];
+            range.firstIdx = firstIdx;
+            range.triCount = (lastIdx - firstIdx) / 3;
+            entry.subcellRanges.push_back(range);
+        }
+    }
+    // Quads no subcell claimed whole (a fine quad under them has no accepted
+    // patch, or they straddle two subcells' patches).
+    for (int cr = 0; cr + 1 < n; ++cr) {
+        for (int cc = 0; cc + 1 < n; ++cc) {
+            const int r = cr * istep, c = cc * istep;
+            const int first = ws.quadSub[static_cast<size_t>(r) * kFineQuads + c];
+            bool uniform = first >= 0;
+            for (int qj = r; uniform && qj < r + istep; ++qj) {
+                for (int qi = c; qi < c + istep; ++qi) {
+                    if (ws.quadSub[static_cast<size_t>(qj) * kFineQuads + qi] != first) {
+                        uniform = false;
+                        break;
+                    }
+                }
+            }
+            if (!uniform) ++quadsMixed;
+        }
+    }
+
+    // One line per cache build (cell change or resolution change), so a
+    // missing region can be traced to its cause.
+    log::getLog() << "MSOC: coarse land build step=" << step << " window=" << offsets.size() << " subcellNodes=" << ws.subNodes.size()
+                  << " shapes=" << shapesSeen << " patches=" << ws.patches.size() << " rejected=" << rejected
+                  << " odd=" << oddCount << " verticesOutsideGrid=" << outside << " extentFail=" << extentFail
+                  << " quads emitted=" << quadsEmitted << " absentCorner=" << quadsAbsent << " unclaimed=" << quadsMixed
+                  << " origin=(" << x0 << "," << y0 << ") ranges=" << entry.subcellRanges.size() << std::endl;
+}
+
 // Build VB+IB for one per-Land NiNode (cache-miss path). Walks every
 // subcell unconditionally - result must be valid for any camera angle.
 // MSOC clips internally; extra off-frustum triangles cost negligibly
@@ -202,35 +420,37 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
     entry.indices.clear();
     entry.subcellRanges.clear();
     const unsigned int step = currentTerrainStep();
-    const auto& subcells = landNode->children;
-    for (size_t j = 0; j < subcells.endIndex; ++j) {
-        auto* sub = subcells.storage[j].get();
-        if (!sub) continue;
-        if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
-        auto* subNode = static_cast<NI::Node*>(sub);
 
-        // Bracket this subcell's index range so the submit path can
-        // frustum-cull at subcell granularity.
-        const unsigned int firstIdxBefore = static_cast<unsigned int>(entry.indices.size());
+    if (step == 1) {
+        // Full: copy the patches as they are, one index range per subcell.
+        const auto& subcells = landNode->children;
+        for (size_t j = 0; j < subcells.endIndex; ++j) {
+            auto* sub = subcells.storage[j].get();
+            if (!sub) continue;
+            if (!sub->isInstanceOfType(NI::RTTIStaticPtr::NiNode)) continue;
+            auto* subNode = static_cast<NI::Node*>(sub);
 
-        const auto& shapes = subNode->children;
-        for (size_t k = 0; k < shapes.endIndex; ++k) {
-            auto* shape = shapes.storage[k].get();
-            if (!shape) continue;
-            if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
-            const auto p = classify::occluderProperties(shape);
-            if (p.alpha || p.stencil) continue;
-            appendTerrainShape(entry.verts, entry.indices, static_cast<NI::TriShape*>(shape), step);
+            const unsigned int firstIdxBefore = static_cast<unsigned int>(entry.indices.size());
+            const auto& shapes = subNode->children;
+            for (size_t k = 0; k < shapes.endIndex; ++k) {
+                auto* shape = shapes.storage[k].get();
+                if (!shape) continue;
+                if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
+                const auto p = classify::occluderProperties(shape);
+                if (p.alpha || p.stencil) continue;
+                appendTerrainShapeFull(entry.verts, entry.indices, static_cast<NI::TriShape*>(shape));
+            }
+            const unsigned int firstIdxAfter = static_cast<unsigned int>(entry.indices.size());
+            if (firstIdxAfter > firstIdxBefore) {
+                LandCacheEntry::SubcellRange r;
+                r.node = subNode;
+                r.firstIdx = firstIdxBefore;
+                r.triCount = (firstIdxAfter - firstIdxBefore) / 3;
+                entry.subcellRanges.push_back(r);
+            }
         }
-
-        const unsigned int firstIdxAfter = static_cast<unsigned int>(entry.indices.size());
-        if (firstIdxAfter > firstIdxBefore) {
-            LandCacheEntry::SubcellRange r;
-            r.node = subNode;
-            r.firstIdx = firstIdxBefore;
-            r.triCount = (firstIdxAfter - firstIdxBefore) / 3;
-            entry.subcellRanges.push_back(r);
-        }
+    } else {
+        buildCoarseLand(entry, landNode, step);
     }
     entry.triCount = static_cast<unsigned int>(entry.indices.size() / 3);
     entry.builtForResolution = static_cast<uint8_t>(g_frame.terrainResolution);

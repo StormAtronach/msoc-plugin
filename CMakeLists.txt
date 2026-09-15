@@ -10,6 +10,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Gate the two independently.
 option(MSOC_BUILD_DLL   "Build the msoc plugin DLL (needs MWSE + LuaJIT + Win32)" ON)
 option(MSOC_BUILD_TESTS "Build the unit-test target (engine-free, no MWSE needed)" ON)
+# MOC keeps two depth layers per 8x4 subtile. Its default "quick" update
+# (QUICK_MASK=1) discards the working layer whenever an incoming triangle
+# fully covers the subtile, whatever its depth, and merges partial coverage
+# to the FARTHER depth. In this plugin's scenes that shows as far terrain and
+# far statics punching subtile-sized holes into nearer occluders. The
+# "accurate" update (QUICK_MASK=0, from "Masked Depth Culling for Graphics
+# Hardware") depth-tests per pixel against both layers, so a farther triangle
+# can never overwrite nearer pixels. Measured at Gnisis (2026-09-15): holes
+# in the combined terrain+mesh mask went from 0.8% of covered pixels to none,
+# subtiles dragged to a farther depth from 2.6% to 1.3%, the sync and async
+# paths now produce the same mask, and the main-thread raster cost rose about
+# 10% (358 -> 398 us with everything on the main thread; no change in async).
+option(MSOC_MOC_ACCURATE_MASK "Build Intel MOC with the accurate (QUICK_MASK=0) tile update" ON)
 
 # ---------------------------------------------------------------------------
 # Plugin DLL
@@ -170,6 +183,9 @@ if(MSOC_BUILD_DLL)
     target_compile_options(msoc PRIVATE /Zi)
     target_link_options(msoc PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 
+    if(MSOC_MOC_ACCURATE_MASK)
+        target_compile_definitions(msoc PRIVATE QUICK_MASK=0)
+    endif()
     target_compile_definitions(msoc PRIVATE
         _CRT_SECURE_NO_WARNINGS
         NOMINMAX

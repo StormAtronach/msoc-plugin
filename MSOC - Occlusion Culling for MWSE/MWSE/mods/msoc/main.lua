@@ -62,3 +62,9 @@ end
 -- mcm.lua registers its own modConfigReady handler; require at top
 -- level so that handler is installed before the event fires.
 require("msoc.mcm")
+
+-- overlay.lua registers the HUD-activation and game-load handlers that put
+-- the mask overlay up when DebugMaskOverlay is saved on. Until 1.6.0 only the
+-- MCM toggle loaded it, so a saved-on overlay did nothing at launch and had
+-- to be toggled off and on.
+require("msoc.overlay")

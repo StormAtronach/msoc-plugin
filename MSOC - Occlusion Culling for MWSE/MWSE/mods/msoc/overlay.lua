@@ -77,35 +77,51 @@ local function bindTexture(texture, attempts)
         return
     end
 
+    -- Frames stop while a loading screen is up, so after 30 frame retries
+    -- fall back to a real-time poll for up to another half minute.
     if attempts >= 30 then
-        mwse.log("[msoc] overlay: element never gained a scene node; "
-            .. "texture not bound. The frame will render empty.")
+        if attempts >= 90 then
+            mwse.log("[msoc] overlay: element never gained a scene node; "
+                .. "texture not bound. The frame will render empty.")
+            return
+        end
+        timer.start({ type = timer.real, duration = 0.5,
+                      callback = function() bindTexture(texture, attempts + 1) end })
         return
     end
 
     timer.frame.delayOneFrame(function() bindTexture(texture, attempts + 1) end)
 end
+--- Returns true once the overlay exists (or already existed), false when the
+--- mask texture is not available yet so the caller can retry.
 local function createOverlay()
-    if not (msoc and msoc.maskOverlayTexture) then return end
+    if not (msoc and msoc.maskOverlayTexture) then return false end
 
-    -- 0 means the mask resources are not live: EnableMSOC is off, or the
-    -- allocation failed. Try again on the next activation rather than
-    -- reporting an error the user cannot act on.
+    -- 0 means the mask resources are not live: EnableMSOC is off, the
+    -- allocation failed, or - right after a load - the first culled frame has
+    -- not run yet. The caller retries for a while rather than reporting an
+    -- error the user cannot act on.
     local address = msoc.maskOverlayTexture()
-    if not address or address == 0 then return end
+    if not address or address == 0 then return false end
 
     local texture = mwse.memory.convertTo.niObject(address)
     if not texture then
         mwse.log("[msoc] overlay: could not wrap the mask texture address.")
-        return
+        return true
     end
 
     local menu = getOrCreateMenu()
     if not menu then
         mwse.log("[msoc] overlay: could not create the help-layer menu.")
-        return
+        return true
     end
-    if menu:findChild(IMAGE_ID) then return end
+    local existing = menu:findChild(IMAGE_ID)
+    if existing then
+        -- Already there: re-assert the binding, since a load can rebuild the
+        -- UI under the element and leave it showing the seed texture.
+        bindTexture(texture, 0)
+        return true
+    end
 
     local w, h = 512, 256
     if msoc.maskResolution then
@@ -127,22 +143,67 @@ local function createOverlay()
     menu:updateLayout()
 
     bindTexture(texture, 0)
+    mwse.log("[msoc] overlay: created (%dx%d mask drawn at %dx%d).", w, h, image.width, image.height)
+    return true
+end
+
+--- The mask texture only exists once the plugin has built a mask, which on a
+--- fresh load is a few frames after the HUD comes up. If the toggle is on and
+--- the texture is not there yet, poll for it for a while; the timer dies
+--- with the toggle or as soon as the overlay exists. Without this a saved
+--- DebugMaskOverlay=true did nothing at load and had to be toggled off and
+--- on in the MCM.
+local retryTimer = nil
+local RETRY_SECONDS = 0.5
+local RETRY_LIMIT = 60
+
+local function stopRetry()
+    if retryTimer then
+        retryTimer:cancel()
+        retryTimer = nil
+    end
+end
+
+local function scheduleRetry(attempt)
+    stopRetry()
+    if attempt > RETRY_LIMIT then
+        mwse.log("[msoc] overlay: mask texture never appeared; giving up until the next load or toggle.")
+        return
+    end
+    retryTimer = timer.start({
+        type = timer.real,
+        duration = RETRY_SECONDS,
+        callback = function()
+            retryTimer = nil
+            if not cfg.config.DebugMaskOverlay then return end
+            if createOverlay() then
+                mwse.log("[msoc] overlay: created after %d retr%s (mask not ready at HUD activation).", attempt, attempt == 1 and "y" or "ies")
+            else
+                scheduleRetry(attempt + 1)
+            end
+        end,
+    })
 end
 
 --- Create or destroy the overlay to match the current config. Called from the
---- MCM toggle and re-asserted on HUD activation.
+--- MCM toggle and re-asserted on HUD activation and on game load.
 local function refresh()
     if cfg.config.DebugMaskOverlay then
-        createOverlay()
+        if not createOverlay() then
+            scheduleRetry(1)
+        end
     else
+        stopRetry()
         destroyOverlay()
     end
 end
 
 -- The help layer outlives ordinary menu churn, but a game load rebuilds the UI
 -- wholesale. MenuMulti activation is the cheap signal that the world is back;
--- refresh is idempotent, so re-asserting costs a lookup.
+-- refresh is idempotent, so re-asserting costs a lookup. `loaded` covers the
+-- case where MenuMulti was already up before the mask existed.
 event.register("uiActivated", refresh, { filter = "MenuMulti" })
+event.register("loaded", refresh)
 
 return {
     refresh = refresh,

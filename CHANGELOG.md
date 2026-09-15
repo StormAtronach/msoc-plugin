@@ -122,6 +122,53 @@ the raster at Corners resolution. Nexus lists the previous release as 1.5.
   enqueue. It therefore read a few hundred microseconds on frames that cost a
   millisecond, and predictive skip never engaged under async however dense the
   scene got. The average now includes the flush stall.
+- **Fixed: far geometry punched holes and dark patches into nearer
+  occluders in the mask.** Intel MOC keeps two depth layers per 8x4-pixel
+  subtile, and its default update rule (`QUICK_MASK=1`) replaces a subtile's
+  working layer whenever an incoming triangle covers the whole subtile,
+  whatever its depth, and merges partial coverage to the farther of the two
+  depths. Terrain is submitted before the meshes and the meshes front to
+  back, so a far terrain or mesh triangle arriving at a subtile a near mesh
+  only partly covered either threw the near coverage away (a hole, since it
+  fell back to an empty reference layer) or dragged the whole subtile to the
+  far depth (a dark patch). It also made the async and sync paths disagree,
+  because the threadpool's per-bin order differs from submission order and
+  the rule is order-sensitive. MOC is now built with its accurate update
+  (`QUICK_MASK=0`, the algorithm from "Masked Depth Culling for Graphics
+  Hardware"), which depth-tests per pixel against both layers, so a farther
+  triangle can never overwrite nearer pixels. At Gnisis, combining terrain
+  and meshes lost 0.8% of the covered pixels to holes and dragged 2.6% to a
+  farther depth; now 0% and 1.3%, and sync and async produce the same mask.
+  Main-thread raster time rose about 10% with everything on the main thread
+  (358 to 398 us); nothing measurable with async on. CMake option
+  `MSOC_MOC_ACCURATE_MASK`, default on.
+- **Fixed: the downsampled terrain (Half / Corners) had cracks along every
+  patch boundary, and could sit above the real ground.** The coarse builder
+  folded dropped vertices into kept ones with a one-sided window, so the two
+  patches sharing a seam vertex disagreed on its height (40% of shared
+  vertices at Gnisis, by 40 units at the median) and MOC left a thin dashed
+  crack along the seam; and a dip just past a kept row sat under a straight
+  coarse edge that never saw it, so the coarse surface rose above the terrain
+  there and could hide what stood on it. Coarse terrain is now built per cell
+  from the assembled 65x65 height grid: every kept vertex takes the minimum
+  over the fine vertices its coarse triangles pass over, which is the same
+  value from both sides of any seam and keeps the coarse surface under the
+  real one everywhere. At Gnisis, Half's crack pixels fell from 154 to 45
+  (the rest lie on cell edges, where the window still stops at the cell),
+  pixels nearer than the real terrain from 167 to 0, and Half keeps 96.5% of
+  the terrain area Full covers (Corners 88%); the price is that ridges sit a
+  little lower at coarse levels, so Half and Corners occlude less than Full
+  on hilly ground than the old, unsafe fold let them.
+- **Fixed: the mask overlay did not appear at load when saved on.** The
+  module that puts the overlay up on HUD activation was only loaded by the
+  MCM toggle's callback, so on a fresh launch its handlers were never
+  registered and a saved-on overlay did nothing until the toggle was flipped
+  off and on. `main.lua` now loads it at startup. It also polls for the mask
+  texture for up to thirty seconds after the HUD appears or a game loads
+  (the texture only exists once a mask has been built), re-binds its texture
+  on every refresh in case a load rebuilt the UI under it, keeps waiting for
+  the element's scene node through a loading screen, and logs when it is
+  created.
 - **Verdict caching is off by default.** `OcclusionTemporalCoherenceFrames`
   ships as 0 (was 4): a mesh the mask reported hidden is re-tested every
   frame and reappears the frame it becomes visible, instead of staying
