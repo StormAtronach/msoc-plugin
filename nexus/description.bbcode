@@ -8,13 +8,12 @@ The plugin runs standalone. It needs nothing beyond MWSE, and nothing else has t
 
 The plugin's own cost is close to constant. What it returns depends entirely on how much of the view is hidden behind something else, so the same build is a large win in one place and a small loss in another. Measured across four exterior sites, culler off against culler on:
 
-[code]
-site                     cull rate   result
-Old Ebonheart            90%         -22%  (108 to 139 fps)
-Narsis                   77%         -14%  ( 74 to  87 fps)
-Balmora                  51%          -4%  (210 to 218 fps)
-Vivec, Foreign Quarter   11%          +1%  (232 to 230 fps)
-[/code]
+[list]
+[*]Old Ebonheart: 90% of tested meshes culled, frame time -22% (108 to 139 fps)
+[*]Narsis: 77% culled, frame time -14% (74 to 87 fps)
+[*]Balmora: 51% culled, frame time -4% (210 to 218 fps)
+[*]Vivec, Foreign Quarter: 11% culled, frame time +1% (232 to 230 fps)
+[/list]
 
 It wins in dense architecture and roughly breaks even on open ground, and the places where it breaks even are already running at 200 fps. On a simulated four-core machine the two dense cities gain more than on a fast CPU, because the drawing it avoids costs more there.
 
@@ -47,12 +46,11 @@ MGE-XE is neither required nor involved. Any version, or none, is fine.
 
 Terrain has two modes, Off and Raster, and the raster's resolution (Full / Half / Corners) is the cost knob. Main-thread microseconds per frame for the terrain pass alone, measured on a nine-cell exterior on a high-tier machine:
 
-[code]
-terrain resolution   triangles   sync (main thread)   async (dispatch + flush)
-Full                 14848       282 us               ~36 us
-Half                  3712       114 us               ~31 us
-Corners                928        54 us               ~27 us
-[/code]
+[list]
+[*]Full: 14848 triangles, 282 us on the main thread, about 36 us with async (dispatch plus flush)
+[*]Half: 3712 triangles, 114 us on the main thread, about 31 us with async
+[*]Corners: 928 triangles, 54 us on the main thread, about 27 us with async
+[/list]
 
 All three occluded the same number of objects at that site. The async modes shift the rasterization onto worker cores, so the visible main-thread cost collapses. Async Raster at Half is the default on the mid and high tiers; the low tier runs Raster at Corners on the main thread.
 
@@ -95,12 +93,11 @@ Five pages:
 
 The hardware-tier defaults:
 
-[code]
-tier   CPU profile              async   mask       phase budgets
-low    no AVX2, or <= 4 threads off     256x128    on
-mid    AVX2, 5-8 threads        on      384x192    on
-high   AVX2, > 8 threads        on      512x256    off
-[/code]
+[list]
+[*]Low (no AVX2, or 4 threads or fewer): async off, mask 256x128, phase budgets on
+[*]Mid (AVX2, 5 to 8 threads): async on, mask 384x192, phase budgets on
+[*]High (AVX2, more than 8 threads): async on, mask 512x256, phase budgets off
+[/list]
 
 If you do not know which tier you landed in, the MCM sidebar names it, and so do the first lines of MWSE.log after launch (hardwareTier=...).
 
