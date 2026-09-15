@@ -303,6 +303,11 @@ struct PendingDisplay {
     // drain a hash lookup per occludee per frame, and keeps drain phase 1
     // read-only against the caches.
     bool isTerrain;
+    // The leaf's effective NiZBufferProperty has the depth test off, so the
+    // renderer draws it regardless of depth (x-ray vfx). Resolved with the
+    // alpha/stencil flags at deferral and carried for the same reason as
+    // isTerrain. The drain never tests such a leaf (SkipNoZTest).
+    bool zTestOff;
 };
 }  // namespace
 static std::vector<PendingDisplay> g_pendingDisplays;
@@ -347,6 +352,7 @@ enum class DrainVerdict : uint8_t {
     ViewCulled,      // rect collapsed; treat like Visible for display()
     SkipTerrain,     // bypassed TestRect (terrain descendant); call display()
     SkipTiny,        // bypassed TestRect (radius < threshold); call display()
+    SkipNoZTest,     // bypassed TestRect (depth test off); call display()
     CachedOccluded,  // g_caches.drain hit; verdict OCCLUDED (only cached verdict)
 };
 
@@ -771,21 +777,40 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
             // mode terrain is intentionally absent from the mask (the MCM
             // "Off: no terrain in the occlusion mask"). Either way, skip them.
             const bool isTerrainLeaf = isLandscapeDescendant(self, g_worldLandscapeRoot);
-            if (!isTerrainLeaf && boundRadius >= g_frame.occluderRadiusMin && boundRadius <= g_frame.occluderRadiusMax) {
+            const bool inOccluderBand =
+                boundRadius >= g_frame.occluderRadiusMin && boundRadius <= g_frame.occluderRadiusMax;
+            // The property flags are resolved once per leaf per cell through
+            // the occluder cache. Occluder candidates always need them; with
+            // the no-z-test bypass on, every non-terrain leaf does, because
+            // the depth-test flag decides whether the leaf is an occludee at
+            // all. An entry for a leaf that never rasterises is ~100 bytes
+            // with empty vectors. With the bypass off this is the pre-1.6.0
+            // path exactly (same cache traffic, same counters).
+            bool zTestOff = false;
+            if (!isTerrainLeaf && (inOccluderBand || g_frame.skipNoZTestOccludees)) {
                 auto& cacheEntry = g_caches.occluderEntry(self);
                 if (!cacheEntry.propsResolved) {
                     if (g_frame.logEnabled) ++g_caches.occluderMisses;
                     const auto p = classify::occluderProperties(self);
                     cacheEntry.alpha = p.alpha;
                     cacheEntry.stencil = p.stencil;
+                    cacheEntry.zTestOff = p.zTestOff;
                     cacheEntry.propsResolved = true;
                 } else {
                     if (g_frame.logEnabled) ++g_caches.occluderHits;
                 }
-                if (cacheEntry.alpha) {
+                zTestOff = cacheEntry.zTestOff;
+                if (!inOccluderBand) {
+                    // Occludee-only leaf: resolved for the flag, not an
+                    // occluder candidate.
+                } else if (cacheEntry.alpha) {
                     ++g_stats.skippedAlpha;
                 } else if (cacheEntry.stencil) {
                     ++g_stats.skippedStencil;
+                } else if (cacheEntry.zTestOff) {
+                    // Drawn with the depth test off: it hides nothing, so
+                    // it must not write depth into the mask either.
+                    ++g_stats.skippedZTestOccluder;
                 } else {
                     const auto& eye = camera->worldTransform.translation;
                     // rasterizedAsOccluder is incremented at the submit
@@ -801,7 +826,7 @@ static void __fastcall cullShowBody(NI::AVObject* self, void* /*edx*/, NI::Camer
                     }
                 }
             }
-            g_pendingDisplays.push_back({self, camera, didRasterise, isTerrainLeaf});
+            g_pendingDisplays.push_back({self, camera, didRasterise, isTerrainLeaf, zTestOff});
             ++g_stats.deferred;
             restoreIgnoreBits();
             return;
@@ -933,6 +958,7 @@ static void classifyDrainRange(size_t lo, size_t hi) {
 
     const unsigned int tcFrames = g_frame.temporalCoherenceFrames;
     const bool skipTerrainEnabled = g_frame.skipTerrainOccludees;
+    const bool skipNoZTest = g_frame.skipNoZTestOccludees;
     const float tinyThreshold = g_frame.occludeeMinRadius;
 
     // Spike-clip armed when budget > 0. Timer is sampled every 32nd
@@ -955,6 +981,14 @@ static void classifyDrainRange(size_t lo, size_t hi) {
                 }
                 return;
             }
+        }
+
+        // Depth test off: the renderer draws the leaf through whatever is
+        // in front of it, so there is no verdict to compute. Reads only the
+        // flag carried in p; no cache touch.
+        if (skipNoZTest && p.zTestOff) {
+            slot.verdict = DrainVerdict::SkipNoZTest;
+            continue;
         }
 
         if (skipTerrainEnabled && p.isTerrain) {
@@ -1087,8 +1121,15 @@ static void drainPendingDisplays() {
             p.shape->vTable.asAVObject->display(p.shape, p.camera);
             continue;
         }
+        if (s.verdict == DrainVerdict::SkipNoZTest) {
+            ++g_stats.skippedNoZTest;
+            ScopedUsAccumulator tt(g_stats.drainDisplayUs);
+            p.shape->vTable.asAVObject->display(p.shape, p.camera);
+            continue;
+        }
         if (s.verdict == DrainVerdict::CachedOccluded) {
             ++g_caches.drainHits;
+            if (p.zTestOff) ++g_stats.zTestOffOccluded;
             handleOccluded(p);
             continue;
         }
@@ -1115,6 +1156,7 @@ static void drainPendingDisplays() {
 
         if (s.verdict == DrainVerdict::Occluded) {
             if (s.ranTestRect) ++g_stats.queryOccluded;
+            if (p.zTestOff) ++g_stats.zTestOffOccluded;
             handleOccluded(p);
             continue;
         }
@@ -1260,6 +1302,7 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.skippedThin = 0;
         g_stats.skippedAlpha = 0;
         g_stats.skippedStencil = 0;
+        g_stats.skippedZTestOccluder = 0;
         g_stats.queryTested = 0;
         g_stats.queryOccluded = 0;
         g_stats.queryViewCulled = 0;
@@ -1268,6 +1311,8 @@ static void __fastcall CullShow_detour(NI::AVObject* self, void* edx, NI::Camera
         g_stats.deferred = 0;
         g_stats.skippedTriCount = 0;
         g_stats.skippedTesteeTiny = 0;
+        g_stats.skippedNoZTest = 0;
+        g_stats.zTestOffOccluded = 0;
         g_stats.skippedSceneGate = 0;
         g_stats.skippedTerrain = 0;
         g_stats.aggregateTerrainLands = 0;

@@ -59,8 +59,11 @@ void emitPerFrameStatsLine() {
                       << " thinSkipped=" << g_stats.skippedThin
                       << " alphaSkipped=" << g_stats.skippedAlpha
                       << " stencilSkipped=" << g_stats.skippedStencil
+                      << " zTestOccluderSkipped=" << g_stats.skippedZTestOccluder
                       << " triSkipped=" << g_stats.skippedTriCount
                       << " tinySkipped=" << g_stats.skippedTesteeTiny
+                      << " noZTestSkipped=" << g_stats.skippedNoZTest
+                      << " noZTestOccluded=" << g_stats.zTestOffOccluded
                       << " terrainSkipped=" << g_stats.skippedTerrain
                       << " aggTerrainLands=" << g_stats.aggregateTerrainLands
                       << " aggTerrainTris=" << g_stats.aggregateTerrainTris

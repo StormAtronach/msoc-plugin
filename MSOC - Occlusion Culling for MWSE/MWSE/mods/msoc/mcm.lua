@@ -328,6 +328,12 @@ local function registerModConfig()
         configKey   = "OcclusionOccludeeBoxTest",
         callback    = applyChange,
     })
+    query:createOnOffButton({
+        label       = i18n("OcclusionSkipNoZTestOccludees.label"),
+        description = i18n("OcclusionSkipNoZTestOccludees.description"),
+        configKey   = "OcclusionSkipNoZTestOccludees",
+        callback    = applyChange,
+    })
 
     ----------------------------------------------------------------
     -- Performance: where the rasterisation runs. The tier note at the top

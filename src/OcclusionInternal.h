@@ -43,14 +43,21 @@ inline uint32_t* cameraUsedPlanesMask(NI::Camera* cam) {
     return cam->usedCullingPlanesBitfield;
 }
 
-// OccluderClassify.cpp: first-of-type alpha/stencil flags from an occluder's
-// ancestor chain. Alpha and stencil meshes are excluded from the occluder pass.
-// Shared by the core rasterizer and TerrainAggregation.
+// OccluderClassify.cpp: first-of-type alpha/stencil/z-buffer flags from a
+// leaf's ancestor chain. Alpha and stencil meshes are excluded from the
+// occluder pass; a leaf drawn with the depth test off is excluded from the
+// occluder pass and from the occludee test both (zTestOff). Shared by the
+// core rasterizer and TerrainAggregation.
 namespace classify {
 
 struct OccluderPropertyFlags {
     bool alpha;
     bool stencil;
+    // The effective NiZBufferProperty disables the depth test (flag bit 0
+    // clear, or test function ALWAYS). The renderer draws such a leaf no
+    // matter what is in front of it, so a depth verdict for it is wrong by
+    // construction. No property in the chain means the test is on.
+    bool zTestOff;
 };
 OccluderPropertyFlags occluderProperties(NI::AVObject* obj);
 

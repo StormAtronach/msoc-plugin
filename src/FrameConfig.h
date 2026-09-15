@@ -35,6 +35,7 @@ struct FrameConfig {
     unsigned int occluderMaxTriangles = 4096;
     float occludeeMinRadius = 1.0f;
     bool skipTerrainOccludees = true;
+    bool skipNoZTestOccludees = true;
     bool occludeeBoxTest = false;
     int aggregateTerrain = 1;
     unsigned int terrainResolution = 1;
@@ -71,6 +72,7 @@ struct FrameConfig {
         occluderMaxTriangles = C::OcclusionOccluderMaxTriangles;
         occludeeMinRadius = static_cast<float>(C::OcclusionOccludeeMinRadius);
         skipTerrainOccludees = C::OcclusionSkipTerrainOccludees;
+        skipNoZTestOccludees = C::OcclusionSkipNoZTestOccludees;
         occludeeBoxTest = C::OcclusionOccludeeBoxTest;
         aggregateTerrain = C::OcclusionAggregateTerrain;
         terrainResolution = C::OcclusionTerrainResolution;

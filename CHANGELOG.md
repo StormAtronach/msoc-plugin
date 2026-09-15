@@ -185,6 +185,22 @@ the raster at Corners resolution. Nexus lists the previous release as 1.5.
   on every refresh in case a load rebuilt the UI under it, keeps waiting for
   the element's scene node through a loading screen, and logs when it is
   created.
+- **Fixed: x-ray effects flickered behind walls.** Geometry whose effective
+  `NiZBufferProperty` has the depth test off (Enhanced Detection's detection
+  markers, `OJ/ED/*.nif`, and a few dozen see-through window and grate inserts
+  in OAAB / TR / PC architecture) is drawn by the renderer regardless of
+  depth, so an occlusion verdict for it is wrong by construction: the marker
+  was hidden whenever its bound read as behind a wall, and flipped with the
+  hi-Z seams as the ref moved. Such leaves now bypass the occludee test and
+  are never rasterised as occluders. The flag is resolved once per leaf per
+  cell with the existing alpha/stencil classification and carried in the
+  pending-display record, so the drain pays a flag read. New stats fields
+  `noZTestSkipped=`, `zTestOccluderSkipped=` and `noZTestOccluded=` (the
+  x-ray leaves the mask hid that frame; nonzero only with the bypass off);
+  knob `OcclusionSkipNoZTestOccludees` (default on, MCM Occludees page)
+  exists only to A/B. A scan of every NIF in two installs (52k and 66k files) found
+  no actor body geometry with the test off; the two actor-folder hits resolve
+  per shape to a glow ray and an eclipse effect.
 - **Verdict caching is off by default.** `OcclusionTemporalCoherenceFrames`
   ships as 0 (was 4): a mesh the mask reported hidden is re-tested every
   frame and reappears the frame it becomes visible, instead of staying

@@ -193,7 +193,7 @@ static void buildCoarseLand(LandCacheEntry& entry, NI::Node* landNode, unsigned 
             if (!shape || !shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
             ++shapesSeen;
             const auto p = classify::occluderProperties(shape);
-            if (p.alpha || p.stencil) {
+            if (p.alpha || p.stencil || p.zTestOff) {
                 ++rejected;
                 continue;
             }
@@ -437,7 +437,7 @@ static void buildLandCacheEntry(LandCacheEntry& entry, NI::Node* landNode) {
                 if (!shape) continue;
                 if (!shape->isInstanceOfType(NI::RTTIStaticPtr::NiTriShape)) continue;
                 const auto p = classify::occluderProperties(shape);
-                if (p.alpha || p.stencil) continue;
+                if (p.alpha || p.stencil || p.zTestOff) continue;
                 appendTerrainShapeFull(entry.verts, entry.indices, static_cast<NI::TriShape*>(shape));
             }
             const unsigned int firstIdxAfter = static_cast<unsigned int>(entry.indices.size());

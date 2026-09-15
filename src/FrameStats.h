@@ -38,6 +38,7 @@ struct FrameStats {
     uint64_t skippedThin = 0;
     uint64_t skippedAlpha = 0;
     uint64_t skippedStencil = 0;
+    uint64_t skippedZTestOccluder = 0;  // depth test off: never an occluder
 
     // Occludee queries.
     uint64_t queryTested = 0;
@@ -51,6 +52,11 @@ struct FrameStats {
     uint64_t skippedSceneGate = 0;
     uint64_t skippedMenuMode = 0;
     uint64_t skippedTerrain = 0;
+    uint64_t skippedNoZTest = 0;  // depth test off: bypassed the occludee test
+    // Depth-test-off leaves that drew an OCCLUDED verdict anyway. Only
+    // nonzero with OcclusionSkipNoZTestOccludees off: it is the number of
+    // x-ray leaves the mask hid that frame, i.e. what the bypass prevents.
+    uint64_t zTestOffOccluded = 0;
 
     // Terrain aggregation.
     uint64_t aggregateTerrainLands = 0;

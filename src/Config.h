@@ -49,6 +49,9 @@ public:
     static bool OcclusionEnableInterior;
     static bool OcclusionEnableExterior;
     static bool OcclusionSkipTerrainOccludees;
+    // Leaves drawn with the depth test off bypass the occludee test. Not
+    // tier-sensitive; off only to A/B the flicker it prevents.
+    static bool OcclusionSkipNoZTestOccludees;
     // 0=Off, 1=Raster. Lua side accepts bool too (true->1, false->0), and
     // the retired value 2 (the Horizon curtain, removed in 1.6.0) reads as
     // Raster; see Config.cpp's parser.

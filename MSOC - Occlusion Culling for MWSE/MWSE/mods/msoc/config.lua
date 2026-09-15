@@ -17,6 +17,11 @@ local default_config = {
     OcclusionEnableInterior             = true,
     OcclusionEnableExterior             = true,
     OcclusionSkipTerrainOccludees       = true,
+    -- Leaves drawn with the depth test off (x-ray effects such as Enhanced
+    -- Detection's markers) are never occludees or occluders: the renderer
+    -- draws them through walls, so a depth verdict only makes them flicker.
+    -- Off only to A/B.
+    OcclusionSkipNoZTestOccludees       = true,
     -- Optional tighter occludee test (object-space box after the sphere).
     OcclusionOccludeeBoxTest            = true,
     -- 0=Off, 1=Raster (default on every tier). The cost knob is the

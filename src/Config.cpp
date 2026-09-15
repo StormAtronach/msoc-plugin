@@ -32,6 +32,7 @@ bool Configuration::OcclusionOccludeeBoxTest = false;
 bool Configuration::OcclusionEnableInterior = true;
 bool Configuration::OcclusionEnableExterior = true;
 bool Configuration::OcclusionSkipTerrainOccludees = true;
+bool Configuration::OcclusionSkipNoZTestOccludees = true;
 // 1 = Raster on every tier; the low tier pairs it with Corners resolution.
 int Configuration::OcclusionAggregateTerrain = 1;
 // 0=Full(5x5), 1=Half(3x3), 2=Corners(2x2). See currentTerrainStep().
@@ -145,6 +146,7 @@ int configure(lua_State* L) {
     readBool(L, 1, "OcclusionEnableInterior", Configuration::OcclusionEnableInterior);
     readBool(L, 1, "OcclusionEnableExterior", Configuration::OcclusionEnableExterior);
     readBool(L, 1, "OcclusionSkipTerrainOccludees", Configuration::OcclusionSkipTerrainOccludees);
+    readBool(L, 1, "OcclusionSkipNoZTestOccludees", Configuration::OcclusionSkipNoZTestOccludees);
     readBool(L, 1, "OcclusionOccludeeBoxTest", Configuration::OcclusionOccludeeBoxTest);
     readTerrainOcclusionMode(L, 1, "OcclusionAggregateTerrain", Configuration::OcclusionAggregateTerrain);
     readUInt(L, 1, "OcclusionTerrainResolution", Configuration::OcclusionTerrainResolution);

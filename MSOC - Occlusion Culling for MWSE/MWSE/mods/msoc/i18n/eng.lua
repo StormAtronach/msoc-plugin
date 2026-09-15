@@ -196,6 +196,14 @@ return {
         .. "computed once per mesh and cached. Costs an extra projection only on "
         .. "occludees the sphere left visible.",
 
+    ["OcclusionSkipNoZTestOccludees.label"] = "Never cull depth-test-off geometry",
+    ["OcclusionSkipNoZTestOccludees.description"] = "Geometry whose NiZBufferProperty "
+        .. "disables the depth test is drawn through walls by the renderer: x-ray "
+        .. "effects such as Enhanced Detection's markers, see-through window and "
+        .. "grate inserts. Enabled: such shapes bypass the visibility test and are "
+        .. "never used as occluders. Disabled: they are tested like anything else "
+        .. "and flicker behind occluders. Disable only to A/B.",
+
     -- ----------------------------------------------------------------
     -- Performance page
     -- ----------------------------------------------------------------

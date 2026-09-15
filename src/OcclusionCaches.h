@@ -101,6 +101,7 @@ struct OccluderCacheEntry {
     bool propsResolved = false;
     bool alpha = false;
     bool stencil = false;
+    bool zTestOff = false;  // depth test off: never an occluder, never an occludee
 
     bool geomResolved = false;
     std::vector<float> worldVerts;
