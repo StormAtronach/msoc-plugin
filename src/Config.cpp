@@ -44,7 +44,7 @@ bool Configuration::OcclusionAsyncOccluders = true;
 unsigned int Configuration::OcclusionThreadpoolThreadCount = 0;
 unsigned int Configuration::OcclusionThreadpoolBinsW = 4;
 unsigned int Configuration::OcclusionThreadpoolBinsH = 2;
-unsigned int Configuration::OcclusionTemporalCoherenceFrames = 4;
+unsigned int Configuration::OcclusionTemporalCoherenceFrames = 0;  // config.lua ships 0 too
 
 // installPatches() latches these into kMsocWidth/Height, and main.lua calls
 // it after configure(), so what lands here is whatever config.lua pushed.

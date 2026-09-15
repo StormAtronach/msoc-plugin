@@ -1,34 +1,58 @@
 return {
     -- ----------------------------------------------------------------
-    -- Shared sidebar
+    -- Template + shared sidebar
     -- ----------------------------------------------------------------
-    ["sidebar"] = "Masked Software Occlusion Culling\n\n"
-        .. "Intel's software occluder-rasterisation pass, wedged between the engine's "
-        .. "frustum test and its Display call. Large opaque meshes are rasterised into "
-        .. "a low-resolution depth buffer; every other mesh is queried against that "
-        .. "buffer and culled when fully hidden.\n\n"
-        .. "All distance and size values are in Morrowind world units (1 unit ~ 1.4 cm). "
-        .. "Changes take effect on the next frame; no restart required.",
+    ["template.label"] = "MSOC - Occlusion Culling for MWSE",
+
+    ["sidebar.title"] = "MSOC %{version}",
+    ["sidebar.hardware"] = "Hardware tier: %{tier} (%{simd}, %{threads} threads)",
+    ["sidebar.hardware.unknown"] = "Hardware tier: unknown (msoc.dll not loaded)",
+    ["sidebar.body"] = "Software occlusion culling. Every frame, large opaque meshes are "
+        .. "drawn into a small depth mask and everything else is tested against it; "
+        .. "what is fully hidden is never sent to the GPU.\n\n"
+        .. "Defaults are chosen for your hardware tier. Hover a setting for what it "
+        .. "does. Distances and sizes are in world units (1 unit is about 1.4 cm). "
+        .. "Changes apply on the next frame unless a setting says otherwise.",
+    ["sidebar.link.nexus"]  = "Nexus Mods page",
+    ["sidebar.link.github"] = "Source code and issues (GitHub)",
 
     -- ----------------------------------------------------------------
     -- Page labels
     -- ----------------------------------------------------------------
-    ["page.main"]       = "Main",
-    ["page.occluder"]   = "Occluder",
-    ["page.occludee"]   = "Occludee",
-    ["page.threadpool"] = "Threadpool",
-    ["page.debug"]      = "Debug",
+    ["page.general"]     = "General",
+    ["page.occluder"]    = "Occluders",
+    ["page.occludee"]    = "Occludees",
+    ["page.performance"] = "Performance",
+    ["page.debug"]       = "Debug",
 
     -- ----------------------------------------------------------------
     -- Category labels
     -- ----------------------------------------------------------------
-    ["category.interior"] = "Interior",
-    ["category.exterior"] = "Exterior",
+    ["category.culling"]  = "Occlusion culling",
+    ["category.terrain"]  = "Terrain",
+    ["category.cache"]    = "Verdict cache",
+    ["category.interior"] = "Interior cells",
+    ["category.exterior"] = "Exterior cells",
+    ["category.shared"]   = "All cells",
+    ["category.query"]    = "Visibility test",
+    ["category.async"]    = "Background rasterisation",
+    ["category.overlay"]  = "Mask overlay",
     ["category.tinting"]  = "Tinting",
     ["category.logging"]  = "Logging",
+    ["category.watchdog"] = "Freeze forensics",
 
     -- ----------------------------------------------------------------
-    -- Main page
+    -- Page notes
+    -- ----------------------------------------------------------------
+    ["performance.info"] = "Your hardware tier is \"%{tier}\". The values below were picked for it "
+        .. "and re-applied on each plugin update. Two more tier-set knobs live only in "
+        .. "MWSE/config/msoc.json: the mask size (%{width}x%{height}) and the per-phase budgets "
+        .. "(rasterize %{rasterBudget} us, classify %{classifyBudget} us; 0 = unlimited).",
+    ["debug.info"] = "Everything on this page costs frame time or disk. Leave it off unless "
+        .. "you are checking what the culler does or reporting a problem.",
+
+    -- ----------------------------------------------------------------
+    -- General page
     -- ----------------------------------------------------------------
     ["EnableMSOC.label"] = "Enable occlusion culling",
     ["EnableMSOC.description"] = "Master switch for the MSOC pass. When off, the scene-graph "
@@ -46,28 +70,14 @@ return {
         .. "(Balmora, Vivec exterior) benefit most. Sparse wilderness sees little gain "
         .. "and can be disabled here without affecting interiors.",
 
-    ["OcclusionSkipTerrainOccludees.label"] = "Skip terrain occludee queries",
-    ["OcclusionSkipTerrainOccludees.description"] = "Landscape patches (25 verts / 32 tris, "
-        .. "4x4 per cell) sit under the camera and are visible from nearly every "
-        .. "viewpoint. Enabled: they bypass the visibility test and render unconditionally, "
-        .. "saving one TestRect call per patch per frame. Disable only to A/B test.",
-
-    ["OcclusionOccludeeBoxTest.label"] = "Tighter box occludee test",
-    ["OcclusionOccludeeBoxTest.description"] = "After the bounding-sphere test "
-        .. "reports an occludee visible, re-test its tighter object-space bounding "
-        .. "box. The sphere is conservative for long or flat meshes, so the box can "
-        .. "catch occlusions the sphere misses, raising the cull rate. The box is "
-        .. "computed once per mesh and cached. Costs an extra projection only on "
-        .. "occludees the sphere left visible.",
-
     ["OcclusionAggregateTerrain.label"] = "Terrain occluder mode",
     ["OcclusionAggregateTerrain.description"] = "Off: no terrain in the occlusion mask "
         .. "(lowest CPU, lowest cull rate). "
         .. "Raster (default): rasterizes the loaded terrain into the mask so hills hide "
-        .. "what stands behind them. With Async Occluders enabled the threadpool does the "
-        .. "work off the main thread; with it off, the Terrain resolution setting below is "
-        .. "the cost knob (Corners is about a fifth of Half's time and occludes about as "
-        .. "much). The low hardware tier defaults to Raster at Corners.",
+        .. "what stands behind them. With Background rasterisation enabled the threadpool "
+        .. "does the work off the main thread; with it off, the Terrain occluder resolution "
+        .. "below is the cost knob (Corners is about a fifth of Half's time and occludes "
+        .. "about as much). The low hardware tier defaults to Raster at Corners.",
     ["OcclusionAggregateTerrain.option.0"] = "Off",
     ["OcclusionAggregateTerrain.option.1"] = "Raster",
 
@@ -80,63 +90,70 @@ return {
     ["OcclusionTerrainResolution.option.1"] = "Half (3x3, 8 tris/subcell)",
     ["OcclusionTerrainResolution.option.2"] = "Corners (2x2, 2 tris/subcell)",
 
-    ["OcclusionTemporalCoherenceFrames.label"] = "Temporal coherence frames",
-    ["OcclusionTemporalCoherenceFrames.description"] = "Frames to reuse a deferred shape's "
-        .. "visibility verdict before re-querying. 0 disables the cache; higher values skip "
-        .. "more TestRect calls at the cost of up to N frames of latency on "
-        .. "occluder->visible transitions. Entries invalidate on movement, so only static "
-        .. "geometry benefits.",
+    ["OcclusionSkipTerrainOccludees.label"] = "Skip terrain occludee queries",
+    ["OcclusionSkipTerrainOccludees.description"] = "Landscape patches (25 verts / 32 tris, "
+        .. "4x4 per cell) sit under the camera and are visible from nearly every "
+        .. "viewpoint. Enabled: they bypass the visibility test and render unconditionally, "
+        .. "saving one TestRect call per patch per frame. Disable only to A/B test.",
+
+    ["OcclusionTemporalCoherenceFrames.label"] = "Reuse occluded verdicts (frames)",
+    ["OcclusionTemporalCoherenceFrames.description"] = "Frames to keep treating a mesh as "
+        .. "hidden after the mask said so, without re-testing it. 0 (default) re-tests "
+        .. "every frame, so a mesh reappears the frame it becomes visible. Higher values "
+        .. "skip that many tests per mesh but can leave a mesh missing for up to that many "
+        .. "frames after the camera moves past its occluder. Entries invalidate when the "
+        .. "mesh itself moves, so only static geometry benefits.",
 
     -- ----------------------------------------------------------------
     -- Occluder page
     -- ----------------------------------------------------------------
-    ["OcclusionOccluderRadiusMinInterior.label"] = "Min radius (interior)",
+    ["OcclusionOccluderRadiusMinInterior.label"] = "Min radius",
     ["OcclusionOccluderRadiusMinInterior.description"] = "Minimum world-bound sphere radius "
         .. "for a mesh to qualify as an occluder in interior cells. Interiors usually want "
         .. "this lower so pillars, crates, and larger furniture contribute to occlusion.",
 
-    ["OcclusionOccluderRadiusMaxInterior.label"] = "Max radius (interior)",
+    ["OcclusionOccluderRadiusMaxInterior.label"] = "Max radius",
     ["OcclusionOccluderRadiusMaxInterior.description"] = "Maximum world-bound sphere radius "
         .. "for a mesh to qualify in interior cells. Rooms are bounded; large cell-hull "
         .. "meshes above this usually cover most of the view and hurt more than they help.",
 
-    ["OcclusionOccluderMinDimensionInterior.label"] = "Min thin-axis dimension (interior)",
+    ["OcclusionOccluderMinDimensionInterior.label"] = "Min thin-axis dimension",
     ["OcclusionOccluderMinDimensionInterior.description"] = "Reject pencil-shaped meshes in "
         .. "interiors: a mesh is rejected if two or more world-AABB axes are shorter than "
         .. "this. Walls / floors (thin on one axis) still qualify.",
 
-    ["OcclusionInsideOccluderMarginInterior.label"] = "Inside-occluder margin (interior)",
+    ["OcclusionInsideOccluderMarginInterior.label"] = "Inside-occluder margin",
     ["OcclusionInsideOccluderMarginInterior.description"] = "Slack added to an occluder's "
         .. "world AABB when testing whether the camera sits inside. If within this margin "
         .. "of the tight AABB, the mesh is skipped for the frame. Interiors may want this "
         .. "tighter because the camera clips architecture more often.",
 
-    ["OcclusionOccluderRadiusMinExterior.label"] = "Min radius (exterior)",
+    ["OcclusionOccluderRadiusMinExterior.label"] = "Min radius",
     ["OcclusionOccluderRadiusMinExterior.description"] = "Minimum world-bound sphere radius "
         .. "for a mesh to qualify as an occluder in exterior cells. Exteriors usually want "
         .. "this higher to skip clutter; only building-scale meshes contribute meaningfully.",
 
-    ["OcclusionOccluderRadiusMaxExterior.label"] = "Max radius (exterior)",
+    ["OcclusionOccluderRadiusMaxExterior.label"] = "Max radius",
     ["OcclusionOccluderRadiusMaxExterior.description"] = "Maximum world-bound sphere radius "
         .. "for a mesh to qualify in exterior cells. Meshes above this (terrain patches, "
         .. "skydomes, whole-cell hulls) are skipped.",
 
-    ["OcclusionOccluderMinDimensionExterior.label"] = "Min thin-axis dimension (exterior)",
+    ["OcclusionOccluderMinDimensionExterior.label"] = "Min thin-axis dimension",
     ["OcclusionOccluderMinDimensionExterior.description"] = "Reject pencil-shaped meshes in "
         .. "exteriors: flagpoles, railings, antennae. Walls / floors (thin on one axis) "
         .. "still qualify.",
 
-    ["OcclusionInsideOccluderMarginExterior.label"] = "Inside-occluder margin (exterior)",
+    ["OcclusionInsideOccluderMarginExterior.label"] = "Inside-occluder margin",
     ["OcclusionInsideOccluderMarginExterior.description"] = "Slack added to an occluder's "
         .. "world AABB when testing whether the camera sits inside, evaluated in exterior "
         .. "cells.",
 
-    ["OcclusionOccluderMaxTriangles.label"] = "Max triangles",
+    ["OcclusionOccluderMaxTriangles.label"] = "Max triangles per occluder",
     ["OcclusionOccluderMaxTriangles.description"] = "Upper bound on triangle count for any "
         .. "occluder, regardless of scene type. Rasterisation cost scales linearly with "
         .. "triangles, so very dense meshes cost more than they pay back in occlusion.",
 
-    ["OcclusionOccluderFrontToBack.label"] = "Front-to-back occluders",
+    ["OcclusionOccluderFrontToBack.label"] = "Submit occluders front to back",
     ["OcclusionOccluderFrontToBack.description"] = "Submit occluders sorted nearest-first so the "
         .. "rasteriser can reject the parts of far occluders already hidden by near ones, cutting "
         .. "raster work in scenes where occluders overlap in depth. The catch: occluders can only "
@@ -160,46 +177,54 @@ return {
     -- ----------------------------------------------------------------
     -- Occludee page
     -- ----------------------------------------------------------------
-    ["OcclusionDepthSlackWorldUnits.label"] = "Depth slack (world units)",
+    ["OcclusionDepthSlackWorldUnits.label"] = "Depth slack",
     ["OcclusionDepthSlackWorldUnits.description"] = "Extra world-space distance added to a "
         .. "shape's near-surface estimate before TestRect. Biases toward visible; prevents "
         .. "flicker when a mesh sits nearly flush with an occluder. Raise if you see shapes "
         .. "popping behind their own walls.",
 
-    ["OcclusionOccludeeMinRadius.label"] = "Min radius",
+    ["OcclusionOccludeeMinRadius.label"] = "Min radius to test",
     ["OcclusionOccludeeMinRadius.description"] = "Shapes below this world-bound sphere radius "
         .. "skip the visibility test entirely. Footprints too small for the hierarchical "
         .. "depth buffer to decide reliably, and the test cost exceeds any cull benefit.",
 
+    ["OcclusionOccludeeBoxTest.label"] = "Tighter box test after the sphere",
+    ["OcclusionOccludeeBoxTest.description"] = "After the bounding-sphere test "
+        .. "reports an occludee visible, re-test its tighter object-space bounding "
+        .. "box. The sphere is conservative for long or flat meshes, so the box can "
+        .. "catch occlusions the sphere misses, raising the cull rate. The box is "
+        .. "computed once per mesh and cached. Costs an extra projection only on "
+        .. "occludees the sphere left visible.",
+
     -- ----------------------------------------------------------------
-    -- Threadpool page
+    -- Performance page
     -- ----------------------------------------------------------------
-    ["OcclusionAsyncOccluders.label"] = "Async occluder rasterisation",
+    ["OcclusionAsyncOccluders.label"] = "Rasterise occluders on worker threads",
     ["OcclusionAsyncOccluders.description"] = "Submits occluders to Intel's CullingThreadpool "
         .. "for parallel rasterisation on worker threads; main thread continues scene-graph "
         .. "traversal while occluders are drawn. A Flush barrier before the drain guarantees "
         .. "the depth buffer is complete. Enable when rasterizeUs > drainUs in MSOC.log; "
         .. "disable on low core counts.",
 
-    ["OcclusionThreadpoolThreadCount.label"] = "Worker count",
+    ["OcclusionThreadpoolThreadCount.label"] = "Worker threads (0 = auto)",
     ["OcclusionThreadpoolThreadCount.description"] = "Worker threads used to rasterise "
-        .. "occluders (when Async is on). 0 = auto (min(hardware_concurrency - 2, "
+        .. "occluders (when background rasterisation is on). 0 = auto (min(hardware_concurrency - 2, "
         .. "BinsW*BinsH / 2), floor 1). Manual values must not exceed BinsW*BinsH; the MCM "
         .. "clamps on every change.",
 
-    ["OcclusionThreadpoolBinsW.label"] = "Bins (width)",
+    ["OcclusionThreadpoolBinsW.label"] = "Screen bins across",
     ["OcclusionThreadpoolBinsW.description"] = "The screen is divided into BinsW x BinsH "
         .. "rectangular bins for load balancing across worker threads. Total bins should be "
         .. "at least equal to the worker count.",
 
-    ["OcclusionThreadpoolBinsH.label"] = "Bins (height)",
+    ["OcclusionThreadpoolBinsH.label"] = "Screen bins down",
     ["OcclusionThreadpoolBinsH.description"] = "The screen is divided into BinsW x BinsH "
         .. "rectangular bins for load balancing across worker threads.",
 
     -- ----------------------------------------------------------------
     -- Debug page
     -- ----------------------------------------------------------------
-    ["DebugMaskOverlay.label"] = "Show occlusion mask overlay",
+    ["DebugMaskOverlay.label"] = "Show the occlusion mask",
     ["DebugMaskOverlay.description"] = "Draws the occlusion depth mask itself in the top-right corner of the HUD, the way MGE-XE can show its shadow layers. Brighter means nearer: black is empty mask, and every lit region is geometry that was rasterised as an occluder. Use it to see what the culler is actually working from - combined with the occluder tint below, bright patches in the corner should line up with the tinted meshes in the world. Costs one mask readback per frame while it is on and nothing at all while it is off.",
 
     ["DebugOcclusionTintOccluder.label"] = "Tint occluders yellow",
@@ -232,12 +257,14 @@ return {
         .. "and the rasterize/classify/aggTerrain timings + cache-miss counts. The 300-frame "
         .. "aggregate sample almost never lands on a cross, so use this to profile crossings.",
 
-    ["OcclusionForensicsWatchdog.label"] = "Freeze-forensics watchdog",
+    ["OcclusionForensicsWatchdog.label"] = "Freeze-forensics watchdog (restart to apply)",
     ["OcclusionForensicsWatchdog.description"] = "Spawns a background thread that polls the "
         .. "MSOC pipeline's checkpoints every 250 ms and overwrites MSOC.forensics.txt next to "
         .. "MWSE.log. If the game hard-freezes and Windows kills it, the file shows which "
         .. "stage the main thread was stuck in, the recursion depth, and the time since the "
-        .. "last clean frame. Diagnostic-only — leave off unless you are reproducing a freeze. "
-        .. "RESTART REQUIRED: the plugin reads this once while starting up, so a change made "
-        .. "here is saved to msoc.json and takes effect the next time you launch.",
+        .. "last clean frame. Diagnostic-only; leave off unless you are reproducing a freeze. "
+        .. "The plugin reads this once while starting up, so a change here is saved to "
+        .. "msoc.json and takes effect the next time you launch.",
+    ["OcclusionForensicsWatchdog.restart"] = "MSOC reads the freeze-forensics setting at startup. "
+        .. "The change is saved and takes effect the next time you launch Morrowind.",
 }

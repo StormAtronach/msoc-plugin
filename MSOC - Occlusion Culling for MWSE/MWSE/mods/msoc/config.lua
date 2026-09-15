@@ -60,7 +60,11 @@ local default_config = {
     OcclusionThreadpoolThreadCount      = 0,  -- 0 = auto-pick
     OcclusionThreadpoolBinsW            = 4,
     OcclusionThreadpoolBinsH            = 2,
-    OcclusionTemporalCoherenceFrames    = 4,
+    -- Frames to keep an OCCLUDED verdict without re-testing. 0 (the default
+    -- since 1.6.0, was 4): a mesh reappears the frame it becomes visible.
+    -- Any N > 0 saves N tests per hidden mesh but can leave it missing for
+    -- up to N frames after the camera clears its occluder.
+    OcclusionTemporalCoherenceFrames    = 0,
 
     -- Mask resolution. Applied at launch, changed on restart: main.lua
     -- pushes this table across before calling msoc.install(), which latches
@@ -265,10 +269,13 @@ local kRetiredKeys = {
 -- then it sticks until the next bump.
 --   1.3.0: enable the occludee box test, widen the exterior occluder max
 --          radius (4096 -> 7040), lower depth slack (128 -> 64).
+--   1.6.0: temporal coherence off (4 -> 0) so hidden meshes reappear the
+--          frame they become visible.
 local kRetunedKeys = {
     "OcclusionOccludeeBoxTest",
     "OcclusionOccluderRadiusMaxExterior",
     "OcclusionDepthSlackWorldUnits",
+    "OcclusionTemporalCoherenceFrames",
 }
 
 local pluginVersion = mscPlugin and mscPlugin.version or "unknown"

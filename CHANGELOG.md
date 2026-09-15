@@ -122,6 +122,19 @@ the raster at Corners resolution. Nexus lists the previous release as 1.5.
   enqueue. It therefore read a few hundred microseconds on frames that cost a
   millisecond, and predictive skip never engaged under async however dense the
   scene got. The average now includes the flush stall.
+- **Verdict caching is off by default.** `OcclusionTemporalCoherenceFrames`
+  ships as 0 (was 4): a mesh the mask reported hidden is re-tested every
+  frame and reappears the frame it becomes visible, instead of staying
+  missing for up to four frames after the camera clears its occluder. The
+  saved value is re-applied on this update; set it back in the MCM if the
+  tests are worth more to you than the pop-in.
+- **The MCM is reorganised.** Five pages, General / Occluders / Occludees /
+  Performance / Debug, with settings grouped under headed categories; the
+  sidebar shows the plugin version, the detected hardware tier and links to
+  the Nexus page and the source, and swaps to a setting's description on
+  hover. The Performance page states what the tier auto-picked, including
+  the two knobs that live only in `msoc.json` (mask size, phase budgets).
+  The freeze-forensics toggle now warns that it needs a restart.
 - **AVX-512 is no longer built.** Intel's `USE_AVX512` has always defaulted to
   0, which compiled that translation unit into a stub returning null, so the
   runtime never selected it. 1.6.0 stops compiling the file and preprocesses out

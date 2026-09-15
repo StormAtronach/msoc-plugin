@@ -7,6 +7,9 @@ local msoc = include("msoc")
 -- back to the eng.lua key whenever a translated key is missing.
 local i18n = mwse.loadTranslations("msoc")
 
+local NEXUS_URL  = "https://www.nexusmods.com/morrowind/mods/58823"
+local GITHUB_URL = "https://github.com/StormAtronach/msoc-plugin"
+
 -- Runtime sync: whenever a control commits a change, push the whole
 -- Lua config table across the FFI boundary so the native statics
 -- (msoc::Configuration::Foo) match the edited Lua table the same
@@ -52,25 +55,86 @@ local function applyChangeClamped()
     cfg.syncToNative(msoc)
 end
 
---- Center an MCM info/hyperlink widget horizontally.
+----------------------------------------------------------------
+-- Sidebar
+----------------------------------------------------------------
+
+--- Centre an info/hyperlink's text.
 --- @param self mwseMCMInfo|mwseMCMHyperlink
-local function center(self)
-    self.elements.info.absolutePosAlignX = 0.5
+local function centred(self)
+    self.elements.info.justifyText = "center"
 end
 
---- Shared sidebar. Mirrors Take That's per-page credit block.
---- @param container mwseMCMSideBarPage
-local function createSidebar(container)
-    container.sidebar:createInfo({
-        text = i18n("sidebar"),
-        postCreate = center,
+--- Centre and paint in the menu header colour: the sidebar title.
+--- @param self mwseMCMInfo
+local function heading(self)
+    self.elements.info.justifyText = "center"
+    self.elements.info.color = tes3ui.getPalette(tes3.palette.headerColor)
+end
+
+--- "Hardware tier: High (AVX2, 20 threads)", from the plugin's own probe.
+local function hardwareLine()
+    if not msoc or not msoc.hardwareTier then
+        return i18n("sidebar.hardware.unknown")
+    end
+    local tier = tostring(msoc.hardwareTier)
+    tier = tier:sub(1, 1):upper() .. tier:sub(2)
+    return i18n("sidebar.hardware", {
+        tier = tier,
+        simd = tostring(msoc.simdLevel or "?"),
+        threads = tostring(msoc.cpuThreads or "?"),
     })
 end
 
+--- Shared sidebar: version, detected hardware, a two-line summary, links.
+--- Hovering any setting swaps this for that setting's description.
+--- @param page mwseMCMSideBarPage
+local function createSidebar(page)
+    local sidebar = page.sidebar
+    sidebar:createInfo({
+        text = i18n("sidebar.title", { version = tostring(msoc and msoc.version or "?") }),
+        postCreate = heading,
+    })
+    sidebar:createInfo({
+        text = hardwareLine(),
+        postCreate = centred,
+    })
+    sidebar:createInfo({ text = i18n("sidebar.body") })
+    sidebar:createHyperlink({
+        text = i18n("sidebar.link.nexus"),
+        url = NEXUS_URL,
+        postCreate = centred,
+    })
+    sidebar:createHyperlink({
+        text = i18n("sidebar.link.github"),
+        url = GITHUB_URL,
+        postCreate = centred,
+    })
+end
+
+--- A side-bar page with the shared sidebar already attached.
+--- @param template mwseMCMTemplate
+--- @param labelKey string
+--- @return mwseMCMSideBarPage
+local function createPage(template, labelKey)
+    local page = template:createSideBarPage({
+        label     = i18n(labelKey),
+        showReset = true,
+    }) --[[@as mwseMCMSideBarPage]]
+    createSidebar(page)
+    return page
+end
+
+----------------------------------------------------------------
+-- Pages
+----------------------------------------------------------------
+
 local function registerModConfig()
-    -- "MSOC" is the brand name and intentionally not localised.
+    -- "MSOC" is the brand name and intentionally not localised. `name` is
+    -- the entry in the mod list; `label` is the header above the pages.
     local template = mwse.mcm.createTemplate({
         name               = "MSOC",
+        label              = i18n("template.label"),
         config             = cfg.config,
         defaultConfig      = cfg.default,
         showDefaultSetting = true,
@@ -79,39 +143,27 @@ local function registerModConfig()
     template:saveOnClose(cfg.config.confPath, cfg.config)
 
     ----------------------------------------------------------------
-    -- Main
+    -- General: the switches, terrain, and the verdict cache.
     ----------------------------------------------------------------
-    local main = template:createSideBarPage({
-        label     = i18n("page.main"),
-        showReset = true,
-    }) --[[@as mwseMCMSideBarPage]]
-    createSidebar(main)
+    local general = createPage(template, "page.general")
 
-    main:createOnOffButton({
+    local culling = general:createCategory({ label = i18n("category.culling") })
+    culling:createOnOffButton({
         label       = i18n("EnableMSOC.label"),
         description = i18n("EnableMSOC.description"),
         configKey   = "EnableMSOC",
         callback    = applyChange,
     })
-
-    main:createOnOffButton({
+    culling:createOnOffButton({
         label       = i18n("OcclusionEnableInterior.label"),
         description = i18n("OcclusionEnableInterior.description"),
         configKey   = "OcclusionEnableInterior",
         callback    = applyChange,
     })
-
-    main:createOnOffButton({
+    culling:createOnOffButton({
         label       = i18n("OcclusionEnableExterior.label"),
         description = i18n("OcclusionEnableExterior.description"),
         configKey   = "OcclusionEnableExterior",
-        callback    = applyChange,
-    })
-
-    main:createOnOffButton({
-        label       = i18n("OcclusionSkipTerrainOccludees.label"),
-        description = i18n("OcclusionSkipTerrainOccludees.description"),
-        configKey   = "OcclusionSkipTerrainOccludees",
         callback    = applyChange,
     })
 
@@ -119,7 +171,8 @@ local function registerModConfig()
     -- subcell triangle mesh to MOC. The cost knob is the resolution
     -- dropdown below it. (A "Horizon" silhouette-curtain mode was removed
     -- in 1.6.0: it cost more than the raster and occluded less.)
-    main:createDropdown({
+    local terrain = general:createCategory({ label = i18n("category.terrain") })
+    terrain:createDropdown({
         label       = i18n("OcclusionAggregateTerrain.label"),
         description = i18n("OcclusionAggregateTerrain.description"),
         options     = {
@@ -129,8 +182,7 @@ local function registerModConfig()
         configKey   = "OcclusionAggregateTerrain",
         callback    = applyChange,
     })
-
-    main:createDropdown({
+    terrain:createDropdown({
         label       = i18n("OcclusionTerrainResolution.label"),
         description = i18n("OcclusionTerrainResolution.description"),
         options     = {
@@ -141,13 +193,20 @@ local function registerModConfig()
         configKey   = "OcclusionTerrainResolution",
         callback    = applyChange,
     })
+    terrain:createOnOffButton({
+        label       = i18n("OcclusionSkipTerrainOccludees.label"),
+        description = i18n("OcclusionSkipTerrainOccludees.description"),
+        configKey   = "OcclusionSkipTerrainOccludees",
+        callback    = applyChange,
+    })
 
     -- The "Cull occluded lights" toggle and its hysteresis slider were
     -- exposed in 1.0.0, removed from the MCM in 1.1.0 after the feature
     -- tested net-negative (~12% FPS regression), and removed outright in
     -- 1.6.0 along with the 0x6bb7d4 hook and the per-light cache.
 
-    main:createSlider({
+    local cache = general:createCategory({ label = i18n("category.cache") })
+    cache:createSlider({
         label       = i18n("OcclusionTemporalCoherenceFrames.label"),
         description = i18n("OcclusionTemporalCoherenceFrames.description"),
         min = 0, max = 10, step = 1, jump = 2,
@@ -156,14 +215,10 @@ local function registerModConfig()
     })
 
     ----------------------------------------------------------------
-    -- Occluder selection (split per scene type: interiors favour
-    -- smaller occluders, exteriors skip clutter).
+    -- Occluders: what gets drawn into the mask. Split per scene type
+    -- (interiors favour smaller occluders, exteriors skip clutter).
     ----------------------------------------------------------------
-    local occluder = template:createSideBarPage({
-        label     = i18n("page.occluder"),
-        showReset = true,
-    }) --[[@as mwseMCMSideBarPage]]
-    createSidebar(occluder)
+    local occluder = createPage(template, "page.occluder")
 
     local interiors = occluder:createCategory({ label = i18n("category.interior") })
     interiors:createSlider({
@@ -226,22 +281,21 @@ local function registerModConfig()
     })
 
     -- Shared (cost, not scene-dependent).
-    occluder:createSlider({
+    local shared = occluder:createCategory({ label = i18n("category.shared") })
+    shared:createSlider({
         label       = i18n("OcclusionOccluderMaxTriangles.label"),
         description = i18n("OcclusionOccluderMaxTriangles.description"),
         min = 64, max = 16384, step = 64, jump = 512,
         configKey   = "OcclusionOccluderMaxTriangles",
         callback    = applyChange,
     })
-
-    occluder:createOnOffButton({
+    shared:createOnOffButton({
         label       = i18n("OcclusionOccluderFrontToBack.label"),
         description = i18n("OcclusionOccluderFrontToBack.description"),
         configKey   = "OcclusionOccluderFrontToBack",
         callback    = applyChange,
     })
-
-    occluder:createOnOffButton({
+    shared:createOnOffButton({
         label       = i18n("OcclusionOccluderCCWOnly.label"),
         description = i18n("OcclusionOccluderCCWOnly.description"),
         configKey   = "OcclusionOccluderCCWOnly",
@@ -249,31 +303,26 @@ local function registerModConfig()
     })
 
     ----------------------------------------------------------------
-    -- Occludee / query
+    -- Occludees: how the mask is queried.
     ----------------------------------------------------------------
-    local occludee = template:createSideBarPage({
-        label     = i18n("page.occludee"),
-        showReset = true,
-    }) --[[@as mwseMCMSideBarPage]]
-    createSidebar(occludee)
+    local occludee = createPage(template, "page.occludee")
 
-    occludee:createSlider({
+    local query = occludee:createCategory({ label = i18n("category.query") })
+    query:createSlider({
         label       = i18n("OcclusionDepthSlackWorldUnits.label"),
         description = i18n("OcclusionDepthSlackWorldUnits.description"),
         min = 0, max = 1024, step = 8, jump = 32,
         configKey   = "OcclusionDepthSlackWorldUnits",
         callback    = applyChange,
     })
-
-    occludee:createSlider({
+    query:createSlider({
         label       = i18n("OcclusionOccludeeMinRadius.label"),
         description = i18n("OcclusionOccludeeMinRadius.description"),
         min = 0, max = 256, step = 1, jump = 16,
         configKey   = "OcclusionOccludeeMinRadius",
         callback    = applyChange,
     })
-
-    occludee:createOnOffButton({
+    query:createOnOffButton({
         label       = i18n("OcclusionOccludeeBoxTest.label"),
         description = i18n("OcclusionOccludeeBoxTest.description"),
         configKey   = "OcclusionOccludeeBoxTest",
@@ -281,22 +330,30 @@ local function registerModConfig()
     })
 
     ----------------------------------------------------------------
-    -- Async threadpool
+    -- Performance: where the rasterisation runs. The tier note at the top
+    -- tells the user what was auto-picked, including the two knobs that
+    -- live only in msoc.json (mask size, phase budgets).
     ----------------------------------------------------------------
-    local threadpool = template:createSideBarPage({
-        label     = i18n("page.threadpool"),
-        showReset = true,
-    }) --[[@as mwseMCMSideBarPage]]
-    createSidebar(threadpool)
+    local performance = createPage(template, "page.performance")
 
-    threadpool:createOnOffButton({
+    performance:createInfo({
+        text = i18n("performance.info", {
+            tier = tostring(msoc and msoc.hardwareTier or "?"),
+            width = tostring(cfg.config.OcclusionMaskWidth),
+            height = tostring(cfg.config.OcclusionMaskHeight),
+            rasterBudget = tostring(cfg.config.OcclusionRasterizeBudgetUs),
+            classifyBudget = tostring(cfg.config.OcclusionClassifyBudgetUs),
+        }),
+    })
+
+    local async = performance:createCategory({ label = i18n("category.async") })
+    async:createOnOffButton({
         label       = i18n("OcclusionAsyncOccluders.label"),
         description = i18n("OcclusionAsyncOccluders.description"),
         configKey   = "OcclusionAsyncOccluders",
         callback    = applyChange,
     })
-
-    threadpool:createSlider({
+    async:createSlider({
         label       = i18n("OcclusionThreadpoolThreadCount.label"),
         description = i18n("OcclusionThreadpoolThreadCount.description"),
         min = 0, max = 16, step = 1, jump = 2,
@@ -304,16 +361,14 @@ local function registerModConfig()
         postCreate  = captureThreadCountSlider,
         callback    = applyChangeClamped,
     })
-
-    threadpool:createSlider({
+    async:createSlider({
         label       = i18n("OcclusionThreadpoolBinsW.label"),
         description = i18n("OcclusionThreadpoolBinsW.description"),
         min = 1, max = 8, step = 1, jump = 2,
         configKey   = "OcclusionThreadpoolBinsW",
         callback    = applyChangeClamped,
     })
-
-    threadpool:createSlider({
+    async:createSlider({
         label       = i18n("OcclusionThreadpoolBinsH.label"),
         description = i18n("OcclusionThreadpoolBinsH.description"),
         min = 1, max = 8, step = 1, jump = 2,
@@ -322,18 +377,17 @@ local function registerModConfig()
     })
 
     ----------------------------------------------------------------
-    -- Debug tinting / logging
+    -- Debug: overlay, tints, logging, the freeze watchdog.
     ----------------------------------------------------------------
-    local debugPage = template:createSideBarPage({
-        label     = i18n("page.debug"),
-        showReset = true,
-    }) --[[@as mwseMCMSideBarPage]]
-    createSidebar(debugPage)
+    local debugPage = createPage(template, "page.debug")
+
+    debugPage:createInfo({ text = i18n("debug.info") })
 
     -- The mask overlay is not a tint: it draws the depth mask itself in the
-    -- corner of the HUD rather than recolouring scene geometry, so it sits
-    -- above the tinting category rather than inside it.
-    debugPage:createOnOffButton({
+    -- corner of the HUD rather than recolouring scene geometry, so it gets
+    -- its own category above the tints.
+    local overlay = debugPage:createCategory({ label = i18n("category.overlay") })
+    overlay:createOnOffButton({
         label       = i18n("DebugMaskOverlay.label"),
         description = i18n("DebugMaskOverlay.description"),
         configKey   = "DebugMaskOverlay",
@@ -382,12 +436,15 @@ local function registerModConfig()
 
     -- Read once at install, which happens after main.lua pushes msoc.json,
     -- so the saved value is what starts up. A change made here takes effect
-    -- on the next launch. The description spells that out for the user.
-    logging:createOnOffButton({
-        label       = i18n("OcclusionForensicsWatchdog.label"),
-        description = i18n("OcclusionForensicsWatchdog.description"),
-        configKey   = "OcclusionForensicsWatchdog",
-        callback    = applyChange,
+    -- on the next launch; restartRequired makes the MCM say so on change.
+    local watchdog = debugPage:createCategory({ label = i18n("category.watchdog") })
+    watchdog:createOnOffButton({
+        label                  = i18n("OcclusionForensicsWatchdog.label"),
+        description            = i18n("OcclusionForensicsWatchdog.description"),
+        configKey              = "OcclusionForensicsWatchdog",
+        restartRequired        = true,
+        restartRequiredMessage = i18n("OcclusionForensicsWatchdog.restart"),
+        callback               = applyChange,
     })
 end
 
