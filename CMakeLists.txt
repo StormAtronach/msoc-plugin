@@ -193,8 +193,10 @@ if(MSOC_BUILD_DLL)
     set_property(TARGET msoc PROPERTY
         INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
-    # Release drops straight into the test mod's lib dir so include("msoc")
-    # finds it without manual copying.
+    # Release drops straight into the mod folder's lib dir, so include("msoc")
+    # finds it without manual copying and the folder zips as the Nexus
+    # archive. The PDB goes to the build tree for the same reason: it is
+    # 17 MB and users do not need it.
     #
     # Debug deliberately does NOT. Both configurations produce msoc.dll, so
     # sharing an output directory means a debug build silently replaces the
@@ -204,9 +206,12 @@ if(MSOC_BUILD_DLL)
     # measurement read 10.87 ms where the release build reads 7.19, which
     # looked exactly like a 50% performance regression.
     set_target_properties(msoc PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY         "${CMAKE_SOURCE_DIR}/test-mod/MWSE/lib"
+        RUNTIME_OUTPUT_DIRECTORY         "${CMAKE_SOURCE_DIR}/MSOC - Occlusion Culling for MWSE/MWSE/lib"
         RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/debug-lib"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/test-mod/MWSE/lib"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/MSOC - Occlusion Culling for MWSE/MWSE/lib"
+        PDB_OUTPUT_DIRECTORY             "${CMAKE_BINARY_DIR}/pdb"
+        PDB_OUTPUT_DIRECTORY_DEBUG       "${CMAKE_BINARY_DIR}/debug-lib"
+        PDB_OUTPUT_DIRECTORY_RELEASE     "${CMAKE_BINARY_DIR}/pdb"
         OUTPUT_NAME "msoc"
     )
 endif()

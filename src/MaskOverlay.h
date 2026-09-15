@@ -13,7 +13,7 @@
 // Both entry points read the LIVE buffer (g_msoc), so they must be called
 // after the drain, when the frame's mask is complete.
 //
-// Replaces the mwse_dumpOcclusionMask export removed in 1.6.1; the dump is now
+// Replaces the mwse_dumpOcclusionMask export removed in 1.6.0; the dump is now
 // reachable from Lua as msoc.dumpMask(path).
 
 namespace msoc::occlusion {

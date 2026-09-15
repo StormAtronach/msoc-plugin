@@ -18,8 +18,9 @@
 *.ilk
 
 # Release staging
-/test-mod/MSOC Plugin Test Version/
-/test-mod/*.7z
+/*.7z
+/*.zip
+/MSOC - Occlusion Culling for MWSE/meta.ini
 .gitignore
 
 # Perf-harness run output: raw MWSE.log / MSOC.log captures, tens of MB per

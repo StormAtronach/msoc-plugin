@@ -188,7 +188,7 @@ static uint32_t g_callDepth = 0;
 // RAII for g_callDepth. Used exclusively by CullShow_detour.
 // Unnamed namespace, not `static`: `static` cannot give a *type*
 // internal linkage, and an identically named type in another TU would
-// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+// otherwise merge. See the superseded parallel line in CHANGELOG for what that cost once.
 namespace {
 struct CallDepthGuard {
     CallDepthGuard() {
@@ -289,7 +289,7 @@ forensics::Snapshot forensics::captureSnapshot() {
 // keeps contributing occluders during the main pass.
 // Unnamed namespace, not `static`: `static` cannot give a *type*
 // internal linkage, and an identically named type in another TU would
-// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+// otherwise merge. See the superseded parallel line in CHANGELOG for what that cost once.
 namespace {
 struct PendingDisplay {
     NI::AVObject* shape;
@@ -320,7 +320,7 @@ static std::vector<PendingDisplay> g_pendingDisplays;
 // on). Reused across frames; cleared after the submit loop.
 // Unnamed namespace, not `static`: `static` cannot give a *type*
 // internal linkage, and an identically named type in another TU would
-// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+// otherwise merge. See the superseded parallel line in CHANGELOG for what that cost once.
 namespace {
 struct PendingOccluder {
     const OccluderCacheEntry* cache;
@@ -333,7 +333,7 @@ static std::vector<PendingOccluder> g_pendingOccluders;
 // consumed by phase 2.
 // Unnamed namespace, not `static`: `static` cannot give a *type*
 // internal linkage, and an identically named type in another TU would
-// otherwise merge. See CHANGELOG 1.6.0 for what that cost once.
+// otherwise merge. See the superseded parallel line in CHANGELOG for what that cost once.
 namespace {
 enum class DrainVerdict : uint8_t {
     Visible,         // VISIBLE; call display()

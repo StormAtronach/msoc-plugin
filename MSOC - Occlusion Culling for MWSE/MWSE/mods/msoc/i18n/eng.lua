@@ -142,7 +142,7 @@ return {
         .. "raster work in scenes where occluders overlap in depth. The catch: occluders can only "
         .. "be submitted after the whole scene is walked, which on multi-core setups gives up the "
         .. "overlap between walking the scene and rasterising in the background. Measured in two "
-        .. "dense cities for 1.6.1 it changed frame time by less than the noise either way, with "
+        .. "dense cities for 1.6.0 it changed frame time by less than the noise either way, with "
         .. "or without async, so there is no reason to move it unless your own numbers say so.",
 
     ["OcclusionOccluderCCWOnly.label"] = "Cull back faces (CCW only)",

@@ -50,7 +50,7 @@ public:
     static bool OcclusionEnableExterior;
     static bool OcclusionSkipTerrainOccludees;
     // 0=Off, 1=Raster. Lua side accepts bool too (true->1, false->0), and
-    // the retired value 2 (the Horizon curtain, removed in 1.6.1) reads as
+    // the retired value 2 (the Horizon curtain, removed in 1.6.0) reads as
     // Raster; see Config.cpp's parser.
     static int OcclusionAggregateTerrain;
     static unsigned int OcclusionTerrainResolution;

@@ -11,7 +11,7 @@
 --                          restart-only knobs from those statics.
 --   4. require("msoc.mcm") registers the MCM page.
 --
--- Before 1.6.1 the DLL called installPatches() from luaopen_msoc itself, at
+-- Before 1.6.0 the DLL called installPatches() from luaopen_msoc itself, at
 -- step 1, so the latch only ever saw the C++ compile-time defaults and a
 -- user-set OcclusionMaskWidth/Height in msoc.json was silently ignored.
 -- Step 3 is what fixes that.
@@ -50,7 +50,7 @@ if type(msoc.install) == "function" then
             .. "inactive this session. See MSOC.log.", tostring(err))
     end
 else
-    -- Pre-1.6.1 msoc.dll: it installed its hooks during include() above,
+    -- Pre-1.6.0 msoc.dll: it installed its hooks during include() above,
     -- before this file could push msoc.json across. Culling still works,
     -- but the restart-only knobs (mask resolution, forensics watchdog) hold
     -- the DLL's own tier defaults rather than the saved ones.

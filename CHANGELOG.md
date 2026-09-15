@@ -1,9 +1,12 @@
 # Changelog
 
-## 1.6.1 - unreleased
+## 1.6.0 - 2026-09-15
 
-Two removals and one new debug tool. The version jumps from 1.4.0 to 1.6.1 to
-line up with the number already published on Nexus.
+Three removals, one new debug tool, and a round of terrain and bookkeeping
+fixes. The MGE-XE integration ABI, CPU light culling and the Horizon terrain
+mode are gone; the live mask overlay is new; downsampled terrain is wound the
+right way again and stops at the nine active cells; the low tier now runs
+the raster at Corners resolution. Nexus lists the previous release as 1.5.
 
 - **Removed the MGE-XE integration ABI.** Through 1.4.0 the plugin published a
   double-buffered snapshot of its mask and a set of `mwse_*` `__cdecl` exports
@@ -121,7 +124,7 @@ line up with the number already published on Nexus.
   scene got. The average now includes the flush stall.
 - **AVX-512 is no longer built.** Intel's `USE_AVX512` has always defaulted to
   0, which compiled that translation unit into a stub returning null, so the
-  runtime never selected it. 1.6.1 stops compiling the file and preprocesses out
+  runtime never selected it. 1.6.0 stops compiling the file and preprocesses out
   the dispatch branch. No behaviour change; one fewer untested path, and a
   slightly smaller DLL. Recorded in `deps/msoc/NOTICE`.
 - Removed dead state and API that nothing read: the `inlineTested` counter,
@@ -146,17 +149,17 @@ line up with the number already published on Nexus.
   running at 200 fps. The one real regression left is a sparse exterior on a
   weak CPU: Vivec on four cores costs 16%, on a frame that was at 151 fps. An
   adaptive switch that turned the pass off in those scenes was prototyped three
-  times and none of the three was reliable, so 1.6.1 ships the measurements and
+  times and none of the three was reliable, so 1.6.0 ships the measurements and
   the master toggle instead of a mechanism that guesses.
 
 **Upgrading:** `main.lua` and `msoc.dll` must be updated together. A new DLL with
 an old `main.lua` loads but never installs its hooks, and says so in `MSOC.log`;
 an old DLL with a new `main.lua` works as it did before, and says so too.
 
-## 1.6.0 - superseded
+## Superseded parallel line (never released)
 
-Developed in parallel with 1.6.1 from the same commit and not carried forward.
-It hardened the MGE-XE external-occluder path that 1.6.1 removes outright, so
+Developed in parallel with 1.6.0 from the same commit and not carried forward.
+It hardened the MGE-XE external-occluder path that 1.6.0 removes outright, so
 the two could not both be kept.
 
 Its finding is worth recording even though its code is not. It root-caused a
@@ -170,10 +173,10 @@ object into an 8-byte allocation, overflowing the heap by 108 bytes on every
 frame outdoors with MGE-XE's horizon curtain on. An ODR violation is
 ill-formed-no-diagnostic-required, so no warning was ever coming.
 
-1.6.1 cannot hit it: `ExternalOccluders.cpp` is gone and one `PendingOccluder`
+1.6.0 cannot hit it: `ExternalOccluders.cpp` is gone and one `PendingOccluder`
 is left. The bug is fixed by deletion rather than by repair. The wider
 convention that line adopted, every translation-unit-local type in an unnamed
-namespace, is not in 1.6.1 and is worth adopting on its own merits.
+namespace, is not in 1.6.0 and is worth adopting on its own merits.
 
 ## 1.4.0 - 2026-07-02
 

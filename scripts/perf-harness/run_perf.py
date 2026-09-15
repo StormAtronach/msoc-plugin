@@ -76,7 +76,7 @@ HARNESS_SRC = os.path.join(REPO, "scripts", "perf-harness", "msocperf")
 MO2_ROOT = r"D:\Modlists\Morrowind75testing"
 MO2_EXE = os.path.join(MO2_ROOT, "ModOrganizer.exe")
 MO2_SHORTCUT = "moshortcut://:Morrowind"
-DEPLOY_MOD = os.path.join(MO2_ROOT, "mods", "test-mod")
+DEPLOY_MOD = os.path.join(MO2_ROOT, "mods", "MSOC - Occlusion Culling for MWSE")
 DEPLOY_HARNESS = os.path.join(DEPLOY_MOD, "MWSE", "mods", "msocperf")
 
 # MGE XE G7 keeps its configuration in TOML, served to the game root by MO2.

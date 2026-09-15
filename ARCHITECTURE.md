@@ -49,7 +49,7 @@ by *both* the core and a subsystem. `classifyOccluderProperties` is called by
 the core rasterizer and by `TerrainAggregation`; keeping it in the core would
 make `TerrainAggregation` depend back into the core (a cycle), so it lives in a
 leaf TU below both. `LiveQuery` is there for the same reason historically: its
-second caller was `LightCulling`, removed in 1.6.1. It is now a leaf with one
+second caller was `LightCulling`, removed in 1.6.0. It is now a leaf with one
 caller, the core drain, and folding it back into the core is a reasonable
 future tidy.
 
@@ -83,7 +83,7 @@ each a single `extern` instance reached through the seam. Grouping rationale:
 - **FrameDiag** - the remaining per-frame + session diagnostic bookkeeping.
 - **OcclusionCaches** - the five per-cell caches (`land` / `drain` /
   `terrainMembership` / `occluder` / `occludeeBox`) + their hit/miss counters +
-  `wipeForCellChange()`. A sixth, `lightCull`, went with light culling in 1.6.1.
+  `wipeForCellChange()`. A sixth, `lightCull`, went with light culling in 1.6.0.
 
 ## Per-frame data flow
 
@@ -120,11 +120,11 @@ points (`maskOverlayTexture`, `maskResolution`, `dumpMask`, `logMark`,
 classifies the CPU tier but installs nothing. `main.lua` then pushes `msoc.json`
 across with `configure()` and only afterwards calls `install()`, which is what
 latches the restart-only knobs (mask resolution, the forensics watchdog). Before
-1.6.1 the DLL installed itself during `include()`, so those knobs latched
+1.6.0 the DLL installed itself during `include()`, so those knobs latched
 compile-time defaults and a saved mask size was discarded in silence. The tier
 table that feeds this lives in `config.lua` and nowhere else; C++ carries no
 copy. The DLL exports no occlusion C API; through 1.4.0 it exported
-`mwse_*` thunks for MGE-XE, which never shipped a consumer, and 1.6.1 removed
+`mwse_*` thunks for MGE-XE, which never shipped a consumer, and 1.6.0 removed
 them along with the published snapshot they served.
 
 ## Testing

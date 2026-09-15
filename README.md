@@ -10,7 +10,7 @@ on geometry the player would never have seen.
 The plugin runs standalone — no extra mods required beyond MWSE, and
 nothing else has to know it is there.
 
-## What's new in 1.6.1
+## What's new in 1.6.0
 
 - **The MGE-XE integration surface is gone.** The plugin used to publish a
   double-buffered copy of its mask plus a set of `mwse_*` C exports so
@@ -57,7 +57,7 @@ applied automatically. The MCM lets you override if needed.
 - **Windows 8 or newer** (worker-thread parking uses `WaitOnAddress`).
 - **CPU** with at least SSE4.1. The rasterizer uses AVX2 where available and
   SSE4.1 otherwise. (Intel's AVX-512 path is not built: it never selected at
-  runtime, and 1.6.1 stopped compiling the dead translation unit.) A fallback
+  runtime, and 1.6.0 stopped compiling the dead translation unit.) A fallback
   below SSE4.1 exists but isn't recommended.
 - No Visual C++ redistributable required — the runtime is linked in.
 
@@ -78,7 +78,7 @@ All three occluded the same number of objects at that site. The async modes
 shift the rasterization onto worker cores, so the visible main-thread cost
 collapses; **Async Raster at Half** is the default on the mid- and high-tier
 presets. The low-tier (no-async) preset runs **Raster at Corners**. (A 1D
-"Horizon" silhouette-curtain mode existed until 1.6.1; measured properly it
+"Horizon" silhouette-curtain mode existed until 1.6.0; measured properly it
 cost four to five times the synchronous raster at equal resolution and
 occluded less, so it was removed.)
 
@@ -92,7 +92,7 @@ The cost above is close to constant. What the plugin returns is not: it
 depends entirely on how much of the view is hidden behind something else. So
 the same build is a large win in one place and a small loss in another.
 
-Measured for 1.6.1 across four exterior sites, culler off against culler on:
+Measured for 1.6.0 across four exterior sites, culler off against culler on:
 
 | site | cull rate | result |
 |------|-----------|--------|
@@ -155,17 +155,20 @@ necessary NI teardown.
 
 ## Installation
 
-Drop the contents of the release archive into your Morrowind `Data Files`
-directory:
+The release archive is the repository's `MSOC - Occlusion Culling for MWSE`
+folder, zipped. Drop its contents into your Morrowind `Data Files` directory:
 
 ```text
 Data Files/MWSE/lib/msoc.dll
 Data Files/MWSE/mods/msoc/main.lua
 Data Files/MWSE/mods/msoc/config.lua
 Data Files/MWSE/mods/msoc/mcm.lua
+Data Files/MWSE/mods/msoc/overlay.lua
+Data Files/MWSE/mods/msoc/i18n/eng.lua
 ```
 
-A mod manager works too — both halves (`MWSE/lib/msoc.dll` and
+(plus `LICENSE`, `LICENSE-Apache-2.0.txt` and `NOTICE`, which do nothing in
+game). A mod manager works too — both halves (`MWSE/lib/msoc.dll` and
 `MWSE/mods/msoc/`) need to land under `Data Files/`.
 
 After install, launch Morrowind. The plugin probes hardware on first run and
@@ -229,7 +232,7 @@ sudden camera reveals) so the per-frame cost stays bounded.
 
 - **MGE-XE versions:** any of them, including none. Up to 1.4.0 the plugin
   published its mask so MGE-XE could cull distant statics against it; that
-  contract was removed in 1.6.1 because no released MGE-XE ever used it.
+  contract was removed in 1.6.0 because no released MGE-XE ever used it.
   The two now share nothing but the frame, so the plugin neither requires a
   particular MGE-XE build nor cares whether one is installed.
 - **Other MWSE mods:** the plugin detours Morrowind's `cullShow` — the
@@ -250,7 +253,8 @@ cmake --preset win32-release
 cmake --build --preset win32-release
 ```
 
-After build, `msoc.dll` lands in `test-mod/MWSE/lib/msoc.dll`.
+After build, `msoc.dll` lands in `MSOC - Occlusion Culling for MWSE/MWSE/lib/`,
+which is the folder that ships (the PDB goes to `build/<preset>/pdb/`).
 
 If CMake can't find LuaJIT, set `MWSE_ROOT` to your MWSE checkout's inner
 source dir (the one containing `deps/LuaJIT/`):

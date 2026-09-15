@@ -19,7 +19,7 @@ cmake --preset win32-release
 ```
 
 (`win32-debug` is the debug equivalent.) Output lands at
-`test-mod\MWSE\lib\msoc.dll` via the CMake `RUNTIME_OUTPUT_DIRECTORY`
+`MSOC - Occlusion Culling for MWSE\MWSE\lib\msoc.dll` via the CMake `RUNTIME_OUTPUT_DIRECTORY`
 rule — copy it into your Morrowind install at
 `Data Files\MWSE\lib\msoc.dll` to test.
 
@@ -29,7 +29,7 @@ The plugin compiles against MWSE engine headers. **`CMakeLists.txt`
 defaults `MWSE_ROOT` to the vendored snapshot at `deps/mwse-upstream/`.**
 This is the safe default and should build cleanly out of the box.
 
-It is a submodule, not a frozen snapshot. The 1.6.1 commit moves the recorded
+It is a submodule, not a frozen snapshot. The 1.6.0 commit moves the recorded
 pointer forward to the MWSE commit this release was built and verified against,
 so `git submodule update --init` gives you exactly that. Two things to know:
 

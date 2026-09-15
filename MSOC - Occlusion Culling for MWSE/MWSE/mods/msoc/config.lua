@@ -23,7 +23,7 @@ local default_config = {
     -- resolution below: 0=Full, 1=Half, 2=Corners. The low tier sets Corners,
     -- which at a fifth of Half's synchronous cost occludes about the same.
     -- (A value of 2 here used to select a 1D "Horizon" silhouette curtain;
-    -- it was removed in 1.6.1 after measuring 4-5x the cost of the raster at
+    -- it was removed in 1.6.0 after measuring 4-5x the cost of the raster at
     -- equal resolution with less occlusion, and now reads as Raster.)
     OcclusionAggregateTerrain           = 1,
     OcclusionTerrainResolution          = 1,
@@ -64,7 +64,7 @@ local default_config = {
 
     -- Mask resolution. Applied at launch, changed on restart: main.lua
     -- pushes this table across before calling msoc.install(), which latches
-    -- it into kMsocWidth/Height for the session. (Before 1.6.1 install ran
+    -- it into kMsocWidth/Height for the session. (Before 1.6.0 install ran
     -- first and a saved value here never took effect at all.)
     -- Tier-overridden below (see applyTierDefaults). MOC requires
     -- width%8==0 and height%4==0 (asserted in C++); plugin clamps to
@@ -93,7 +93,7 @@ local default_config = {
     OcclusionLogCellCross               = false,
 
     -- Freeze-forensics watchdog. Applied at launch, changed on restart:
-    -- the native side reads it at install, which since 1.6.1 runs after this
+    -- the native side reads it at install, which since 1.6.0 runs after this
     -- table is pushed across. An MCM edit persists to msoc.json and takes
     -- effect on the next launch.
     OcclusionForensicsWatchdog          = false,
@@ -114,7 +114,7 @@ local default_config = {
 -- consumer existed — the plugin cannot install itself without main.lua — and
 -- the duplicate was a standing hazard: whichever ran last won, silently, and
 -- the two drifted (OcclusionSkipTerrainOccludees was tier-sensitive in C++ and
--- absent here). 1.6.1 deleted the C++ copy.
+-- absent here). 1.6.0 deleted the C++ copy.
 --
 -- Order matters. mwse.loadConfig fills any field missing from the user's saved
 -- JSON out of default_config, so the mutation below has to happen BEFORE that
@@ -198,7 +198,7 @@ local config = mwse.loadConfig("msoc", default_config) ---@cast config table
 config.confPath = "msoc"
 config.default  = default_config
 
--- 1.6.1 removed the Horizon terrain mode (value 2). A saved 2 would show as
+-- 1.6.0 removed the Horizon terrain mode (value 2). A saved 2 would show as
 -- no selection in the dropdown; the native side already reads it as Raster.
 if config.OcclusionAggregateTerrain == 2 then
     config.OcclusionAggregateTerrain = 1
@@ -233,13 +233,13 @@ local kTierMigratedKeys = {
     "OcclusionMaskHeight",
     "OcclusionRasterizeBudgetUs",
     "OcclusionClassifyBudgetUs",
-    -- 1.6.1: was tier-sensitive in C++ only, so a saved JSON written before
+    -- 1.6.0: was tier-sensitive in C++ only, so a saved JSON written before
     -- this release holds the flat Lua default rather than the tier's value.
     "OcclusionSkipTerrainOccludees",
-    -- 1.6.1: mask size now actually reaches the latch (install runs after
+    -- 1.6.0: mask size now actually reaches the latch (install runs after
     -- configure), so a stale saved value would take effect for the first time.
     "OcclusionAggregateTerrain",
-    -- 1.6.1: the low tier now picks its terrain resolution (Corners).
+    -- 1.6.0: the low tier now picks its terrain resolution (Corners).
     "OcclusionTerrainResolution",
 }
 
@@ -249,9 +249,9 @@ local kTierMigratedKeys = {
 -- forever — harmless, but clutters the file.
 local kRetiredKeys = {
     "OcclusionDrainBudgetUs", -- 0.0.10: renamed to OcclusionClassifyBudgetUs
-    -- 1.6.1: CPU light culling removed. The feature tested net-negative in
+    -- 1.6.0: CPU light culling removed. The feature tested net-negative in
     -- 1.1.0 (~12% FPS regression in a Vivec canton at night) and was left in
-    -- as a json-only knob; 1.6.1 drops the hook, the cache and both keys.
+    -- as a json-only knob; 1.6.0 drops the hook, the cache and both keys.
     "OcclusionCullLights",
     "OcclusionLightCullHysteresisFrames",
 }
